@@ -266,7 +266,14 @@ This is an evidence ledger, not a claim of full compatibility.
   Ninja's reserved-zero convention. Batched stat-cache groups treat a missing
   or non-directory parent as authoritative evidence that all requested children
   are absent, avoiding redundant per-child probes while retaining fallback for
-  permission and other enumeration failures.
+  permission and other enumeration failures. All 16 upstream disk-interface
+  cases are mapped across direct filesystem, build-planning, manifest-read, and
+  clean-tool tests. This covers missing, malformed, ordinary, directory,
+  symlink, cached, and long-path stats; recursive directory creation; file and
+  directory removal; and the simple, two-step, tree, and missing-middle scan
+  shapes. Windows cached-stat failures retain Ninja's `FindFirstFileExA`
+  diagnostic when invoked as `ninja`, while native Knight reports the direct
+  Unicode stat operation instead.
 - `graph` emits Ninja-shaped Graphviz output with implicit root selection,
   direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
   dotted order-only edges. It loads only dyndeps reachable from the displayed
@@ -341,9 +348,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 86
-  library, 6 CLI, and 125 differential tests; Linux-under-WSL passes 81 library,
-  5 CLI, and 100 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 90
+  library, 6 CLI, and 128 differential tests; Linux-under-WSL passes 85 library,
+  5 CLI, and 102 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

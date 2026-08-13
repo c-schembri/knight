@@ -25,7 +25,7 @@ Status meanings:
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |
 | `depfile_parser_test` | 29 | Mapped | `depfile::tests::upstream_depfile_parser_corpus` |
 | `deps_log_test` | 10 | Mapped | Round-trip, 100K inputs, deduplication, live recompaction, headers, truncation, reverse lookup, and malformed-record recovery |
-| `disk_interface_test` | 16 | Partial | Missing/error distinctions, stat-cache behavior, long paths, and timestamps |
+| `disk_interface_test` | 16 | Mapped | Missing/error distinctions, files/directories/symlinks, Windows cache and long paths, reads, recursive directory creation, removal, and four dependency-scan shapes |
 | `dyndep_parser_test` | 42 | Mapped | `dyndep::tests::accepts_upstream_version_and_layout_corpus` and rejection corpus |
 | `edit_distance_test` | 4 | Mapped | `manifest::tests::upstream_edit_distance_corpus` |
 | `elide_middle_test` | 3 | Mapped | `build::tests::upstream_elide_middle_corpus` |

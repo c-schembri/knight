@@ -430,6 +430,7 @@ struct StatCache<'a> {
     mtimes: HashMap<&'a str, Option<u128>>,
     dynamic: HashMap<String, Option<u128>>,
     may_have_missing_declared_sources: bool,
+    ninja_stat_cache_diagnostics: bool,
 }
 
 impl<'a> StatCache<'a> {
@@ -471,7 +472,7 @@ impl<'a> StatCache<'a> {
         for (directory, paths) in groups {
             if paths.len() < 8 {
                 for path in paths {
-                    mtimes.insert(path, checked_modified_ns(Path::new(path))?);
+                    mtimes.insert(path, checked_modified_ns_cached(Path::new(path), true)?);
                 }
                 continue;
             }
@@ -485,7 +486,7 @@ impl<'a> StatCache<'a> {
                 }
                 DirectoryMtimes::Unavailable => {
                     for path in paths {
-                        mtimes.insert(path, checked_modified_ns(Path::new(path))?);
+                        mtimes.insert(path, checked_modified_ns_cached(Path::new(path), true)?);
                     }
                     continue;
                 }
@@ -500,7 +501,7 @@ impl<'a> StatCache<'a> {
                 #[cfg(not(windows))]
                 let mtime = match entry_mtime {
                     Some(mtime) => Some(mtime),
-                    None => checked_modified_ns(path_ref)?,
+                    None => checked_modified_ns_cached(path_ref, true)?,
                 };
                 mtimes.insert(path, mtime);
             }
@@ -509,7 +510,10 @@ impl<'a> StatCache<'a> {
         for edge_id in closure {
             for path in &discovered.inputs[*edge_id] {
                 if !mtimes.contains_key(path.as_str()) && !dynamic.contains_key(path) {
-                    dynamic.insert(path.clone(), checked_modified_ns(Path::new(path))?);
+                    dynamic.insert(
+                        path.clone(),
+                        checked_modified_ns_cached(Path::new(path), true)?,
+                    );
                 }
             }
         }
@@ -520,6 +524,7 @@ impl<'a> StatCache<'a> {
             mtimes,
             dynamic,
             may_have_missing_declared_sources,
+            ninja_stat_cache_diagnostics: true,
         })
     }
 
@@ -542,7 +547,7 @@ impl<'a> StatCache<'a> {
         if let Some(mtime) = self.dynamic.get(path) {
             return Ok(*mtime);
         }
-        let mtime = checked_modified_ns(Path::new(path))?;
+        let mtime = checked_modified_ns_cached(Path::new(path), self.ninja_stat_cache_diagnostics)?;
         self.dynamic.insert(path.to_owned(), mtime);
         Ok(mtime)
     }
@@ -4898,6 +4903,11 @@ fn checked_modified_ns(path: &Path) -> Result<Option<u128>, String> {
 }
 
 #[cfg(not(windows))]
+fn checked_modified_ns_cached(path: &Path, _enabled: bool) -> Result<Option<u128>, String> {
+    checked_modified_ns(path)
+}
+
+#[cfg(not(windows))]
 fn metadata_modified(metadata: &fs::Metadata) -> Option<u128> {
     metadata
         .modified()
@@ -4909,7 +4919,15 @@ fn metadata_modified(metadata: &fs::Metadata) -> Option<u128> {
 
 #[cfg(windows)]
 fn modified_ns(path: &Path) -> Option<u128> {
+    windows_modified_ns(path).ok().flatten()
+}
+
+#[cfg(windows)]
+fn windows_modified_ns(path: &Path) -> io::Result<Option<u128>> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileAttributesExW, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA,
     };
@@ -4930,18 +4948,50 @@ fn modified_ns(path: &Path) -> Option<u128> {
         )
     };
     if ok == 0 {
-        return None;
+        // SAFETY: GetLastError reads the calling thread's last-error slot.
+        let error = unsafe { GetLastError() };
+        return if matches!(
+            error,
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_DIRECTORY
+        ) {
+            Ok(None)
+        } else {
+            Err(io::Error::from_raw_os_error(error as i32))
+        };
     }
     // SAFETY: a successful call initialized the complete structure.
     let data = unsafe { data.assume_init() };
     let filetime = ((data.ftLastWriteTime.dwHighDateTime as u64) << 32)
         | data.ftLastWriteTime.dwLowDateTime as u64;
-    Some(filetime.saturating_sub(126_227_704_000_000_000) as u128)
+    Ok(Some(
+        filetime.saturating_sub(126_227_704_000_000_000) as u128
+    ))
 }
 
 #[cfg(windows)]
 fn checked_modified_ns(path: &Path) -> Result<Option<u128>, String> {
-    Ok(modified_ns(path))
+    checked_modified_ns_cached(path, false)
+}
+
+#[cfg(windows)]
+fn checked_modified_ns_cached(path: &Path, cache_enabled: bool) -> Result<Option<u128>, String> {
+    windows_modified_ns(path).map_err(|error| {
+        let message = error.to_string();
+        let message = message
+            .split_once(" (os error ")
+            .map_or(message.as_str(), |(message, _)| message);
+        if cache_enabled && program_name() == "ninja" {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            // Ninja embeds a CRLF before stderr adds its own newline; its
+            // Windows text-mode stream expands that embedded LF once more.
+            format!("FindFirstFileExA({}): {message}\r\r\n", directory.display())
+        } else {
+            format!("stat({}): {message}", path.display())
+        }
+    })
 }
 
 fn finish_command(
@@ -5517,6 +5567,211 @@ mod tests {
         let file = temp.path().join("file");
         fs::write(&file, "not a directory").unwrap();
         assert!(matches!(directory_mtimes(&file), DirectoryMtimes::Missing));
+    }
+
+    #[test]
+    fn upstream_disk_interface_stat_corpus() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("nosuchfile");
+        assert_eq!(checked_modified_ns(&missing).unwrap(), None);
+        assert_eq!(
+            checked_modified_ns(&temp.path().join("nosuchdir/nosuchfile")).unwrap(),
+            None
+        );
+
+        let not_a_directory = temp.path().join("notadir");
+        fs::write(&not_a_directory, []).unwrap();
+        assert_eq!(
+            checked_modified_ns(&not_a_directory.join("nosuchfile")).unwrap(),
+            None
+        );
+        assert!(matches!(
+            directory_mtimes(&not_a_directory),
+            DirectoryMtimes::Missing
+        ));
+
+        #[cfg(windows)]
+        {
+            let bad_path = Path::new(r"cc:\foo");
+            assert!(checked_modified_ns(bad_path).is_err());
+            assert!(checked_modified_ns(bad_path).is_err());
+        }
+        #[cfg(not(windows))]
+        assert!(checked_modified_ns(&temp.path().join("x".repeat(512))).is_err());
+
+        let file = temp.path().join("file");
+        fs::write(&file, []).unwrap();
+        let file_mtime = checked_modified_ns(&file).unwrap().unwrap();
+        assert!(file_mtime > 1);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            use windows_sys::Win32::Storage::FileSystem::{
+                CreateSymbolicLinkW, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+            };
+
+            let link = temp.path().join("fileSymlink");
+            let link = link
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let target = file
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            // SAFETY: both path buffers are valid and NUL-terminated.
+            let created = unsafe {
+                CreateSymbolicLinkW(
+                    link.as_ptr(),
+                    target.as_ptr(),
+                    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+                )
+            };
+            if created {
+                assert_eq!(
+                    checked_modified_ns(&temp.path().join("fileSymlink")).unwrap(),
+                    Some(file_mtime)
+                );
+            } else {
+                eprintln!("skipped symlink assertion: Windows developer mode is unavailable");
+            }
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file, temp.path().join("fileSymlink")).unwrap();
+            assert_eq!(
+                checked_modified_ns(&temp.path().join("fileSymlink")).unwrap(),
+                Some(file_mtime)
+            );
+        }
+
+        let subdirectory = temp.path().join("subdir");
+        let nested = subdirectory.join("subsubdir");
+        fs::create_dir_all(&nested).unwrap();
+        for directory in [temp.path(), subdirectory.as_path(), nested.as_path()] {
+            assert!(checked_modified_ns(directory).unwrap().unwrap() > 1);
+        }
+        assert_eq!(
+            checked_modified_ns(&subdirectory).unwrap(),
+            checked_modified_ns(&nested.join("..")).unwrap()
+        );
+        assert_eq!(
+            checked_modified_ns(&nested).unwrap(),
+            checked_modified_ns(&nested.join(".")).unwrap()
+        );
+
+        #[cfg(windows)]
+        {
+            for name in [
+                "file1", "fiLE2", "file3", "file4", "file5", "file6", "file7", "file8",
+            ] {
+                fs::write(temp.path().join(name), []).unwrap();
+            }
+            let DirectoryMtimes::Entries(entries) = directory_mtimes(temp.path()) else {
+                panic!("temporary directory should be enumerable");
+            };
+            assert!(entries.contains_key(&directory_entry_key("FILE1".as_ref())));
+            assert!(entries.contains_key(&directory_entry_key("file2".as_ref())));
+        }
+    }
+
+    #[test]
+    fn upstream_disk_interface_make_dirs_corpus() {
+        let temp = tempdir().unwrap();
+        let forward = temp.path().join("path/with/double//slash/a_file");
+        create_parent_directory(&forward).unwrap();
+        fs::write(&forward, []).unwrap();
+
+        #[cfg(windows)]
+        {
+            let backward = temp.path().join(r"another\with\back\\slashes\a_file");
+            create_parent_directory(&backward).unwrap();
+            fs::write(backward, []).unwrap();
+        }
+    }
+
+    #[test]
+    fn upstream_disk_interface_dependency_scan_corpus() {
+        let _lock = build_test_lock();
+        let temp = tempdir().unwrap();
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let cases = [
+            ("build out: cat in\n", vec![true]),
+            ("build out: cat mid\nbuild mid: cat in\n", vec![true, true]),
+            (
+                concat!(
+                    "build out: cat mid1 mid2\n",
+                    "build mid1: cat in11 in12\n",
+                    "build mid2: cat in21 in22\n",
+                ),
+                vec![true, true, true],
+            ),
+        ];
+        for (edges, expected) in cases {
+            let manifest = parse_manifest(
+                &format!("rule cat\n  command = unused\n{edges}default out\n"),
+                "build.ninja",
+            )
+            .unwrap();
+            let outputs = output_map(&manifest);
+            let discovered = DiscoveredDeps::load(&manifest);
+            let targets = select_targets(&manifest, &[], &outputs, &discovered.log).unwrap();
+            let closure =
+                dependency_closure(&manifest, &targets, &outputs, &discovered, false).unwrap();
+            let cache = StatCache::preload(&manifest, &closure, &outputs, &discovered, true, false)
+                .unwrap();
+            assert_eq!(
+                initially_dirty_edges(
+                    &manifest,
+                    &closure,
+                    &outputs,
+                    &BuildLog::default(),
+                    &discovered,
+                    &cache,
+                    false,
+                ),
+                expected
+            );
+        }
+
+        fs::write("in", []).unwrap();
+        fs::write("out", []).unwrap();
+        let manifest = parse_manifest(
+            concat!(
+                "rule cat\n  command = unused\n",
+                "build out: cat mid\n",
+                "build mid: cat in\n",
+                "default out\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        let outputs = output_map(&manifest);
+        let discovered = DiscoveredDeps::load(&manifest);
+        let targets = select_targets(&manifest, &[], &outputs, &discovered.log).unwrap();
+        let closure =
+            dependency_closure(&manifest, &targets, &outputs, &discovered, false).unwrap();
+        let cache =
+            StatCache::preload(&manifest, &closure, &outputs, &discovered, true, false).unwrap();
+        assert_eq!(
+            initially_dirty_edges(
+                &manifest,
+                &closure,
+                &outputs,
+                &BuildLog::default(),
+                &discovered,
+                &cache,
+                false,
+            ),
+            [true, true]
+        );
+
+        std::env::set_current_dir(old).unwrap();
     }
 
     #[test]

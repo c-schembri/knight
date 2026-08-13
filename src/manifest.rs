@@ -2269,6 +2269,24 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn upstream_disk_interface_read_file_case() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("foobar");
+        let error = load_manifest(&missing).unwrap_err();
+        assert!(error.message.starts_with("loading manifest: "));
+
+        let manifest = temp.path().join("testfile");
+        fs::write(
+            &manifest,
+            "value = test content\nbuild ok: phony\ndefault ok\n",
+        )
+        .unwrap();
+        let parsed = load_manifest(&manifest).unwrap();
+        assert_eq!(parsed.variables["value"], "test content");
+        assert_eq!(parsed.edges[0].explicit_outputs, ["ok"]);
+    }
+
+    #[test]
     fn detects_include_cycles_through_hard_links() {
         let temp = tempdir().unwrap();
         let manifest = temp.path().join("build.ninja");

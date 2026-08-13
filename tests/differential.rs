@@ -11,6 +11,13 @@ fn run(executable: &Path, directory: &Path, arguments: &[&str]) -> Output {
         .unwrap()
 }
 
+fn install_ninja_alias(knight: &Path, alias: &Path) {
+    #[cfg(windows)]
+    fs::copy(knight, alias).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(knight, alias).unwrap();
+}
+
 #[test]
 fn ninja_and_knight_exchange_build_logs() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
@@ -59,6 +66,115 @@ fn ninja_and_knight_exchange_build_logs() {
         String::from_utf8_lossy(&ninja_noop.stderr)
     );
     assert!(String::from_utf8_lossy(&ninja_noop.stdout).contains("no work"));
+}
+
+#[test]
+fn upstream_disk_interface_bad_stat_path_matches_ninja_alias() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    #[cfg(windows)]
+    let input = r"cc$:\foo";
+    #[cfg(not(windows))]
+    let input = "x".repeat(512);
+    fs::write(
+        temp.path().join("build.ninja"),
+        format!("rule echo\n  command = echo unused\nbuild out: echo {input}\ndefault out\n"),
+    )
+    .unwrap();
+    let alias = temp
+        .path()
+        .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+    install_ninja_alias(knight, &alias);
+
+    let expected = run(Path::new(&ninja), temp.path(), &["-n"]);
+    let actual = run(&alias, temp.path(), &["-n"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
+fn upstream_disk_interface_remove_file_and_directory_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let mut expected = None;
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule generate\n  command = echo unused\n",
+                "build file-to-remove directory-to-remove: generate\n",
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("file-to-remove"), []).unwrap();
+        fs::create_dir(temp.path().join("directory-to-remove")).unwrap();
+        #[cfg(windows)]
+        {
+            let mut permissions = fs::metadata(temp.path().join("file-to-remove"))
+                .unwrap()
+                .permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(temp.path().join("file-to-remove"), permissions).unwrap();
+        }
+
+        let first = run(executable, temp.path(), &["-t", "clean"]);
+        let second = run(executable, temp.path(), &["-t", "clean"]);
+        let result = (
+            first.status.code(),
+            first.stdout,
+            first.stderr,
+            second.status.code(),
+            second.stdout,
+            second.stderr,
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert!(!temp.path().join("file-to-remove").exists());
+        assert!(!temp.path().join("directory-to-remove").exists());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn upstream_disk_interface_long_path_stat_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let mut source = std::path::PathBuf::from("source");
+    for index in 0..5 {
+        source.push(format!("component-{index}-{}", "x".repeat(48)));
+    }
+    source.push("input");
+    fs::create_dir_all(temp.path().join(source.parent().unwrap())).unwrap();
+    fs::write(temp.path().join(&source), []).unwrap();
+    let source = source.to_string_lossy().replace('\\', "/");
+    assert!(temp.path().join(&source).as_os_str().len() > 260);
+    fs::write(
+        temp.path().join("build.ninja"),
+        format!("rule echo\n  command = echo unused\nbuild out: echo {source}\ndefault out\n"),
+    )
+    .unwrap();
+
+    let expected = run(Path::new(&ninja), temp.path(), &["-n"]);
+    let actual = run(knight, temp.path(), &["-n"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 }
 
 #[cfg(windows)]
@@ -941,7 +1057,7 @@ fn commands_that_expand_empty_match_ninjas_platform_behavior() {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join("build.ninja"), manifest).unwrap();
         let alias = temp.path().join("ninja.exe");
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         let expected = run(Path::new(&ninja), temp.path(), &[]);
         let actual = run(&alias, temp.path(), &[]);
         assert_eq!(actual.status.code(), expected.status.code());
@@ -966,7 +1082,7 @@ fn subprocess_command_start_failures_match_ninja_alias() {
         let alias = temp
             .path()
             .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         fs::write(
             temp.path().join("build.ninja"),
             format!("rule fail\n  command = {command}\nbuild out: fail\ndefault out\n"),
@@ -991,7 +1107,7 @@ fn subprocess_child_signal_statuses_match_ninja() {
     for signal in ["INT", "TERM", "HUP"] {
         let temp = tempdir().unwrap();
         let alias = temp.path().join("ninja");
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         fs::write(
             temp.path().join("build.ninja"),
             format!(
@@ -1019,7 +1135,7 @@ fn subprocess_parent_signal_statuses_match_ninja() {
         let expected_dir = tempdir().unwrap();
         let actual_dir = tempdir().unwrap();
         let alias = actual_dir.path().join("ninja");
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         let manifest = format!(
             "rule signal\n  command = kill -{signal} $$PPID; sleep 1\nbuild out: signal\ndefault out\n"
         );
@@ -2043,7 +2159,7 @@ fn dependency_type_configuration_matches_ninjas_build_phases() {
     let alias = temp
         .path()
         .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
 
     let unknown = temp.path().join("unknown");
     fs::create_dir(&unknown).unwrap();
@@ -3015,10 +3131,7 @@ fn upstream_missing_dependency_scanner_corpus_matches_ninja_alias() {
                 .path()
                 .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
             let executable = if candidate == knight {
-                #[cfg(windows)]
-                fs::copy(knight, &alias).unwrap();
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(knight, &alias).unwrap();
+                install_ninja_alias(knight, &alias);
                 alias.as_path()
             } else {
                 candidate
@@ -3701,7 +3814,7 @@ fn manifest_diagnostics_match_ninja_when_invoked_as_ninja() {
         let alias = temp
             .path()
             .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         let arguments = ["-t", "targets", "all"];
         let expected = run(Path::new(&ninja), temp.path(), &arguments);
         let actual = run(&alias, temp.path(), &arguments);
@@ -3739,7 +3852,7 @@ fn included_manifest_diagnostics_match_ninja_without_sacrificing_cycle_detection
         let alias = temp
             .path()
             .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         let arguments = ["-t", "targets", "all"];
         let expected = run(Path::new(&ninja), temp.path(), &arguments);
         let actual = run(&alias, temp.path(), &arguments);
@@ -3765,7 +3878,7 @@ fn included_manifest_diagnostics_match_ninja_without_sacrificing_cycle_detection
         let alias = temp
             .path()
             .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-        fs::copy(knight, &alias).unwrap();
+        install_ninja_alias(knight, &alias);
         let mut arguments = arguments;
         arguments.extend(["-t", "targets", "all"]);
         let expected = run(Path::new(&ninja), temp.path(), &arguments);
@@ -3926,7 +4039,7 @@ fn dyndep_parser_and_lexer_corpus_matches_ninja_byte_for_byte() {
     let alias = temp
         .path()
         .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
     fs::write(
         temp.path().join("build.ninja"),
         concat!(
@@ -4274,10 +4387,7 @@ fn deps_log_bad_tail_recovery_matches_ninja_alias() {
             .path()
             .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
         let executable = if executable == knight {
-            #[cfg(windows)]
-            fs::copy(knight, &alias).unwrap();
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(knight, &alias).unwrap();
+            install_ninja_alias(knight, &alias);
             alias.as_path()
         } else {
             executable
@@ -4721,7 +4831,7 @@ fn posixly_correct_stops_option_permutation_like_ninja() {
     let alias = temp
         .path()
         .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
     fs::write(
         temp.path().join("build.ninja"),
         concat!(
@@ -5008,7 +5118,7 @@ fn post_command_stat_failures_stop_builds_like_ninja() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let root = tempdir().unwrap();
     let alias = root.path().join("ninja");
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
 
     for (name, bindings, depfile_command) in [
         (
@@ -5232,7 +5342,7 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     let alias = temp
         .path()
         .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
     fs::create_dir(temp.path().join("project")).unwrap();
     fs::write(
         temp.path().join("project/build.ninja"),
@@ -5337,7 +5447,7 @@ fn invocation_as_ninja_matches_jobserver_makeflags_diagnostics() {
     let alias = temp
         .path()
         .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
-    fs::copy(knight, &alias).unwrap();
+    install_ninja_alias(knight, &alias);
     fs::write(
         temp.path().join("build.ninja"),
         "build all: phony\ndefault all\n",
