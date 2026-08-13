@@ -2439,21 +2439,46 @@ fn run_build_prepared<'a>(
                 .dry_run
                 .then(|| dry_dependency_configuration_error(manifest, edge))
                 .flatten();
-            let evaluated = evaluate_edge(
-                edge_id,
-                edge,
-                &mut EvaluationContext {
-                    manifest,
-                    output_map: &output_map,
-                    build_log: &build_log,
-                    stat_cache: &mut stat_cache,
-                    discovered: &discovered,
-                    ran: &ran,
-                    restat_cleaned_outputs: &restat_cleaned_outputs,
-                },
-                &mut command_buffer,
-                !(options.dry_run && options.quiet) || dry_dependency_error.is_some(),
-            )?;
+            let precomputed_dirty = if options.dry_run
+                && options.quiet
+                && !options.explain
+                && dry_dependency_error.is_none()
+                && discovered.errors[edge_id].is_none()
+            {
+                initially_dirty.as_ref().map(|dirty| dirty[edge_id])
+            } else {
+                None
+            };
+            let evaluated = if let Some(dirty) = precomputed_dirty {
+                EvaluatedEdge {
+                    dirty,
+                    reason: String::new(),
+                    command: String::new(),
+                    log_command: String::new(),
+                    description: String::new(),
+                    pool: None,
+                    rspfile: None,
+                    rspfile_content: None,
+                    newest_input: 0,
+                }
+            } else {
+                evaluate_edge(
+                    edge_id,
+                    edge,
+                    &mut EvaluationContext {
+                        manifest,
+                        output_map: &output_map,
+                        build_log: &build_log,
+                        stat_cache: &mut stat_cache,
+                        discovered: &discovered,
+                        ran: &ran,
+                        restat_cleaned_outputs: &restat_cleaned_outputs,
+                    },
+                    &mut command_buffer,
+                    !(options.dry_run && options.quiet && !options.explain)
+                        || dry_dependency_error.is_some(),
+                )?
+            };
             if !evaluated.dirty {
                 outcome.edges_clean += 1;
                 if initially_dirty.as_ref().is_none_or(|dirty| dirty[edge_id])
@@ -3107,8 +3132,8 @@ fn initially_dirty_edges(
     stat_cache: &StatCache<'_>,
     track_phony: bool,
 ) -> Vec<bool> {
-    let mut dirty = vec![false; manifest.edges.len()];
     let mut stat_cache = stat_cache.clone();
+    let mut dirty = vec![false; manifest.edges.len()];
     let mut command_buffer = String::new();
     let restat_cleaned_outputs = HashSet::new();
     for &edge_id in closure {
@@ -4341,12 +4366,6 @@ fn evaluate_edge(
     if let Some(error) = &context.discovered.errors[edge_id] {
         return Err(error.clone());
     }
-    let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
-    let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
-    let use_restat = restat
-        && edge
-            .outputs()
-            .all(|output| context.build_log.has_entry(output));
     let mut dirty = false;
     let mut reason = String::new();
     let mut oldest_output = u128::MAX;
@@ -4356,10 +4375,31 @@ fn evaluate_edge(
             oldest_output = oldest_output.min(mtime);
         } else {
             dirty = true;
-            reason = format!("output {output} doesn't exist");
+            if materialize_dirty_command {
+                reason = format!("output {output} doesn't exist");
+            }
             break;
         }
     }
+    if dirty && !materialize_dirty_command {
+        return Ok(EvaluatedEdge {
+            dirty: true,
+            reason,
+            command: String::new(),
+            log_command: String::new(),
+            description: String::new(),
+            pool: None,
+            rspfile: None,
+            rspfile_content: None,
+            newest_input: 0,
+        });
+    }
+    let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
+    let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
+    let use_restat = restat
+        && edge
+            .outputs()
+            .all(|output| context.build_log.has_entry(output));
     for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
         let mtime = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
         newest_input = newest_input.max(mtime);
@@ -4452,7 +4492,7 @@ fn evaluate_edge(
             command: String::new(),
             log_command: String::new(),
             description: String::new(),
-            pool: edge_pool(manifest, edge),
+            pool: None,
             rspfile: None,
             rspfile_content: None,
             newest_input,
