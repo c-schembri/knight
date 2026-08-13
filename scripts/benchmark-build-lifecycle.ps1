@@ -25,6 +25,7 @@ $knight = Join-Path $targetRoot 'release\knight.exe'
 $ninjaPath = (Resolve-Path -LiteralPath $Ninja).Path
 $clang = (Get-Command clang++ -ErrorAction Stop).Source
 $linker = (Get-Command lld-link -ErrorAction Stop).Source
+$powershell = (Get-Command powershell -ErrorAction Stop).Source
 
 if ($Jobs -le 0) {
     $Jobs = [Environment]::ProcessorCount
@@ -94,6 +95,18 @@ function New-ShortCommandTree([string]$Path) {
     Write-Ascii (Join-Path $Path 'build.ninja') $manifest.ToString()
 }
 
+function New-LongCommandTree([string]$Path) {
+    $shell = Ninja-CommandPath $powershell
+    $manifest = @"
+rule wait
+  command = `"$shell`" -NoProfile -NonInteractive -Command `"Start-Sleep -Milliseconds 250; [IO.File]::WriteAllText('`$out', 'done')`"
+  description = WAIT `$out
+build out.txt: wait
+default out.txt
+"@
+    Write-Ascii (Join-Path $Path 'build.ninja') "$manifest`n"
+}
+
 function New-ManifestTree([string]$Path) {
     New-Item -ItemType Directory -Force $Path | Out-Null
     $manifest = @"
@@ -147,6 +160,13 @@ function Remove-ShortOutputs([string]$Path) {
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
     }
     foreach ($relative in @('.ninja_log', '.ninja_deps', '.ninja_lock')) {
+        $file = Join-Path $Path $relative
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+    }
+}
+
+function Remove-LongOutput([string]$Path) {
+    foreach ($relative in @('out.txt', '.ninja_log', '.ninja_deps', '.ninja_lock')) {
         $file = Join-Path $Path $relative
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
     }
@@ -280,6 +300,18 @@ Warm-Both 'short-commands' $parallelArgs
 foreach ($tool in $tools.Keys) { Remove-ShortOutputs (Join-Path $workRoot "short-commands\$tool") }
 Measure-Scenario 'short-commands' "$ShortCommands copies, j=$Jobs" $parallelArgs { param($path, $iteration) Remove-ShortOutputs $path }
 Assert-SameFile 'short-commands' ('out\{0:D4}.bin' -f ($ShortCommands - 1))
+
+New-ScenarioTrees 'short-commands-serial' { param($path) New-ShortCommandTree $path }
+Warm-Both 'short-commands-serial' $serialArgs
+foreach ($tool in $tools.Keys) { Remove-ShortOutputs (Join-Path $workRoot "short-commands-serial\$tool") }
+Measure-Scenario 'short-commands-serial' "$ShortCommands copies, j=1" $serialArgs { param($path, $iteration) Remove-ShortOutputs $path }
+Assert-SameFile 'short-commands-serial' ('out\{0:D4}.bin' -f ($ShortCommands - 1))
+
+New-ScenarioTrees 'long-command-serial' { param($path) New-LongCommandTree $path }
+Warm-Both 'long-command-serial' $serialArgs
+foreach ($tool in $tools.Keys) { Remove-LongOutput (Join-Path $workRoot "long-command-serial\$tool") }
+Measure-Scenario 'long-command-serial' 'one 250 ms command, j=1' $serialArgs { param($path, $iteration) Remove-LongOutput $path }
+Assert-SameFile 'long-command-serial' 'out.txt'
 
 New-ScenarioTrees 'manifest-regen' { param($path) New-ManifestTree $path }
 Warm-Both 'manifest-regen' @()

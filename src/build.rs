@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -436,6 +437,7 @@ fn parse_unsigned_hex_prefix(value: &str) -> u64 {
 #[derive(Debug, Default)]
 struct BuildLog<'a> {
     path: PathBuf,
+    file: Option<fs::File>,
     invalidation_warning: Option<&'static str>,
     entries: HashMap<&'a str, BuildLogEntry>,
 }
@@ -1106,6 +1108,7 @@ impl<'a> BuildLog<'a> {
     fn load(path: PathBuf, outputs: &HashMap<&'a str, usize>) -> io::Result<Self> {
         let mut log = Self {
             path,
+            file: None,
             invalidation_warning: None,
             entries: HashMap::new(),
         };
@@ -1214,25 +1217,16 @@ impl<'a> BuildLog<'a> {
         end_ms: u32,
         record_mtime: u128,
     ) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let new_file = !self.path.exists() || self.path.metadata()?.len() == 0;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        if new_file {
-            writeln!(file, "# ninja log v7")?;
-        }
         let command_hash = hash(command.as_bytes());
         let record_mtime = record_mtime.min(u128::from(u64::MAX)) as u64;
+        let mut records = String::new();
         for output in edge.outputs() {
             writeln!(
-                file,
+                records,
                 "{}\t{}\t{}\t{}\t{:x}",
                 start_ms, end_ms, record_mtime, output, command_hash
-            )?;
+            )
+            .expect("writing to a String cannot fail");
             self.entries.insert(
                 output,
                 BuildLogEntry {
@@ -1242,7 +1236,30 @@ impl<'a> BuildLog<'a> {
                 },
             );
         }
+        self.open_append()?.write_all(records.as_bytes())?;
         Ok(())
+    }
+
+    fn open_append(&mut self) -> io::Result<&mut fs::File> {
+        if self.file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let new_file = match self.path.metadata() {
+                Ok(metadata) => metadata.len() == 0,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Err(error) => return Err(error),
+            };
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            if new_file {
+                writeln!(file, "# ninja log v7")?;
+            }
+            self.file = Some(file);
+        }
+        Ok(self.file.as_mut().expect("build log file initialized"))
     }
 }
 
@@ -2522,6 +2539,8 @@ fn run_build_prepared_reusable<'a>(
     let mut dry_run_pending = VecDeque::<(usize, Option<String>)>::new();
     let mut command_buffer = String::new();
     let mut created_directories = HashSet::<PathBuf>::new();
+    let synchronous_commands = options.jobs == 1 && options.jobserver.is_none();
+    let mut synchronous_completion = None;
     let start = Instant::now();
     let (tx, rx) = mpsc::channel::<SchedulerEvent>();
     let mut job_token = None;
@@ -3057,7 +3076,6 @@ fn run_build_prepared_reusable<'a>(
                     .map_err(|error| format!("writing '{}': {error}", rspfile.display()))?;
             }
 
-            let tx = tx.clone();
             let prior_output_mtimes: Vec<Option<u128>> = edge
                 .outputs()
                 .map(|output| stat_cache.get(output))
@@ -3069,13 +3087,8 @@ fn run_build_prepared_reusable<'a>(
             let start_ms = start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
             create_parent_directory_cached(&lock_path, &mut created_directories)
                 .map_err(|error| format!("creating build directory: {error}"))?;
-            fs::write(&lock_path, b"")
+            let start_mtime = touch_lock_and_get_mtime(&lock_path, newest_input)
                 .map_err(|error| format!("updating '{}': {error}", lock_path.display()))?;
-            // Ninja expects the lock-file timestamp taken immediately before
-            // launch to be no older than every already-finished input. Some
-            // Windows filesystems expose the write slightly late, so preserve
-            // that invariant explicitly.
-            let start_mtime = modified_ns(&lock_path).unwrap_or(0).max(newest_input);
             register_active_cleanup(
                 edge_id,
                 edge.outputs()
@@ -3085,10 +3098,10 @@ fn run_build_prepared_reusable<'a>(
                 (!depfile.is_empty()).then(|| PathBuf::from(&depfile)),
             );
             let jobserver = options.jobserver.clone();
-            thread::spawn(move || {
+            let run_command = move || {
                 let output = execute_command(&command, is_console, jobserver.as_ref());
                 let end_ms = start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                let _ = tx.send(SchedulerEvent::Completion(Completion {
+                Completion {
                     edge: edge_id,
                     command,
                     log_command,
@@ -3099,8 +3112,16 @@ fn run_build_prepared_reusable<'a>(
                     end_ms,
                     start_mtime,
                     prior_output_mtimes,
-                }));
-            });
+                }
+            };
+            if synchronous_commands {
+                synchronous_completion = Some(run_command());
+            } else {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(SchedulerEvent::Completion(run_command()));
+                });
+            }
             running += 1;
             launch_capacity = launch_capacity.saturating_sub(1);
             launch_capacity = launch_capacity.min(run_capacity(running, options));
@@ -3175,16 +3196,20 @@ fn run_build_prepared_reusable<'a>(
             continue;
         }
 
-        let event = rx
-            .recv()
-            .map_err(|_| "scheduler event channel terminated unexpectedly")?;
-        let completion = match event {
-            SchedulerEvent::Completion(completion) => completion,
-            SchedulerEvent::JobToken(token) => {
-                job_token_requested = false;
-                job_token =
-                    Some(token.map_err(|error| format!("acquiring jobserver token: {error}"))?);
-                continue;
+        let completion = if let Some(completion) = synchronous_completion.take() {
+            completion
+        } else {
+            let event = rx
+                .recv()
+                .map_err(|_| "scheduler event channel terminated unexpectedly")?;
+            match event {
+                SchedulerEvent::Completion(completion) => completion,
+                SchedulerEvent::JobToken(token) => {
+                    job_token_requested = false;
+                    job_token =
+                        Some(token.map_err(|error| format!("acquiring jobserver token: {error}"))?);
+                    continue;
+                }
             }
         };
         running -= 1;
@@ -5495,6 +5520,31 @@ fn metadata_modified(metadata: &fs::Metadata) -> Option<u128> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_nanos().max(1))
+}
+
+#[cfg(windows)]
+fn metadata_modified(metadata: &fs::Metadata) -> Option<u128> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    Some(
+        metadata
+            .last_write_time()
+            .saturating_sub(126_227_704_000_000_000) as u128,
+    )
+}
+
+fn touch_lock_and_get_mtime(path: &Path, newest_input: u128) -> io::Result<u128> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    // Set the timestamp explicitly because Windows may otherwise defer the
+    // last-write update until the handle closes.
+    file.set_modified(std::time::SystemTime::now())?;
+    Ok(metadata_modified(&file.metadata()?)
+        .unwrap_or(0)
+        .max(newest_input))
 }
 
 #[cfg(windows)]

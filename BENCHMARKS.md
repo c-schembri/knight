@@ -11,8 +11,9 @@ and alternate launch order on every sample to reduce cache/order bias.
 `scripts/benchmark-build-lifecycle.ps1` creates byte-identical, isolated work
 trees for Knight and Ninja and checks representative final artifacts for equal
 SHA-256 content. Its primary workloads use real Clang C++ compilation, GCC-style
-depfiles, and LLD linking. Additional workloads cover short parallel commands,
-manifest regeneration and reload, and ready dyndep loading. Clean scenarios
+depfiles, and LLD linking. Additional workloads cover short parallel and serial
+commands, a single 250 ms serial command, manifest regeneration and reload,
+and ready dyndep loading. Clean scenarios
 remove outputs and Ninja metadata before every sample; incremental scenarios
 change the same source bytes in both trees before their timed invocation.
 
@@ -31,33 +32,40 @@ used 50 because short Windows process samples showed a bimodal tail.
 
 | Scenario | Ninja median | Knight median | Knight/Ninja | Winner |
 | :--- | ---: | ---: | ---: | :--- |
-| Parallel clean build | 1140.285 ms | 917.992 ms | 0.805 | Knight |
-| Serial clean build | 4912.449 ms | 5229.373 ms | 1.065 | Ninja |
-| Warm no-op | 7.135 ms | 6.448 ms | 0.904 | Knight |
-| One-source rebuild and relink | 133.926 ms | 103.692 ms | 0.774 | Knight |
-| Shared-header rebuild and relink | 1064.326 ms | 892.732 ms | 0.839 | Knight |
-| Direct depfile load, no deps log | 13.455 ms | 13.344 ms | 0.992 | Knight |
-| 256 parallel short commands | 3054.884 ms | 2270.885 ms | 0.743 | Knight |
-| Manifest regenerate and reload | 5.315 ms | 5.995 ms | 1.128 | Ninja |
-| 1,000 ready dyndep files | 53.711 ms | 48.404 ms | 0.901 | Knight |
+| Parallel clean build | 992.737 ms | 841.643 ms | 0.848 | Knight |
+| Serial clean build | 4721.978 ms | 4717.338 ms | 0.999 | Knight |
+| Warm no-op | 6.274 ms | 6.033 ms | 0.962 | Knight |
+| One-source rebuild and relink | 126.730 ms | 101.642 ms | 0.802 | Knight |
+| Shared-header rebuild and relink | 1072.106 ms | 820.106 ms | 0.765 | Knight |
+| Direct depfile load, no deps log | 14.559 ms | 14.661 ms | 1.007 | Ninja |
+| 256 parallel short commands | 3008.617 ms | 2430.099 ms | 0.808 | Knight |
+| 256 serial short commands | 4181.147 ms | 3866.787 ms | 0.925 | Knight |
+| One 250 ms serial command | 462.433 ms | 467.857 ms | 1.012 | Ninja |
+| Manifest regenerate and reload | 7.040 ms | 6.756 ms | 0.960 | Knight |
+| 1,000 ready dyndep files | 65.923 ms | 52.684 ms | 0.799 | Knight |
 
-Knight now wins seven of nine medians. The key quiet-path fix reused the
+Knight now wins nine of eleven medians. The key quiet-path fix reused the
 authoritative directory-stat snapshot when validating dependency-log outputs;
 the prior implementation immediately repeated 128 individual output stats.
 Dependency preparation on this corpus fell from about 4.8 ms to 0.5 ms, and
 the subsequent filesystem-stat phase fell from about 0.3 ms to 0.1 ms. Warm
-no-op improved another 45.0%, from 11.718 ms to 6.448 ms, and moved from 74.1%
-behind Ninja to 9.6% ahead. Dependency-log inputs also remain node IDs through
+no-op improved from 11.718 ms to 6.033 ms and moved from 74.1% behind Ninja to
+3.8% ahead. Dependency-log inputs also remain node IDs through
 graph planning instead of being cloned back into owned path strings.
 
-The remaining losses are manifest regeneration and the compiler-dominated
-serial build. Manifest regeneration trails by 0.680 ms; direct phase sampling
-places only about 0.1 ms of that in Knight's parser and planner, with most of
-the small result at the fresh-process floor. The serial median trails by 6.5%,
-but the minima are 4797.914 ms for Ninja and 4828.935 ms for Knight, a 0.6%
-gap, showing how strongly compiler and host tails affect that scenario.
-Knight's parallel clean, incremental, shared-header, short-command, and dyndep
-results continue to lead.
+Serial execution now keeps the build-log append handle open, updates and reads
+the lock timestamp through one handle, and runs plain `-j1` commands directly
+on the scheduler thread instead of creating a worker thread per command. The
+compiler-heavy serial build moved from 6.5% behind Ninja to effectively tied,
+while the new 256-command serial microbenchmark is 7.5% faster than Ninja. A
+20-sample direct A/B on that microbenchmark measured 3708.607 ms for this
+implementation versus 4023.739 ms for the preceding commit, a 7.8% reduction.
+
+The two remaining median losses are effectively ties: direct depfile loading
+trails by 0.102 ms and the deliberately long single command trails by 5.424 ms.
+Knight's minimum on the long-command case is lower than Ninja's (432.366 ms
+versus 440.088 ms), so that row is dominated by PowerShell startup and host
+variation rather than scheduler work.
 
 Two more aggressive experiments were deliberately rejected rather than shipped:
 a persistent lock-file handle broke restat and metadata-log compatibility, and
