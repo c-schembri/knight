@@ -1,7 +1,8 @@
 #[cfg(windows)]
 use knight_build::build::filter_msvc_output;
 use knight_build::build::{
-    build_log_version, render_binding, render_unescaped_binding, shell_escape_path,
+    build_log_version, parse_build_log_line, render_binding, render_unescaped_binding,
+    shell_escape_path,
 };
 use knight_build::depfile::parse_depfile;
 use knight_build::deps_log::{DepsLog, deps_log_path};
@@ -1497,25 +1498,9 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
         return Ok(());
     }
     let selected = targets.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut latest = HashMap::<String, (u32, u32, u64, u64)>::new();
+    let mut latest = HashMap::<String, (i32, i32, i64, u64)>::new();
     for line in contents.lines().skip(1) {
-        let mut fields = line.split('\t');
-        let Some(start) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(end) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(mtime) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
-            continue;
-        };
-        let Some(output) = fields.next() else {
-            continue;
-        };
-        let Some(hash) = fields
-            .next()
-            .and_then(|value| u64::from_str_radix(value, 16).ok())
-        else {
+        let Some((start, end, mtime, output, hash)) = parse_build_log_line(line) else {
             continue;
         };
         latest.insert(output.to_owned(), (start, end, mtime, hash));
@@ -1523,7 +1508,7 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
     for (output, entry) in &mut latest {
         if selected.is_empty() || selected.contains(output.as_str()) {
             entry.2 = match fs::metadata(output) {
-                Ok(metadata) => log_mtime(&metadata).min(u128::from(u64::MAX)) as u64,
+                Ok(metadata) => log_mtime(&metadata).min(i64::MAX as u128) as i64,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
                 Err(error) => return Err(format!("stating '{output}': {error}")),
             };

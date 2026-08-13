@@ -53,6 +53,13 @@ This is an evidence ledger, not a claim of full compatibility.
   including LF/CRLF continuations, Windows drive paths, odd/even backslash
   runs, quotes and punctuation, UTF-8 paths, duplicate outputs and rules,
   compiler `-MP` layouts, poisoned inputs, and empty files.
+  All 11 upstream build-log cases are also mapped: signatures, duplicate
+  outputs and headers, every truncation boundary, obsolete versions, spaces in
+  outputs, restat, the 256 KiB line ceiling, multi-output edges, and
+  recompaction. Log numeric fields use Ninja's C prefix-conversion semantics;
+  loading, automatic recompaction, and `restat` therefore agree even on legacy
+  fields such as a hexadecimal hash beginning with `c` followed by non-hex
+  text.
   Missing depfile-discovered inputs correctly dirty their consumer instead of
   becoming fatal graph errors. Deps-log freshness and multi-output lookup use
   Ninja's output-timestamp and first-output rules. Discovered dependencies are
@@ -331,9 +338,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 83
-  library, 6 CLI, and 123 differential tests; Linux-under-WSL passes 78 library,
-  5 CLI, and 98 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 86
+  library, 6 CLI, and 124 differential tests; Linux-under-WSL passes 81 library,
+  5 CLI, and 99 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

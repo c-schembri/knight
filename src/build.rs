@@ -349,6 +349,75 @@ pub fn build_log_version(contents: &str) -> i32 {
     }
 }
 
+pub const BUILD_LOG_LINE_BUFFER_SIZE: usize = 256 << 10;
+
+pub fn parse_build_log_line(line: &str) -> Option<(i32, i32, i64, &str, u64)> {
+    if line.len() >= BUILD_LOG_LINE_BUFFER_SIZE {
+        return None;
+    }
+    let mut fields = line.splitn(5, '\t');
+    let start = parse_signed_decimal_prefix(fields.next()?);
+    let end = parse_signed_decimal_prefix(fields.next()?);
+    let mtime = parse_signed_decimal_prefix(fields.next()?);
+    let output = fields.next()?;
+    let command_hash = parse_unsigned_hex_prefix(fields.next()?);
+    Some((start as i32, end as i32, mtime, output, command_hash))
+}
+
+fn parse_signed_decimal_prefix(value: &str) -> i64 {
+    let value = value.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let magnitude = digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0u64, |result, digit| {
+            result
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'))
+        });
+    if negative {
+        -(magnitude.min(i64::MAX as u64 + 1) as i128) as i64
+    } else {
+        magnitude.min(i64::MAX as u64) as i64
+    }
+}
+
+fn parse_unsigned_hex_prefix(value: &str) -> u64 {
+    let value = value.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let (negative, mut digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if digits.len() >= 2
+        && digits.as_bytes()[0] == b'0'
+        && matches!(digits.as_bytes()[1], b'x' | b'X')
+    {
+        digits = &digits[2..];
+    }
+    let magnitude = digits
+        .bytes()
+        .take_while(u8::is_ascii_hexdigit)
+        .fold(0u64, |result, digit| {
+            let digit = match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                b'A'..=b'F' => digit - b'A' + 10,
+                _ => unreachable!(),
+            };
+            result.saturating_mul(16).saturating_add(u64::from(digit))
+        });
+    if negative {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    }
+}
+
 #[derive(Debug, Default)]
 struct BuildLog<'a> {
     path: PathBuf,
@@ -798,23 +867,8 @@ impl<'a> BuildLog<'a> {
         let mut total_entries = 0usize;
         let mut dead_outputs = HashSet::new();
         for line in contents.lines().skip(1) {
-            let mut fields = line.split('\t');
-            let Some(start_ms) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(end_ms) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(mtime) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
-                continue;
-            };
-            let Some(output) = fields.next() else {
-                continue;
-            };
-            let Some(command_hash) = fields.next() else {
-                continue;
-            };
-            let Ok(command_hash) = u64::from_str_radix(command_hash, 16) else {
+            let Some((start_ms, end_ms, mtime, output, command_hash)) = parse_build_log_line(line)
+            else {
                 continue;
             };
             total_entries += 1;
@@ -823,8 +877,8 @@ impl<'a> BuildLog<'a> {
                     output,
                     BuildLogEntry {
                         command_hash,
-                        mtime,
-                        elapsed_ms: end_ms.saturating_sub(start_ms),
+                        mtime: mtime.max(0) as u64,
+                        elapsed_ms: end_ms.saturating_sub(start_ms).max(0) as u32,
                     },
                 );
             } else {
@@ -1035,16 +1089,10 @@ fn recompact_build_log(
     contents: &str,
     live_outputs: &HashMap<&str, usize>,
 ) -> io::Result<()> {
-    let mut latest = HashMap::<&str, &str>::new();
+    let mut latest = HashMap::<&str, (i32, i32, i64, u64)>::new();
     for line in contents.lines().skip(1) {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() == 5
-            && fields[0].parse::<u32>().is_ok()
-            && fields[1].parse::<u32>().is_ok()
-            && fields[2].parse::<u64>().is_ok()
-            && u64::from_str_radix(fields[4], 16).is_ok()
-        {
-            latest.insert(fields[3], line);
+        if let Some((start, end, mtime, output, command_hash)) = parse_build_log_line(line) {
+            latest.insert(output, (start, end, mtime, command_hash));
         }
     }
     let mut outputs = latest
@@ -1055,8 +1103,10 @@ fn recompact_build_log(
     outputs.sort_unstable();
     let mut compacted = String::from("# ninja log v7\n");
     for output in outputs {
-        compacted.push_str(latest[output]);
-        compacted.push('\n');
+        let (start, end, mtime, command_hash) = latest[output];
+        compacted.push_str(&format!(
+            "{start}\t{end}\t{mtime}\t{output}\t{command_hash:x}\n"
+        ));
     }
     fs::write(path, compacted)
 }
@@ -5985,6 +6035,93 @@ mod tests {
         assert!(compacted.contains("\tlive\t"));
         assert!(compacted.contains(&format!("\t{}\t", existing.display())));
         assert!(!compacted.contains(&format!("\t{}\t", missing.display())));
+    }
+
+    #[test]
+    fn upstream_build_log_load_and_long_line_corpus() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_log");
+        let manifest = parse_manifest(
+            concat!(
+                "build out: phony\n",
+                "build out2: phony\n",
+                "build out$ with$ space: phony\n",
+                "build prefix: phony\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        let outputs = output_map(&manifest);
+        let mut contents = format!(
+            concat!(
+                "# ninja log v7\n",
+                "0\t1\t2\tout\t{:x}\n",
+                "0\t1\t2\tout\t{:x}\n",
+                "123\t456\t456\tout with space\t{:x}\n",
+                "# ninja log v7\n",
+                "456\t789\t789\tout2\t{:x}\n",
+                "invalid\tfields\tbecome\tprefix\tcommand\n",
+            ),
+            hash(b"command abc"),
+            hash(b"command def"),
+            hash(b"command"),
+            hash(b"command2"),
+        );
+        contents.push_str("1\t2\t3\tout\t");
+        contents.push_str(&"a".repeat(512 << 10));
+        contents.push('\n');
+        fs::write(&path, contents).unwrap();
+
+        let log = BuildLog::load(path, &outputs).unwrap();
+        assert_eq!(log.entries["out"].command_hash, hash(b"command def"));
+        assert_eq!(log.entries["out"].elapsed_ms, 1);
+        assert_eq!(log.entries["out with space"].mtime, 456);
+        assert_eq!(log.entries["out2"].elapsed_ms, 333);
+        assert_eq!(log.entries["prefix"].command_hash, 0xc);
+    }
+
+    #[test]
+    fn upstream_build_log_first_write_and_multi_target_case() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_log");
+        let manifest = parse_manifest(
+            "rule cat\n  command = cat\nbuild out out.d: cat\n",
+            "build.ninja",
+        )
+        .unwrap();
+        let outputs = output_map(&manifest);
+        let mut log = BuildLog::load(path.clone(), &outputs).unwrap();
+        log.record(&manifest.edges[0], "cat", 21, 22, 23).unwrap();
+
+        assert_eq!(log.entries.len(), 2);
+        assert_eq!(log.entries["out"].elapsed_ms, 1);
+        assert_eq!(log.entries["out.d"].elapsed_ms, 1);
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            format!(
+                "# ninja log v7\n21\t22\t23\tout\t{:x}\n21\t22\t23\tout.d\t{:x}\n",
+                hash(b"cat"),
+                hash(b"cat"),
+            )
+        );
+    }
+
+    #[test]
+    fn upstream_build_log_all_truncations_load_without_crashing() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_log");
+        let contents = format!(
+            "# ninja log v7\n15\t18\t19\tout\t{:x}\n20\t25\t26\tmid\t{:x}\n",
+            hash(b"cat mid"),
+            hash(b"cat in"),
+        );
+        let manifest =
+            parse_manifest("build out: phony\nbuild mid: phony\n", "build.ninja").unwrap();
+        let outputs = output_map(&manifest);
+        for size in (1..=contents.len()).rev() {
+            fs::write(&path, &contents.as_bytes()[..size]).unwrap();
+            BuildLog::load(path.clone(), &outputs).unwrap();
+        }
     }
 
     #[test]

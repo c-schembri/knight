@@ -19,7 +19,7 @@ Status meanings:
 
 | Upstream suite | Cases | Status | Current evidence |
 | :--- | ---: | :--- | :--- |
-| `build_log_test` | 11 | Partial | Log v7 interoperability, corruption recovery, recompaction, and write phases |
+| `build_log_test` | 11 | Mapped | Round-trip, signatures, duplicates, truncation, versions, spaces, restat, long lines, multi-output records, and recompaction |
 | `build_test` | 121 | Partial | Broad scheduling/build differentials; full case mapping remains open |
 | `clean_test` | 20 | Partial | Clean, rule clean, dyndep, dead-output, directory, and failure behavior |
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |

@@ -4322,6 +4322,33 @@ fn restat_help_exit_status_matches_ninja() {
 }
 
 #[test]
+fn build_log_restat_uses_ninjas_c_numeric_prefix_parsing() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let mut observed = Vec::new();
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        let log_path = temp.path().join(".ninja_log");
+        fs::write(
+            &log_path,
+            "# ninja log v7\n123suffix\t-4end\t5x\tout with space\tcommand\n",
+        )
+        .unwrap();
+        let output = run(executable, temp.path(), &["-t", "restat", "other"]);
+        assert!(output.status.success(), "{}", executable.display());
+        observed.push((output.stdout, output.stderr, fs::read(log_path).unwrap()));
+    }
+    assert_eq!(observed[1], observed[0]);
+    assert_eq!(
+        observed[1].2,
+        b"# ninja log v7\n123\t-4\t5\tout with space\tc\n"
+    );
+}
+
+#[test]
 fn restat_discards_incompatible_build_logs_without_recreating_them() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
