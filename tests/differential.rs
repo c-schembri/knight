@@ -6164,6 +6164,13 @@ fn explain_reports_the_dirty_dependency_that_triggers_each_edge() {
     );
     fs::write(expected_dir.path().join("build.ninja"), manifest).unwrap();
     fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
+    let actual_executable = if cfg!(target_os = "dragonfly") {
+        let alias = actual_dir.path().join("ninja");
+        install_ninja_alias(knight, &alias);
+        alias
+    } else {
+        knight.to_path_buf()
+    };
 
     for invocation in 0..2 {
         let expected = run(
@@ -6171,7 +6178,11 @@ fn explain_reports_the_dirty_dependency_that_triggers_each_edge() {
             expected_dir.path(),
             &["-v", "-d", "explain"],
         );
-        let actual = run(knight, actual_dir.path(), &["-v", "-d", "explain"]);
+        let actual = run(
+            &actual_executable,
+            actual_dir.path(),
+            &["-v", "-d", "explain"],
+        );
         assert!(expected.status.success() && actual.status.success());
         assert_eq!(actual.stdout, expected.stdout, "invocation={invocation}");
         assert_eq!(
