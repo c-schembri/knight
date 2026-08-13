@@ -168,6 +168,11 @@ fn main() -> ExitCode {
                 println!("ninja: {message}");
                 return ExitCode::from(last_build_exit_code().unwrap_or(1));
             }
+            let error = if error.starts_with("build stopped: ") {
+                error.lines().next().unwrap_or(error.as_str())
+            } else {
+                &error
+            };
             let severity = if program_name() == "ninja"
                 && error.starts_with("unknown variable '")
                 && error.ends_with("' in --status format")

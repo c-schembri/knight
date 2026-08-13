@@ -815,6 +815,53 @@ fn delayed_pool_work_keeps_its_reservation_before_new_dependents() {
 }
 
 #[test]
+fn running_command_defers_phony_that_would_reserve_validation_pool() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let command = if cfg!(windows) {
+        "cmd /d /c \"echo $out>>order.txt && echo built>$out\""
+    } else {
+        "printf '%s\\n' $out >> order.txt && touch $out"
+    };
+    let manifest = format!(
+        "pool serial\n  depth = 1\n\
+         rule run\n  command = {command}\n\
+         build start: run\n\
+         build gate: phony start\n\
+         build runner: run start\n\
+         build validation: run gate\n  pool = serial\n\
+         build target: run runner |@ validation\n  pool = serial\n\
+         default target\n"
+    );
+
+    for executable in std::env::var_os("KNIGHT_NINJA")
+        .iter()
+        .map(Path::new)
+        .chain(std::iter::once(knight))
+    {
+        let work = tempdir().unwrap();
+        fs::write(work.path().join("build.ninja"), &manifest).unwrap();
+        let built = run(executable, work.path(), &["-j1", "--quiet"]);
+        assert!(
+            built.status.success(),
+            "executable={} stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(work.path().join("order.txt"))
+                .unwrap()
+                .lines()
+                .map(str::trim)
+                .collect::<Vec<_>>(),
+            ["start", "runner", "target", "validation"],
+            "executable={}",
+            executable.display()
+        );
+    }
+}
+
+#[test]
 fn nan_load_limit_does_not_throttle_parallelism_like_ninja() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let command = if cfg!(windows) {
@@ -1757,6 +1804,62 @@ fn subninja_rules_and_variables_remain_file_scoped() {
     assert!(stdout.contains("echo parent-parent"), "{stdout}");
     assert!(stdout.contains("echo child-child"), "{stdout}");
     assert!(stdout.contains("echo child-visible"), "{stdout}");
+}
+
+#[test]
+fn dependency_type_configuration_matches_ninjas_build_phases() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let alias = temp
+        .path()
+        .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+    fs::copy(knight, &alias).unwrap();
+
+    let unknown = temp.path().join("unknown");
+    fs::create_dir(&unknown).unwrap();
+    fs::write(
+        unknown.join("build.ninja"),
+        concat!(
+            "rule good\n  command = echo good\n",
+            "rule bad\n  command = echo bad\n  deps = weird\n",
+            "build okay: good\n",
+            "build broken: bad\n",
+            "default okay\n",
+        ),
+    )
+    .unwrap();
+    assert!(run(knight, &unknown, &["-n"]).status.success());
+    assert!(
+        run(knight, &unknown, &["-t", "commands", "broken"])
+            .status
+            .success()
+    );
+    for arguments in [&["-n", "broken"][..], &["-n", "--quiet", "broken"][..]] {
+        let expected = run(Path::new(&ninja), &unknown, arguments);
+        let actual = run(&alias, &unknown, arguments);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    }
+
+    let gcc = temp.path().join("gcc");
+    fs::create_dir(&gcc).unwrap();
+    fs::write(
+        gcc.join("build.ninja"),
+        "rule cc\n  command = echo compile\n  deps = gcc\nbuild out: cc\n",
+    )
+    .unwrap();
+    for arguments in [&["-n"][..], &["-n", "--quiet"][..], &["-n", "-k0"][..]] {
+        let expected = run(Path::new(&ninja), &gcc, arguments);
+        let actual = run(&alias, &gcc, arguments);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    }
 }
 
 #[test]

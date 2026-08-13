@@ -657,6 +657,15 @@ impl DiscoveredDeps {
                 continue;
             }
             if !deps.is_empty() {
+                if !matches!(deps.as_str(), "gcc" | "msvc") {
+                    let error = format!("unknown deps type '{deps}'");
+                    errors[edge_id] = Some(if program_name() == "ninja" {
+                        format!("\0fatal:{error}")
+                    } else {
+                        error
+                    });
+                    continue;
+                }
                 let entry = edge.outputs().next().and_then(|output| log.get(output));
                 let valid = edge.outputs().next().is_some_and(|output| {
                     entry.is_some_and(|entry| {
@@ -1959,7 +1968,7 @@ fn run_build_prepared<'a>(
     let mut stop_starting = false;
     let mut commands_started = progress.offset;
     let mut dry_run_statuses = Vec::new();
-    let mut dry_run_pending = VecDeque::<usize>::new();
+    let mut dry_run_pending = VecDeque::<(usize, Option<String>)>::new();
     let mut command_buffer = String::new();
     let start = Instant::now();
     let (tx, rx) = mpsc::channel::<Completion>();
@@ -2217,6 +2226,13 @@ fn run_build_prepared<'a>(
             }
             let edge = &manifest.edges[edge_id];
             if edge.rule == "phony" {
+                if !options.dry_run
+                    && launch_capacity == 0
+                    && initially_dirty.as_ref().is_none_or(|dirty| dirty[edge_id])
+                {
+                    ready.push((critical_path[edge_id], Reverse(edge_id)));
+                    continue;
+                }
                 for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
                     if !output_map.contains_key(input.as_str())
                         && stat_cache.checked_get(input)?.is_none()
@@ -2249,6 +2265,10 @@ fn run_build_prepared<'a>(
                 continue;
             }
 
+            let dry_dependency_error = options
+                .dry_run
+                .then(|| dry_dependency_configuration_error(manifest, edge))
+                .flatten();
             let evaluated = evaluate_edge(
                 edge_id,
                 edge,
@@ -2262,7 +2282,7 @@ fn run_build_prepared<'a>(
                     restat_cleaned_outputs: &restat_cleaned_outputs,
                 },
                 &mut command_buffer,
-                !(options.dry_run && options.quiet),
+                !(options.dry_run && options.quiet) || dry_dependency_error.is_some(),
             )?;
             if !evaluated.dirty {
                 outcome.edges_clean += 1;
@@ -2344,18 +2364,21 @@ fn run_build_prepared<'a>(
             }
             if options.dry_run {
                 commands_started += 1;
-                if !options.quiet {
+                if !options.quiet || dry_dependency_error.is_some() {
                     let display = if options.verbose || evaluated.description.is_empty() {
                         &evaluated.command
                     } else {
                         &evaluated.description
                     };
-                    dry_run_statuses.push((edge_id, display.clone(), start.elapsed()));
+                    dry_run_statuses.push((
+                        edge_id,
+                        display.clone(),
+                        evaluated.command.clone(),
+                        start.elapsed(),
+                        dry_dependency_error.clone(),
+                    ));
                 }
-                outcome.commands_run += 1;
-                outcome.ran_edges.push(edge_id);
-                ran[edge_id] = true;
-                dry_run_pending.push_back(edge_id);
+                dry_run_pending.push_back((edge_id, dry_dependency_error));
                 made_progress = true;
                 continue;
             }
@@ -2485,7 +2508,7 @@ fn run_build_prepared<'a>(
         }
 
         if options.dry_run {
-            if let Some(edge_id) = dry_run_pending.pop_front() {
+            if let Some((edge_id, dependency_error)) = dry_run_pending.pop_front() {
                 release_pool_edge(
                     manifest,
                     edge_id,
@@ -2494,10 +2517,23 @@ fn run_build_prepared<'a>(
                     &mut pool_reserved,
                     &mut pool_usage,
                 );
-                stat_cache.mark_edge(&manifest.edges[edge_id], u128::MAX);
+                let succeeded = dependency_error.is_none();
+                if let Some(error) = dependency_error {
+                    failures.push(error);
+                    outcome.commands_failed += 1;
+                    let limit = options.failures_allowed;
+                    if limit != 0 && outcome.commands_failed >= limit {
+                        stop_starting = true;
+                    }
+                } else {
+                    outcome.commands_run += 1;
+                    outcome.ran_edges.push(edge_id);
+                    ran[edge_id] = true;
+                    stat_cache.mark_edge(&manifest.edges[edge_id], u128::MAX);
+                }
                 if finish_edge(
                     edge_id,
-                    true,
+                    succeeded,
                     &mut finished,
                     &mut failed_prerequisite,
                     &dependents,
@@ -2744,8 +2780,10 @@ fn run_build_prepared<'a>(
         }
     }
 
-    for (index, (edge_id, display, elapsed)) in dry_run_statuses.into_iter().enumerate() {
-        if printer.is_smart_terminal() {
+    for (index, (edge_id, display, command, elapsed, failure)) in
+        dry_run_statuses.into_iter().enumerate()
+    {
+        if !options.quiet && printer.is_smart_terminal() {
             let line = status.format(
                 &options.status_format,
                 options.status_format_explicit,
@@ -2766,19 +2804,31 @@ fn run_build_prepared<'a>(
                 Duration::ZERO,
             );
         }
-        let line = status.format(
-            &options.status_format,
-            options.status_format_explicit,
-            StatusSnapshot {
-                started: progress.offset + index + 1,
-                finished: progress.offset + index + 1,
-                running: 1,
-                total: status_total,
-                description: &display,
-                elapsed,
-            },
-        )?;
-        printer.print_status(&line, options.verbose)?;
+        if !options.quiet {
+            let line = status.format(
+                &options.status_format,
+                options.status_format_explicit,
+                StatusSnapshot {
+                    started: progress.offset + index + 1,
+                    finished: progress.offset + index + 1,
+                    running: 1,
+                    total: status_total,
+                    description: &display,
+                    elapsed,
+                },
+            )?;
+            printer.print_status(&line, options.verbose)?;
+        }
+        if let Some(error) = failure {
+            let edge = &manifest.edges[edge_id];
+            let failed = format!("FAILED: [code=1] {} ", edge_label(edge));
+            if printer.supports_color() {
+                printer.print_on_new_line(format!("\x1b[31m{failed}\x1b[0m\n").as_bytes())?;
+            } else {
+                printer.print_on_new_line(format!("{failed}\n").as_bytes())?;
+            }
+            printer.print_on_new_line(format!("{command}\n{error}\n").as_bytes())?;
+        }
     }
 
     printer.finish_line()?;
@@ -3762,6 +3812,12 @@ fn tolerates_phony_self_reference(edge: &Edge, phony_cycle_error: bool) -> bool 
         && edge.explicit_outputs.len() == 1
         && edge.implicit_outputs.is_empty()
         && edge.implicit_inputs.is_empty()
+}
+
+fn dry_dependency_configuration_error(manifest: &Manifest, edge: &Edge) -> Option<String> {
+    (evaluate_binding(manifest, edge, "deps") == "gcc"
+        && evaluate_unescaped_binding(manifest, edge, "depfile").is_empty())
+    .then(|| "edge with deps=gcc but no depfile makes no sense".to_owned())
 }
 
 fn extract_dependencies(

@@ -48,6 +48,10 @@ This is an evidence ledger, not a claim of full compatibility.
   output that changed still run. Dependency-log discovery also preserves
   validation closure ordering, while an edge already dirty from declared
   inputs skips stale discovered validations like Ninja.
+  Unknown `deps` types fail only when their edge enters the selected build
+  closure, not while unrelated targets or graph tools are evaluated. A dry-run
+  `deps = gcc` edge without a depfile reproduces Ninja's synthetic subcommand
+  failure instead of being treated as a successful command.
   Manifest regeneration honors clean `restat` results without reloading and
   stops after Ninja's exact 100 successful self-rebuild attempts with the same
   cycle-limit diagnostic.
@@ -90,7 +94,10 @@ This is an evidence ledger, not a claim of full compatibility.
   Clean phonies are collapsed before the initial pool frontier is ranked by
   critical path. Once scheduling begins, an already-delayed edge claims a
   newly released pool slot before dependents made ready by that same
-  completion, matching Ninja's temporal reservation semantics.
+  completion, matching Ninja's temporal reservation semantics. Once a real
+  scheduling sweep fills its command capacity, lower-priority phonies wait for
+  a command completion too, preserving the pool-reservation order between
+  requested targets and their validations.
   Response files, including Windows text-mode newline conversion, inherited
   and child-forwarded GNU/Cargo jobservers,
   load limiting,
@@ -167,8 +174,8 @@ This is an evidence ledger, not a claim of full compatibility.
   phony edges with explicit, implicit, order-only, and validation inputs, plus
   bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
   fresh plus incremental real builds. Materialized-source and missing-source
-  graphs each match Ninja on 3,000 Windows seeds, totaling 198,000 tool-mode
-  comparisons and 12,000 real build phases. Both corpora also match
+  graphs each match Ninja on 3,200 Windows seeds, totaling 211,200 tool-mode
+  comparisons and 12,800 real build phases. Both corpora also match
   on 500 Linux seeds each (33,000 tool-mode comparisons and 2,000 real build
   phases). The harness runs
   independent reference/candidate processes concurrently while preserving
@@ -245,8 +252,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 65
-  library, 2 CLI, and 110 differential tests; Linux-under-WSL passes 64 library,
-  2 CLI, and 83 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 112 differential tests; Linux-under-WSL passes 64 library,
+  2 CLI, and 85 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
