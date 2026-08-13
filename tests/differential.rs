@@ -325,6 +325,36 @@ fn response_file_paths_with_spaces_are_not_shell_escaped_on_disk() {
 
 #[cfg(windows)]
 #[test]
+fn response_file_newlines_use_windows_text_mode_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule rsp\n",
+                "  command = cmd /d /c copy /b $rspfile $out\n",
+                "  rspfile = $out.rsp\n",
+                "  rspfile_content = $in_newline\n",
+                "build out: rsp a b\n",
+                "default out\n",
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("a"), "a").unwrap();
+        fs::write(temp.path().join("b"), "b").unwrap();
+        let built = run(executable, temp.path(), &[]);
+        assert!(built.status.success(), "{}", executable.display());
+        assert_eq!(fs::read(temp.path().join("out")).unwrap(), b"a\r\nb");
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn ninja_and_knight_share_canonical_path_identity() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -1917,6 +1947,50 @@ fn deprecated_msvc_helper_filters_output_and_writes_depfile() {
 
 #[cfg(windows)]
 #[test]
+fn deprecated_msvc_helper_options_match_ninja_getopt() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    for arguments in [
+        &["-t", "msvc", "-h"][..],
+        &["-t", "msvc", "--help=ignored"][..],
+        &["-t", "msvc", "-x"][..],
+        &["-t", "msvc", "--bogus"][..],
+        &["-t", "msvc", "-o"][..],
+    ] {
+        let expected = run(Path::new(&ninja), temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&expected.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            "{arguments:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&expected.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn missingdeps_matches_ninja_output_and_exit_status() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let temp = tempdir().unwrap();
@@ -3037,13 +3111,21 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
         &["-t", "clean", "-x"][..],
         &["-t", "inputs", "-x"][..],
         &["-t", "inputs", "--bogus"][..],
+        &["-t", "inputs", "--help=ignored"][..],
+        &["-t", "inputs", "--print0=ignored"][..],
         &["-t", "multi-inputs", "-x"][..],
         &["-t", "multi-inputs", "--bogus"][..],
+        &["-t", "multi-inputs", "--delimiter="][..],
+        &["-t", "multi-inputs", "--delimiter"][..],
+        &["-t", "multi-inputs", "-d"][..],
         &["-t", "compdb", "-z"][..],
         &["-t", "compdb-targets", "-z"][..],
         &["-t", "rules", "-x"][..],
         &["-t", "restat", "-x"][..],
         &["-t", "restat", "--bogus"][..],
+        &["-t", "restat", "--help=ignored"][..],
+        &["-t", "restat", "--builddir="][..],
+        &["-t", "restat", "--builddir"][..],
         &["-t", "commands", "app", "-s"][..],
         &["-t", "commands", "--", "-x"][..],
         &["-t", "targets", "rule", ""][..],
@@ -3312,6 +3394,46 @@ fn deps_tool_reports_but_ignores_output_stat_failures_like_ninja() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn post_command_stat_failures_stop_builds_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let root = tempdir().unwrap();
+    let alias = root.path().join("ninja");
+    fs::copy(knight, &alias).unwrap();
+
+    for (name, bindings, depfile_command) in [
+        (
+            "deps",
+            "  deps = gcc\n  depfile = out.d\n",
+            " && printf 'out:' > out.d",
+        ),
+        ("restat", "  restat = 1\n", ""),
+        ("generator", "  generator = 1\n", ""),
+    ] {
+        let manifest = format!(
+            "rule bad\n  command = ln -s out out{depfile_command}\n{bindings}build out: bad\ndefault out\n"
+        );
+        let mut expected = None;
+        for (variant, executable) in [("expected", Path::new(&ninja)), ("actual", &alias)] {
+            let directory = root.path().join(format!("{name}-{variant}"));
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("build.ninja"), &manifest).unwrap();
+            let result = run(executable, &directory, &[]);
+            let result = (result.status.code(), result.stdout, result.stderr);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected, "{name}");
+            } else {
+                expected = Some(result);
+            }
+        }
+    }
+}
+
 #[test]
 fn missing_order_only_source_inputs_follow_phony_policy_like_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
@@ -3573,6 +3695,37 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
             "{arguments:?}"
         );
     }
+
+    let fail_command = if cfg!(windows) {
+        "cmd /d /c exit 7"
+    } else {
+        "sh -c 'exit 7'"
+    };
+    fs::write(
+        temp.path().join("project/build.ninja"),
+        format!("rule fail\n  command = {fail_command}\nbuild failed: fail\n"),
+    )
+    .unwrap();
+    let arguments = ["-C", "project", "failed"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(&alias, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&expected.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&expected.stderr)
+            .lines()
+            .collect::<Vec<_>>()
+    );
 }
 
 #[cfg(unix)]

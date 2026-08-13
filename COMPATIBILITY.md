@@ -71,7 +71,7 @@ This is an evidence ledger, not a claim of full compatibility.
   from concurrent ordinary work, default/custom pool
   limits (including zero-depth meaning unlimited), and Ninja-compatible
   ready-edge pool reservations, including multi-output notification order.
-  Response files, inherited
+  Response files, including Windows text-mode newline conversion, inherited
   and child-forwarded GNU/Cargo jobservers,
   load limiting,
   `MAKEFLAGS=n`, `-j`, `-k`, `-l`, `-n`, `-v`, `--quiet`, `--status`, `-C`,
@@ -101,7 +101,10 @@ This is an evidence ledger, not a claim of full compatibility.
   flags provide Ninja-compatible spelling suggestions.
   `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
   `multi-inputs` short/long options, including bundled short flags and attached
-  delimiters, have differential coverage. `inputs` uses a single collector
+  delimiters, have differential coverage. Missing arguments and attached
+  values follow the platform `getopt` split for `inputs`, `multi-inputs`, and
+  `restat`; the deprecated Windows `msvc` helper follows its getopt/usage exit
+  behavior as well. `inputs` uses a single collector
   across all requested targets, matching Ninja's shared-input deduplication,
   and sorts rendered shell-escaped paths rather than their raw spellings.
   Cleaning loads valid dyndeps while tolerating malformed ones, honors
@@ -141,8 +144,10 @@ This is an evidence ledger, not a claim of full compatibility.
 - Filesystem stat failures remain distinct from missing paths, including with
   `-d nostatcache`, and abort planning with Ninja-compatible diagnostics. The
   `deps` tool retains Ninja's unusual report-and-continue behavior for the same
-  failures. POSIX epoch-zero timestamps are normalized to one nanosecond in
-  dependency metadata, matching Ninja's reserved-zero convention.
+  failures, while post-command failures during restat, generator, or dependency
+  recording stop the build in Ninja's corresponding phase. POSIX epoch-zero
+  timestamps are normalized to one nanosecond in dependency metadata, matching
+  Ninja's reserved-zero convention.
 - `graph` emits Ninja-shaped Graphviz output with implicit root selection,
   direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
   dotted order-only edges. It loads only dyndeps reachable from the displayed
@@ -180,7 +185,7 @@ This is an evidence ledger, not a claim of full compatibility.
   and reports dyndep loads. Knight intentionally emits a missing-output reason
   once, while an executable named `ninja` reproduces Ninja's legacy duplicate
   dyndep explanation, fatal unknown-tool/numeric-option diagnostics, and
-  build-stop summaries for drop-in output parity.
+  stdout-routed build-stop summaries for drop-in output parity.
 
 ## Not yet complete
 
@@ -192,8 +197,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 94 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 67 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 96 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 68 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

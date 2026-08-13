@@ -97,7 +97,7 @@ fn main() -> ExitCode {
             if program_name() == "ninja"
                 && let Some(message) = ninja_compat_build_error(&error)
             {
-                eprintln!("ninja: {message}");
+                println!("ninja: {message}");
                 return ExitCode::from(last_build_exit_code().unwrap_or(1));
             }
             let severity = if program_name() == "ninja"
@@ -115,6 +115,9 @@ fn main() -> ExitCode {
 }
 
 fn ninja_compat_build_error(error: &str) -> Option<String> {
+    if error.starts_with("build stopped: stat(") {
+        return Some(format!("{error}."));
+    }
     if error.starts_with("build stopped: ") && error.contains(" subcommand(s) failed") {
         return Some("build stopped: subcommand failed.".to_owned());
     }
@@ -744,32 +747,60 @@ fn tool_msvc(args: &[String]) -> Result<(), String> {
     let mut object = None;
     let mut prefix = "Note: including file: ".to_owned();
     let mut index = 0;
-    while index < args.len() && args[index] != "--" {
-        match args[index].as_str() {
-            "-h" | "--help" => {
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == "--" {
+            break;
+        }
+        if argument == "--help" || argument.starts_with("--help=") {
+            print_msvc_usage();
+            return Ok(());
+        }
+        if argument.starts_with("--") {
+            print_unrecognized_tool_option("msvc", argument);
+            print_msvc_usage();
+            return Ok(());
+        }
+        if argument.starts_with('-') && argument.len() > 1 {
+            let options = &argument[1..];
+            let mut characters = options.char_indices().peekable();
+            let (_, option) = characters.next().unwrap();
+            if option == 'h' {
                 print_msvc_usage();
                 return Ok(());
             }
-            "-e" | "-o" | "-p" => {
-                let option = args[index].clone();
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| format!("msvc: {option} requires an argument"))?
-                    .clone();
-                match option.as_str() {
-                    "-e" => envfile = Some(value),
-                    "-o" => object = Some(value),
-                    "-p" => prefix = value,
-                    _ => unreachable!(),
-                }
+            if !matches!(option, 'e' | 'o' | 'p') {
+                print_invalid_tool_option("msvc", option);
+                print_msvc_usage();
+                return Ok(());
             }
-            option => return Err(format!("msvc: unknown option '{option}'")),
+            let value = if let Some((offset, _)) = characters.peek().copied() {
+                options[offset..].to_owned()
+            } else {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    print_required_tool_argument("msvc", &option.to_string(), false);
+                    print_msvc_usage();
+                    return Ok(());
+                };
+                value.clone()
+            };
+            match option {
+                'e' => envfile = Some(value),
+                'o' => object = Some(value),
+                'p' => prefix = value,
+                _ => unreachable!(),
+            }
         }
         index += 1;
     }
     if args.get(index).map(String::as_str) != Some("--") || index + 1 >= args.len() {
-        return Err("expected command line to end with \" -- command args\"".to_owned());
+        let message = "expected command line to end with \" -- command args\"";
+        return Err(if program_name() == "ninja" {
+            format!("{FATAL_PREFIX}{message}")
+        } else {
+            message.to_owned()
+        });
     }
     let command_line = &args[index + 1..];
     let mut command = Command::new(&command_line[0]);
@@ -1004,19 +1035,41 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
-        let argument = resolve_long_option(&args[index], &["--builddir", "--help"])?;
+        #[allow(unused_mut)]
+        let mut argument = resolve_long_option(&args[index], &["--builddir", "--help"])?;
+        if let Some((_, value)) = args[index].split_once('=') {
+            let option = argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(name, _)| name);
+            if option == "--help" {
+                #[cfg(windows)]
+                {
+                    argument = option.to_owned();
+                }
+                #[cfg(not(windows))]
+                {
+                    eprintln!("restat: option '--help' doesn't allow an argument");
+                    return tool_restat_usage();
+                }
+            } else if option == "--builddir" && value.is_empty() {
+                #[cfg(windows)]
+                {
+                    eprintln!("restat: argument required for option `--builddir'");
+                    return tool_restat_usage();
+                }
+            }
+        }
         if let Some(value) = argument.strip_prefix("--builddir=") {
             builddir = Some(value.to_owned());
         } else if argument == "--builddir" {
             index += 1;
-            builddir = Some(
-                args.get(index)
-                    .ok_or_else(|| "restat: --builddir requires a directory".to_owned())?
-                    .clone(),
-            );
+            let Some(value) = args.get(index) else {
+                print_required_tool_argument("restat", "--builddir", true);
+                return tool_restat_usage();
+            };
+            builddir = Some(value.clone());
         } else if argument == "-h" || argument == "--help" {
-            println!("usage: ninja -t restat [--builddir=DIR] [outputs]");
-            return Err(format!("{TOOL_EXIT_PREFIX}1"));
+            return tool_restat_usage();
         } else if argument.starts_with('-') {
             if argument.starts_with("--") {
                 print_unrecognized_tool_option("restat", &argument);
@@ -1027,8 +1080,7 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
                     .unwrap_or('?');
                 print_invalid_tool_option("restat", option);
             }
-            println!("usage: ninja -t restat [--builddir=DIR] [outputs]");
-            return Err(format!("{TOOL_EXIT_PREFIX}1"));
+            return tool_restat_usage();
         } else {
             targets.push(argument.clone());
         }
@@ -1164,6 +1216,11 @@ fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
             &["rule", "depth", "all"],
         )),
     }
+}
+
+fn tool_restat_usage() -> Result<(), String> {
+    println!("usage: ninja -t restat [--builddir=DIR] [outputs]");
+    Err(format!("{TOOL_EXIT_PREFIX}1"))
 }
 
 fn parse_atoi(value: &str) -> i32 {
@@ -1626,7 +1683,37 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 "--dependency-order",
             ][..]
         };
-        let argument = resolve_long_option(&args[index], long_options)?;
+        #[allow(unused_mut)]
+        let mut argument = resolve_long_option(&args[index], long_options)?;
+        if parse_options && let Some((_, value)) = args[index].split_once('=') {
+            let option = argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(name, _)| name);
+            let no_argument = matches!(
+                option,
+                "--help" | "--print0" | "--no-shell-escape" | "--dependency-order"
+            );
+            if no_argument {
+                #[cfg(windows)]
+                {
+                    argument = option.to_owned();
+                }
+                #[cfg(not(windows))]
+                {
+                    eprintln!(
+                        "{}: option '{option}' doesn't allow an argument",
+                        if grouped { "multi-inputs" } else { "inputs" }
+                    );
+                    return tool_inputs_usage(grouped);
+                }
+            } else if grouped && option == "--delimiter" && value.is_empty() {
+                #[cfg(windows)]
+                {
+                    eprintln!("multi-inputs: argument required for option `--delimiter'");
+                    return tool_inputs_usage(grouped);
+                }
+            }
+        }
         if parse_options && argument == "--" {
             parse_options = false;
         } else if parse_options && argument.starts_with("--") {
@@ -1637,10 +1724,11 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 "--dependency-order" if !grouped => dependency_order = true,
                 "--delimiter" if grouped => {
                     index += 1;
-                    delimiter = args
-                        .get(index)
-                        .ok_or_else(|| "multi-inputs: --delimiter requires a value".to_owned())?
-                        .clone();
+                    let Some(value) = args.get(index) else {
+                        print_required_tool_argument("multi-inputs", "--delimiter", true);
+                        return tool_inputs_usage(grouped);
+                    };
+                    delimiter = value.clone();
                 }
                 option if grouped && option.starts_with("--delimiter=") => {
                     delimiter = option[12..].to_owned();
@@ -1666,10 +1754,11 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                             delimiter = options[offset..].to_owned();
                         } else {
                             index += 1;
-                            delimiter = args
-                                .get(index)
-                                .ok_or_else(|| "multi-inputs: -d requires a delimiter".to_owned())?
-                                .clone();
+                            let Some(value) = args.get(index) else {
+                                print_required_tool_argument("multi-inputs", "d", false);
+                                return tool_inputs_usage(grouped);
+                            };
+                            delimiter = value.clone();
                         }
                         break;
                     }
@@ -1770,6 +1859,21 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
 fn tool_inputs_usage(grouped: bool) -> Result<(), String> {
     print_inputs_usage(grouped);
     Err(format!("{TOOL_EXIT_PREFIX}1"))
+}
+
+fn print_required_tool_argument(tool: &str, option: &str, long: bool) {
+    #[cfg(windows)]
+    if long {
+        eprintln!("{tool}: argument required for option `{option}'");
+    } else {
+        eprintln!("{tool}: argument required for option `-{option}'");
+    }
+    #[cfg(not(windows))]
+    if long {
+        eprintln!("{tool}: option '{option}' requires an argument");
+    } else {
+        eprintln!("{tool}: option requires an argument -- '{option}'");
+    }
 }
 
 fn print_inputs_usage(grouped: bool) {

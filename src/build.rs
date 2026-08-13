@@ -659,10 +659,14 @@ impl DiscoveredDeps {
         })
     }
 
-    fn record(&mut self, edge_id: usize, edge: &Edge, inputs: Vec<String>) -> io::Result<()> {
+    fn record(&mut self, edge_id: usize, edge: &Edge, inputs: Vec<String>) -> Result<(), String> {
         for output in edge.outputs() {
-            let mtime = modified_ns(Path::new(output)).unwrap_or(0) as u64;
-            self.log.record(output, mtime, &inputs)?;
+            let mtime = checked_modified_ns(Path::new(output))
+                .map_err(|error| format!("build stopped: {error}"))?
+                .unwrap_or(0) as u64;
+            self.log
+                .record(output, mtime, &inputs)
+                .map_err(|error| format!("writing dependency log: {error}"))?;
         }
         self.inputs[edge_id] = inputs;
         self.missing[edge_id] = false;
@@ -2073,11 +2077,11 @@ fn run_build_prepared<'a>(
                         )
                     })?;
                 }
-                fs::write(
-                    rspfile,
-                    evaluated.rspfile_content.as_deref().unwrap_or_default(),
-                )
-                .map_err(|error| format!("writing '{}': {error}", rspfile.display()))?;
+                let contents = evaluated.rspfile_content.as_deref().unwrap_or_default();
+                #[cfg(windows)]
+                let contents = contents.replace('\n', "\r\n");
+                fs::write(rspfile, contents)
+                    .map_err(|error| format!("writing '{}': {error}", rspfile.display()))?;
             }
 
             let tx = tx.clone();
@@ -2248,8 +2252,15 @@ fn run_build_prepared<'a>(
             let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
             let current_output_mtimes = edge
                 .outputs()
-                .map(|output| modified_ns(Path::new(output)))
-                .collect::<Vec<_>>();
+                .map(|output| {
+                    if completion.start_mtime == 0 || restat || generator {
+                        checked_modified_ns(Path::new(output))
+                            .map_err(|error| format!("build stopped: {error}"))
+                    } else {
+                        Ok(modified_ns(Path::new(output)))
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let previous_log_mtimes = edge
                 .outputs()
                 .map(|output| build_log.recorded_mtime(output))
@@ -2300,9 +2311,7 @@ fn run_build_prepared<'a>(
                 stat_cache.mtimes.insert(output, mtime);
             }
             if let Some(inputs) = dependency_result.unwrap() {
-                discovered
-                    .record(completion.edge, edge, inputs)
-                    .map_err(|error| format!("writing dependency log: {error}"))?;
+                discovered.record(completion.edge, edge, inputs)?;
             }
             ran[completion.edge] = !restat_cleaned;
             outcome.commands_run += 1;
