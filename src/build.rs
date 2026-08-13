@@ -350,12 +350,12 @@ impl<'a> StatCache<'a> {
         discovered: &DiscoveredDeps,
         enabled: bool,
         check_missing_sources: bool,
-    ) -> Self {
+    ) -> Result<Self, String> {
         if !enabled {
-            return Self {
+            return Ok(Self {
                 may_have_missing_declared_sources: check_missing_sources,
                 ..Self::default()
-            };
+            });
         }
         let mut paths = HashSet::new();
         let mut declared_sources = HashSet::new();
@@ -381,15 +381,20 @@ impl<'a> StatCache<'a> {
         for (directory, paths) in groups {
             if paths.len() < 8 {
                 for path in paths {
-                    mtimes.insert(path, modified_ns(Path::new(path)));
+                    mtimes.insert(path, checked_modified_ns(Path::new(path))?);
                 }
                 continue;
             }
             let entries = directory_mtimes(directory).unwrap_or_default();
             for path in paths {
-                let mtime = Path::new(path)
+                let path_ref = Path::new(path);
+                let mtime = path_ref
                     .file_name()
                     .and_then(|name| entries.get(name).copied());
+                let mtime = match mtime {
+                    Some(mtime) => Some(mtime),
+                    None => checked_modified_ns(path_ref)?,
+                };
                 mtimes.insert(path, mtime);
             }
         }
@@ -397,18 +402,18 @@ impl<'a> StatCache<'a> {
         for edge_id in closure {
             for path in &discovered.inputs[*edge_id] {
                 if !mtimes.contains_key(path.as_str()) && !dynamic.contains_key(path) {
-                    dynamic.insert(path.clone(), modified_ns(Path::new(path)));
+                    dynamic.insert(path.clone(), checked_modified_ns(Path::new(path))?);
                 }
             }
         }
         let may_have_missing_declared_sources = declared_sources
             .into_iter()
             .any(|source| mtimes.get(source).is_none_or(Option::is_none));
-        Self {
+        Ok(Self {
             mtimes,
             dynamic,
             may_have_missing_declared_sources,
-        }
+        })
     }
 
     fn get(&mut self, path: &str) -> Option<u128> {
@@ -421,6 +426,18 @@ impl<'a> StatCache<'a> {
         let mtime = modified_ns(Path::new(path));
         self.dynamic.insert(path.to_owned(), mtime);
         mtime
+    }
+
+    fn checked_get(&mut self, path: &str) -> Result<Option<u128>, String> {
+        if let Some(mtime) = self.mtimes.get(path) {
+            return Ok(*mtime);
+        }
+        if let Some(mtime) = self.dynamic.get(path) {
+            return Ok(*mtime);
+        }
+        let mtime = checked_modified_ns(Path::new(path))?;
+        self.dynamic.insert(path.to_owned(), mtime);
+        Ok(mtime)
     }
 
     fn mark_edge(&mut self, edge: &'a Edge, mtime: u128) {
@@ -1572,14 +1589,16 @@ fn run_build_prepared<'a>(
         &discovered,
         options.use_stat_cache,
         true,
-    );
+    )?;
     let stat_time = phase.elapsed();
     if stat_cache.may_have_missing_declared_sources {
         let mut deferred_phony_order_only = Vec::new();
         for &edge_id in &closure {
             let edge = &manifest.edges[edge_id];
             for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-                if !output_map.contains_key(input.as_str()) && stat_cache.get(input).is_none() {
+                if !output_map.contains_key(input.as_str())
+                    && stat_cache.checked_get(input)?.is_none()
+                {
                     return Err(format!(
                         "'{input}', needed by '{}', missing and no known rule to make it",
                         edge.outputs().next().unwrap_or(input)
@@ -1587,7 +1606,9 @@ fn run_build_prepared<'a>(
                 }
             }
             for input in &edge.order_only_inputs {
-                if !output_map.contains_key(input.as_str()) && stat_cache.get(input).is_none() {
+                if !output_map.contains_key(input.as_str())
+                    && stat_cache.checked_get(input)?.is_none()
+                {
                     if edge.rule == "phony" {
                         deferred_phony_order_only.push((edge_id, input));
                     } else {
@@ -1861,7 +1882,9 @@ fn run_build_prepared<'a>(
             let edge = &manifest.edges[edge_id];
             if edge.rule == "phony" {
                 for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-                    if !output_map.contains_key(input.as_str()) && stat_cache.get(input).is_none() {
+                    if !output_map.contains_key(input.as_str())
+                        && stat_cache.checked_get(input)?.is_none()
+                    {
                         return Err(format!("input '{input}' is missing"));
                     }
                 }
@@ -3501,7 +3524,7 @@ fn evaluate_edge(
     let mut oldest_output = u128::MAX;
     let mut newest_input = 0;
     for output in edge.outputs() {
-        if let Some(mtime) = stat_cache.get(output) {
+        if let Some(mtime) = stat_cache.checked_get(output)? {
             oldest_output = oldest_output.min(mtime);
         } else {
             dirty = true;
@@ -3524,7 +3547,7 @@ fn evaluate_edge(
         }
     }
     for input in &context.discovered.inputs[edge_id] {
-        if !output_map.contains_key(input.as_str()) && stat_cache.get(input).is_none() {
+        if !output_map.contains_key(input.as_str()) && stat_cache.checked_get(input)?.is_none() {
             if !dirty {
                 dirty = true;
                 reason = format!("discovered input '{input}' is missing");
@@ -3601,7 +3624,7 @@ fn virtual_mtime(
     visiting: &mut HashSet<usize>,
     stat_cache: &mut StatCache<'_>,
 ) -> Result<u128, String> {
-    if let Some(mtime) = stat_cache.get(path) {
+    if let Some(mtime) = stat_cache.checked_get(path)? {
         return Ok(mtime);
     }
     let Some(edge_id) = output_map.get(path).copied() else {
@@ -4053,13 +4076,35 @@ fn modified_ns(path: &Path) -> Option<u128> {
 }
 
 #[cfg(not(windows))]
+fn checked_modified_ns(path: &Path) -> Result<Option<u128>, String> {
+    match path.metadata() {
+        Ok(metadata) => Ok(metadata_modified(&metadata)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let message = message
+                .split_once(" (os error ")
+                .map_or(message.as_str(), |(message, _)| message);
+            Err(format!("stat({}): {message}", path.display()))
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn metadata_modified(metadata: &fs::Metadata) -> Option<u128> {
     metadata
         .modified()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .map(|duration| duration.as_nanos())
+        .map(|duration| duration.as_nanos().max(1))
 }
 
 #[cfg(windows)]
@@ -4092,6 +4137,11 @@ fn modified_ns(path: &Path) -> Option<u128> {
     let filetime = ((data.ftLastWriteTime.dwHighDateTime as u64) << 32)
         | data.ftLastWriteTime.dwLowDateTime as u64;
     Some(filetime.saturating_sub(126_227_704_000_000_000) as u128)
+}
+
+#[cfg(windows)]
+fn checked_modified_ns(path: &Path) -> Result<Option<u128>, String> {
+    Ok(modified_ns(path))
 }
 
 fn finish_command(

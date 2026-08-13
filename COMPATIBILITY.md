@@ -78,7 +78,10 @@ This is an evidence ledger, not a claim of full compatibility.
   and `-f`. Both classic `NINJA_STATUS` placeholders and Ninja 1.14
   `--status` variables are supported. Getopt-style short-option clusters and
   attached option values are accepted, non-positive `-k` is unlimited, and
-  the default parallelism uses Ninja's processor-count heuristic. Status ETA
+  saturated and whitespace-prefixed `-j`/`-k` values follow `strtol`, while
+  `-l` follows the platform C library's complete `strtod` grammar. Attached
+  long-option values preserve Ninja's Windows/POSIX `getopt` split. The
+  default parallelism uses Ninja's processor-count heuristic. Status ETA
   and predicted progress use Ninja's historical per-edge CPU-time model,
   including its stale-history rejection heuristic. GNU-style unambiguous long-
   option abbreviations are accepted at top level and by `inputs`,
@@ -135,6 +138,11 @@ This is an evidence ledger, not a claim of full compatibility.
   log reverse lookup, and build-directory fallback at the same execution
   phases as Ninja. Existing filesystem paths not present in the graph are not
   silently accepted as targets.
+- Filesystem stat failures remain distinct from missing paths, including with
+  `-d nostatcache`, and abort planning with Ninja-compatible diagnostics. The
+  `deps` tool retains Ninja's unusual report-and-continue behavior for the same
+  failures. POSIX epoch-zero timestamps are normalized to one nanosecond in
+  dependency metadata, matching Ninja's reserved-zero convention.
 - `graph` emits Ninja-shaped Graphviz output with implicit root selection,
   direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
   dotted order-only edges. It loads only dyndeps reachable from the displayed
@@ -171,7 +179,8 @@ This is an evidence ledger, not a claim of full compatibility.
   that actually propagates through each edge, respects clean restat pruning,
   and reports dyndep loads. Knight intentionally emits a missing-output reason
   once, while an executable named `ninja` reproduces Ninja's legacy duplicate
-  dyndep explanation and build-stop summaries for drop-in output parity.
+  dyndep explanation, fatal unknown-tool/numeric-option diagnostics, and
+  build-stop summaries for drop-in output parity.
 
 ## Not yet complete
 
@@ -183,8 +192,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 1 CLI, and 93 differential tests; Linux-under-WSL passes 62 library,
-  1 CLI, and 63 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 94 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 67 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

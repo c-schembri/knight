@@ -1398,6 +1398,34 @@ fn ninja_114_variable_names_and_newline_escape_match() {
     assert_eq!(actual.stderr, expected.stderr);
 }
 
+#[cfg(unix)]
+#[test]
+fn epoch_timestamp_is_recorded_as_one_in_deps_log_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "rule epoch\n  command = touch $out && touch -d @0 $out && printf 'out:' > out.d\n  deps = gcc\n  depfile = out.d\nbuild out: epoch\n",
+        )
+        .unwrap();
+        let result = run(executable, temp.path(), &[]);
+        assert!(result.status.success(), "{}", executable.display());
+        let deps = run(executable, temp.path(), &["-t", "deps", "out"]);
+        assert!(deps.status.success(), "{}", executable.display());
+        assert!(
+            String::from_utf8_lossy(&deps.stdout).contains("deps mtime 1 (VALID)"),
+            "{}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&deps.stdout)
+        );
+    }
+}
+
 #[test]
 fn comments_and_implicit_only_outputs_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
@@ -3216,6 +3244,74 @@ fn phony_targets_reject_missing_source_inputs_like_ninja() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn filesystem_stat_failures_abort_before_missing_input_diagnostics() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let input = "i".repeat(400);
+    fs::write(
+        temp.path().join("build.ninja"),
+        format!("build out: phony {input}\n"),
+    )
+    .unwrap();
+
+    for arguments in [&["-n"][..], &["-d", "nostatcache", "-n"][..]] {
+        let expected = run(Path::new(&ninja), temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr).replace("knight:", "tool:"),
+            String::from_utf8_lossy(&expected.stderr).replace("ninja:", "tool:")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn deps_tool_reports_but_ignores_output_stat_failures_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let output = "o".repeat(400);
+    fs::write(
+        temp.path().join("build.ninja"),
+        format!("rule cc\n  command = cc\n  deps = gcc\nbuild {output}: cc\n"),
+    )
+    .unwrap();
+
+    let mut deps_log = b"# ninjadeps\n".to_vec();
+    deps_log.extend_from_slice(&4u32.to_le_bytes());
+    let padding = (4 - output.len() % 4) % 4;
+    deps_log.extend_from_slice(&((output.len() + padding + 4) as u32).to_le_bytes());
+    deps_log.extend_from_slice(output.as_bytes());
+    deps_log.extend_from_slice(&[0; 3][..padding]);
+    deps_log.extend_from_slice(&u32::MAX.to_le_bytes());
+    deps_log.extend_from_slice(&0x8000_000cu32.to_le_bytes());
+    deps_log.extend_from_slice(&0u32.to_le_bytes());
+    deps_log.extend_from_slice(&1u32.to_le_bytes());
+    deps_log.extend_from_slice(&0u32.to_le_bytes());
+    fs::write(temp.path().join(".ninja_deps"), deps_log).unwrap();
+
+    let arguments = ["-t", "deps", output.as_str()];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr).replace("knight:", "tool:"),
+        String::from_utf8_lossy(&expected.stderr).replace("ninja:", "tool:")
+    );
+}
+
 #[test]
 fn missing_order_only_source_inputs_follow_phony_policy_like_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
@@ -3438,6 +3534,45 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
             .lines()
             .collect::<Vec<_>>()
     );
+
+    let arguments = ["-t", "targts"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(&alias, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&expected.stderr)
+            .lines()
+            .collect::<Vec<_>>()
+    );
+
+    for arguments in [
+        &["-j", "not-a-number"][..],
+        &["-j", "-1"][..],
+        &["-k", "not-a-number"][..],
+        &["-l", "not-a-number"][..],
+    ] {
+        let expected = run(Path::new(&ninja), temp.path(), arguments);
+        let actual = run(&alias, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&expected.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            "{arguments:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3596,6 +3731,11 @@ fn top_level_short_option_clusters_match_ninja() {
         &["-nvj1"][..],
         &["-fbuild.ninja", "-n"][..],
         &["-k-1", "-tlist"][..],
+        &["-j", "  +1", "-n", "out"][..],
+        &["-j", "-0", "-n", "out"][..],
+        &["-j999999999999999999999999999999999999", "-n", "out"][..],
+        &["-k", "  +1", "-n", "out"][..],
+        &["-k-999999999999999999999999999999999999", "-n", "out"][..],
         &["-l-1", "-tlist"][..],
         &["-tlist"][..],
     ] {
@@ -3656,6 +3796,57 @@ fn long_option_abbreviations_match_ninja() {
             "{arguments:?}"
         );
         assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
+    }
+}
+
+#[test]
+fn attached_long_option_values_follow_platform_getopt_semantics() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "build all: phony\ndefault all\n",
+    )
+    .unwrap();
+
+    for arguments in [
+        &["--version=ignored"][..],
+        &["--help=ignored"][..],
+        &["--quiet=ignored", "-n"][..],
+        &["--verbose=ignored", "-n"][..],
+        &["--status="][..],
+    ] {
+        let expected = run(ninja, temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        if matches!(arguments[0], "--quiet=ignored" | "--verbose=ignored") {
+            let expected_output = String::from_utf8_lossy(&expected.stdout)
+                .replace("ninja:", "tool:")
+                .replace("\r\n", "\n");
+            let actual_output = String::from_utf8_lossy(&actual.stdout)
+                .replace("knight:", "tool:")
+                .replace("\r\n", "\n");
+            assert_eq!(actual_output, expected_output, "{arguments:?}");
+        }
+        assert_eq!(
+            actual.stdout.is_empty(),
+            expected.stdout.is_empty(),
+            "{arguments:?}"
+        );
+        assert_eq!(
+            actual.stderr.is_empty(),
+            expected.stderr.is_empty(),
+            "{arguments:?}"
+        );
     }
 }
 

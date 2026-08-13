@@ -15,6 +15,7 @@ use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::{HashMapExt, HashSetExt};
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -183,10 +184,15 @@ fn run() -> Result<(), String> {
                         .map(|(name, _)| *name)
                         .chain(HIDDEN_TOOLS.iter().copied()),
                 );
-                return Err(suggestion.map_or_else(
+                let message = suggestion.map_or_else(
                     || format!("unknown tool '{tool}'"),
                     |suggestion| format!("unknown tool '{tool}', did you mean '{suggestion}'?"),
-                ));
+                );
+                return Err(if program_name() == "ninja" {
+                    format!("{FATAL_PREFIX}{message}")
+                } else {
+                    message
+                });
             }
             _ => {}
         }
@@ -318,10 +324,27 @@ fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
     };
     let mut index = 0;
     while index < args.len() {
-        let argument = resolve_long_option(
+        #[allow(unused_mut)]
+        let mut argument = resolve_long_option(
             &args[index],
             &["--help", "--version", "--verbose", "--quiet", "--status"],
         )?;
+        if let Some((_, value)) = args[index].split_once('=') {
+            let option = argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(name, _)| name);
+            if matches!(option, "--help" | "--version" | "--verbose" | "--quiet") {
+                #[cfg(windows)]
+                {
+                    argument = option.to_owned();
+                }
+                #[cfg(not(windows))]
+                return Err(format!("option '{option}' doesn't allow an argument"));
+            } else if option == "--status" && value.is_empty() {
+                #[cfg(windows)]
+                return Err("option '--status' requires an argument".to_owned());
+            }
+        }
         match argument.as_str() {
             "--version" => {
                 println!("{NINJA_COMPAT_VERSION}");
@@ -499,9 +522,22 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
 }
 
 fn parse_count(option: &str, value: &str, allow_zero: bool) -> Result<usize, String> {
-    let count = value
-        .parse::<usize>()
-        .map_err(|_| format!("invalid value for {option}: '{value}'"))?;
+    let error = || {
+        if program_name() == "ninja" && option == "-j" {
+            format!("{FATAL_PREFIX}invalid -j parameter")
+        } else {
+            format!("invalid value for {option}: '{value}'")
+        }
+    };
+    let (negative, magnitude) = parse_strtol(value).ok_or_else(&error)?;
+    if negative && magnitude != 0 {
+        return Err(error());
+    }
+    let count = if magnitude > i32::MAX as u128 {
+        usize::MAX
+    } else {
+        magnitude as usize
+    };
     if count == 0 && !allow_zero {
         return Err(format!("{option} must be greater than zero"));
     }
@@ -509,28 +545,55 @@ fn parse_count(option: &str, value: &str, allow_zero: bool) -> Result<usize, Str
 }
 
 fn parse_failure_count(value: &str) -> Result<usize, String> {
-    let count = value
-        .parse::<i128>()
-        .map_err(|_| format!("invalid value for -k: '{value}'"))?;
-    if count <= 0 {
+    let (negative, magnitude) = parse_strtol(value).ok_or_else(|| {
+        if program_name() == "ninja" {
+            format!("{FATAL_PREFIX}-k parameter not numeric; did you mean -k 0?")
+        } else {
+            format!("invalid value for -k: '{value}'")
+        }
+    })?;
+    if negative || magnitude == 0 || magnitude > i32::MAX as u128 {
         Ok(0)
     } else {
-        usize::try_from(count).map_err(|_| format!("invalid value for -k: '{value}'"))
+        Ok(magnitude as usize)
     }
 }
 
-fn parse_load_average(value: &str) -> Result<f64, String> {
-    let value = value.trim_start();
-    let mut parsed = None;
-    for end in value
-        .char_indices()
-        .map(|(index, character)| index + character.len_utf8())
-    {
-        if let Ok(candidate) = value[..end].parse::<f64>() {
-            parsed = Some(candidate);
-        }
+fn parse_strtol(value: &str) -> Option<(bool, u128)> {
+    let value = value.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
     }
-    parsed.ok_or_else(|| format!("invalid value for -l: '{value}'"))
+    let magnitude = digits.bytes().fold(0u128, |value, digit| {
+        value
+            .saturating_mul(10)
+            .saturating_add(u128::from(digit - b'0'))
+    });
+    Some((negative, magnitude))
+}
+
+fn parse_load_average(value: &str) -> Result<f64, String> {
+    let error = || {
+        if program_name() == "ninja" {
+            format!("{FATAL_PREFIX}-l parameter not numeric: did you mean -l 0.0?")
+        } else {
+            format!("invalid value for -l: '{value}'")
+        }
+    };
+    let encoded = CString::new(value).map_err(|_| error())?;
+    let mut end = std::ptr::null_mut();
+    // SAFETY: `encoded` is NUL-terminated and `end` points to writable storage.
+    let parsed = unsafe { libc::strtod(encoded.as_ptr(), &raw mut end) };
+    if end.cast_const() == encoded.as_ptr() {
+        Err(error())
+    } else {
+        Ok(parsed)
+    }
 }
 
 fn unknown_choice(kind: &str, value: &str, choices: &[&str]) -> String {
@@ -903,10 +966,25 @@ fn tool_deps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
             println!("{output}: deps not found");
             continue;
         };
-        let status = fs::metadata(&output)
-            .ok()
-            .map(|metadata| log_mtime(&metadata) <= entry.mtime as u128)
-            .is_some_and(|valid| valid);
+        let status = match fs::metadata(&output) {
+            Ok(metadata) => log_mtime(&metadata) <= entry.mtime as u128,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                false
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let message = message
+                    .split_once(" (os error ")
+                    .map_or(message.as_str(), |(message, _)| message);
+                eprintln!("{}: error: stat({output}): {message}", program_name());
+                true
+            }
+        };
         println!(
             "{output}: #deps {}, deps mtime {} ({})",
             entry.inputs.len(),
@@ -1022,7 +1100,7 @@ fn log_mtime(metadata: &fs::Metadata) -> u128 {
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_nanos())
+        .map_or(0, |duration| duration.as_nanos().max(1))
 }
 
 fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
@@ -2414,7 +2492,7 @@ fn json_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_short_option_clusters;
+    use super::{expand_short_option_clusters, parse_failure_count, parse_load_average};
 
     #[test]
     fn expands_getopt_style_short_option_clusters() {
@@ -2439,5 +2517,13 @@ mod tests {
                 "-target",
             ]
         );
+    }
+
+    #[test]
+    fn numeric_options_follow_c_conversion_semantics() {
+        assert_eq!(parse_failure_count("  +7"), Ok(7));
+        assert_eq!(parse_failure_count("-999999999999999999999999"), Ok(0));
+        assert_eq!(parse_load_average("0x1p2 trailing"), Ok(4.0));
+        assert!(parse_load_average("not-a-number").is_err());
     }
 }
