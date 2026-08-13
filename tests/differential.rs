@@ -1126,26 +1126,57 @@ fn subprocess_child_signal_statuses_match_ninja() {
 #[cfg(unix)]
 #[test]
 fn subprocess_parent_signal_statuses_match_ninja() {
+    use std::process::Stdio;
+
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
         return;
     };
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
-    for signal in ["INT", "TERM", "HUP"] {
+    for (signal_name, signal) in [
+        ("INT", libc::SIGINT),
+        ("TERM", libc::SIGTERM),
+        ("HUP", libc::SIGHUP),
+    ] {
         let expected_dir = tempdir().unwrap();
         let actual_dir = tempdir().unwrap();
         let alias = actual_dir.path().join("ninja");
         install_ninja_alias(knight, &alias);
-        let manifest = format!(
-            "rule signal\n  command = kill -{signal} $$PPID; sleep 1\nbuild out: signal\ndefault out\n"
+        let manifest = concat!(
+            "rule signal\n",
+            "  command = printf ready > started; sleep 10\n",
+            "build out: signal\n",
+            "default out\n",
         );
         fs::write(expected_dir.path().join("build.ninja"), &manifest).unwrap();
         fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
-        let expected = run(Path::new(&ninja), expected_dir.path(), &[]);
-        let actual = run(&alias, actual_dir.path(), &[]);
-        assert_eq!(actual.status.code(), expected.status.code(), "{signal}");
-        assert_eq!(actual.stdout, expected.stdout, "{signal}");
-        assert_eq!(actual.stderr, expected.stderr, "{signal}");
+        let run_signaled = |executable: &Path, directory: &Path| {
+            let child = Command::new(executable)
+                .current_dir(directory)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            for _ in 0..200 {
+                if directory.join("started").exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(directory.join("started").exists(), "{signal_name}");
+            // SAFETY: `child.id()` names the live build process started above.
+            assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+            child.wait_with_output().unwrap()
+        };
+        let expected = run_signaled(Path::new(&ninja), expected_dir.path());
+        let actual = run_signaled(&alias, actual_dir.path());
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{signal_name}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{signal_name}");
+        assert_eq!(actual.stderr, expected.stderr, "{signal_name}");
     }
 }
 
