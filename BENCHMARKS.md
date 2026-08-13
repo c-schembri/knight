@@ -330,16 +330,16 @@ the alternating timed samples.
 | 1,000 | 3,000 | 100 | Knight | 19.896 ms | 18.312 ms | 66.984 ms |
 | 3,000 | 9,000 | 30 | Ninja | 240.462 ms | 235.908 ms | 338.845 ms |
 | 3,000 | 9,000 | 30 | Knight | 35.824 ms | 33.816 ms | 81.684 ms |
-| 10,000 | 30,000 | 50 | Ninja | 858.117 ms | 836.220 ms | 945.050 ms |
-| 10,000 | 30,000 | 50 | Knight | 100.846 ms | 93.159 ms | 152.539 ms |
+| 10,000 | 30,000 | 50 | Ninja | 860.774 ms | 827.556 ms | 976.739 ms |
+| 10,000 | 30,000 | 50 | Knight | 86.667 ms | 78.191 ms | 168.959 ms |
 
-Knight is 4.5x, 6.7x, and 8.5x faster by median as the corpus grows, with
-2.8x-6.2x lower P95. Quiet dry runs no longer materialize command,
-description, or response-file expansions after an edge is already known dirty.
-Instrumentation on the 30,000-edge case attributes about
-19.3 ms to manifest parsing, 9.7 ms to filesystem stat, 7.5 ms to scheduler-
-graph construction, and 47.4 ms to edge evaluation. This path is approaching,
-but has not reached, the project-wide 10x requirement.
+Knight is 4.5x, 6.7x, and 9.9x faster by median as the corpus grows, with much
+lower P95. Quiet dry runs no longer materialize command, description,
+response-file, reason, or pool values after a missing output makes an edge
+unambiguously dirty. When pool planning already computed the complete dirty
+set, the execution simulation reuses it rather than reevaluating every edge.
+The latest 30,000-edge result is 14.1% faster than the preceding 100.846 ms
+Knight median and is now just short of the project-wide 10x threshold.
 
 ## Terminal status elision
 

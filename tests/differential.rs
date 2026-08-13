@@ -5058,38 +5058,47 @@ fn browse_server_serves_query_pages_like_ninja() {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut stream = loop {
-            match TcpStream::connect(("127.0.0.1", port)) {
-                Ok(stream) => break stream,
-                Err(error) if Instant::now() < deadline => {
-                    let _ = error;
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("browse server did not start: {error}");
-                }
-            }
-        };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .write_all(b"GET /?out HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-            .unwrap();
         let mut response = Vec::new();
-        loop {
-            let mut buffer = [0; 8192];
-            match stream.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => response.extend_from_slice(&buffer[..count]),
-                Err(error)
-                    if error.kind() == ErrorKind::ConnectionReset && !response.is_empty() =>
-                {
-                    break;
+        'request: loop {
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(error) if Instant::now() < deadline => {
+                        let _ = error;
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("browse server did not start: {error}");
+                    }
                 }
-                Err(error) => panic!("reading browse response: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(b"GET /?out HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            loop {
+                let mut buffer = [0; 8192];
+                match stream.read(&mut buffer) {
+                    Ok(0) => break 'request,
+                    Ok(count) => response.extend_from_slice(&buffer[..count]),
+                    Err(error)
+                        if error.kind() == ErrorKind::ConnectionReset && !response.is_empty() =>
+                    {
+                        break 'request;
+                    }
+                    Err(error)
+                        if error.kind() == ErrorKind::ConnectionReset
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue 'request;
+                    }
+                    Err(error) => panic!("reading browse response: {error}"),
+                }
             }
         }
         child.kill().unwrap();
