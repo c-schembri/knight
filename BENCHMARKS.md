@@ -1,9 +1,57 @@
 # Benchmarks
 
-Benchmarks are comparative evidence, not a blanket performance claim. Run them
-with `scripts/benchmark.ps1`; raw results are written below `target/` and are
-not committed. The runner warms both tools three times and alternates launch
-order on every sample to reduce cache/order bias.
+Benchmarks are comparative evidence, not a blanket performance claim. The
+end-to-end suite is `scripts/benchmark-build-lifecycle.ps1`; focused runners
+below it isolate individual build-engine paths. Raw results are written below
+`target/` and are not committed. The runners warm both tools where appropriate
+and alternate launch order on every sample to reduce cache/order bias.
+
+## Build lifecycle suite
+
+`scripts/benchmark-build-lifecycle.ps1` creates byte-identical, isolated work
+trees for Knight and Ninja and checks representative final artifacts for equal
+SHA-256 content. Its primary workloads use real Clang C++ compilation, GCC-style
+depfiles, and LLD linking. Additional workloads cover short parallel commands,
+manifest regeneration and reload, and ready dyndep loading. Clean scenarios
+remove outputs and Ninja metadata before every sample; incremental scenarios
+change the same source bytes in both trees before their timed invocation.
+
+The suite requires `clang++` and `lld-link` on `PATH`. Run it from PowerShell
+with an upstream Ninja binary:
+
+```powershell
+powershell -NoProfile -File scripts\benchmark-build-lifecycle.ps1 -Ninja C:\path\to\ninja.exe
+```
+
+The 2026-08-14 Windows x64 run used Knight and upstream Ninja 1.14.0.git,
+Clang/LLD from Visual Studio 2022, an AMD Ryzen 9 9900X, 24 jobs, 128 C++
+translation units, 256 short commands, and 1,000 ready dyndep files. Expensive
+build cases used 10 interleaved samples per tool; fast planning/reload cases
+used 50 because short Windows process samples showed a bimodal tail.
+
+| Scenario | Ninja median | Knight median | Knight/Ninja | Winner |
+| :--- | ---: | ---: | ---: | :--- |
+| Parallel clean build | 894.434 ms | 734.541 ms | 0.821 | Knight |
+| Serial clean build | 4895.305 ms | 4982.723 ms | 1.018 | Ninja |
+| Warm no-op | 77.664 ms | 19.485 ms | 0.251 | Knight |
+| One-source rebuild and relink | 110.940 ms | 113.436 ms | 1.022 | Ninja |
+| Shared-header rebuild and relink | 889.102 ms | 758.324 ms | 0.853 | Knight |
+| Direct depfile load, no deps log | 12.588 ms | 21.436 ms | 1.703 | Ninja |
+| 256 parallel short commands | 2940.069 ms | 2399.953 ms | 0.816 | Knight |
+| Manifest regenerate and reload | 5.406 ms | 5.962 ms | 1.103 | Ninja |
+| 1,000 ready dyndep files | 75.144 ms | 54.448 ms | 0.725 | Knight |
+
+Knight wins five of nine medians, including the parallel clean, shared-header,
+short-command, warm no-op, and ready-dyndep cases. Serial clean and one-source
+incremental builds are within 2.2% of Ninja. Direct depfile loading and manifest
+regeneration remain clear optimization targets.
+
+The warm no-op result needs a tail-latency caveat: Ninja samples clustered near
+5-6 ms or 76-85 ms, while Knight stayed near 18-23 ms. The table reports the
+predeclared median, but Ninja's 5.248 ms minimum demonstrates a faster quiet
+path when the host does not impose the recurring stall. The suite stores every
+sample in `target/benchmark-build-lifecycle/results.json` so this distribution
+is visible rather than collapsed into a single favorable ratio.
 
 ## 2026-08-13, Windows x64
 

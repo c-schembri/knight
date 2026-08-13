@@ -21,6 +21,7 @@ logs are supported and covered by upstream interoperability tests.
 The differential benchmark runner expects an upstream `ninja` executable:
 
 ```powershell
+powershell -NoProfile -File scripts\benchmark-build-lifecycle.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-dyndep.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-dyndep-parse.ps1 -Ninja C:\path\to\ninja.exe
