@@ -173,8 +173,10 @@ This is an evidence ledger, not a claim of full compatibility.
   process group with the same interrupted-output cleanup. This path is
   exercised by the Linux integration suite.
 - Non-console stdout and stderr share one capture pipe, preserving emitted
-  order. Raw bytes are retained, and ANSI escapes follow Ninja's terminal,
-  `TERM=dumb`, `NO_COLOR`, `CLICOLOR_FORCE`, and `FORCE_COLOR` precedence.
+  order. Raw bytes are retained apart from Ninja's Windows CRT text-mode CRLF
+  conversion, which is reproduced for tool, diagnostic, status, and captured
+  command output. ANSI escapes follow Ninja's terminal, `TERM=dumb`,
+  `NO_COLOR`, `CLICOLOR_FORCE`, and `FORCE_COLOR` precedence.
   Failed-command headers and command lines precede buffered output and
   dependency-extraction diagnostics. Smart terminals receive Ninja's
   carriage-return start/finish refreshes, clear-to-end-of-line sequences, and

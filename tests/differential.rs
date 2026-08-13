@@ -289,8 +289,8 @@ fn command_output_preserves_stream_order_and_strips_ansi_when_piped() {
     if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
         fs::remove_file(temp.path().join("out")).unwrap();
         let expected = run(Path::new(&ninja), temp.path(), &[]);
-        let expected_stdout = String::from_utf8_lossy(&expected.stdout);
-        assert_eq!(lines, expected_stdout.lines().collect::<Vec<_>>());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
     }
 }
 
@@ -739,14 +739,8 @@ fn explicit_status_format_matches_ninja_and_counts_only_dirty_edges() {
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(knight, temp.path(), &arguments);
     assert!(expected.status.success() && actual.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stdout)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stdout)
-            .lines()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 }
 
 #[cfg(windows)]
@@ -2159,15 +2153,25 @@ fn commands_and_compdb_options_match_ninja() {
         assert!(!String::from_utf8_lossy(&actual.stdout).contains("unused"));
         if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
             let expected = run(Path::new(&ninja), temp.path(), arguments);
-            assert_eq!(
-                String::from_utf8_lossy(&actual.stdout)
-                    .lines()
-                    .collect::<Vec<_>>(),
-                String::from_utf8_lossy(&expected.stdout)
-                    .lines()
-                    .collect::<Vec<_>>(),
-                "arguments={arguments:?}"
-            );
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout, "arguments={arguments:?}");
+            assert_eq!(actual.stderr, expected.stderr, "arguments={arguments:?}");
+        }
+    }
+
+    if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
+        for arguments in [
+            &["-t", "rules", "-d"][..],
+            &["-t", "targets", "all"][..],
+            &["-t", "rules", "-x"][..],
+            &["-t", "commands", "-x"][..],
+            &["-t", "clean", "-x"][..],
+        ] {
+            let expected = run(Path::new(&ninja), temp.path(), arguments);
+            let actual = run(knight, temp.path(), arguments);
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout, "arguments={arguments:?}");
+            assert_eq!(actual.stderr, expected.stderr, "arguments={arguments:?}");
         }
     }
 
@@ -2197,19 +2201,7 @@ fn commands_and_compdb_options_match_ninja() {
             let expected = run(Path::new(&ninja), temp.path(), arguments);
             let actual = run(knight, temp.path(), arguments);
             assert_eq!(actual.status.code(), expected.status.code());
-            let actual_stdout = actual
-                .stdout
-                .iter()
-                .copied()
-                .filter(|byte| *byte != b'\r')
-                .collect::<Vec<_>>();
-            let expected_stdout = expected
-                .stdout
-                .iter()
-                .copied()
-                .filter(|byte| *byte != b'\r')
-                .collect::<Vec<_>>();
-            assert_eq!(actual_stdout, expected_stdout, "arguments={arguments:?}");
+            assert_eq!(actual.stdout, expected.stdout, "arguments={arguments:?}");
             assert_eq!(actual.stderr, expected.stderr, "arguments={arguments:?}");
         }
     }
@@ -2219,14 +2211,9 @@ fn commands_and_compdb_options_match_ninja() {
             let arguments = ["-t", "query", target];
             let actual = run(knight, temp.path(), &arguments);
             let expected = run(Path::new(&ninja), temp.path(), &arguments);
-            assert_eq!(
-                String::from_utf8_lossy(&actual.stdout)
-                    .lines()
-                    .collect::<Vec<_>>(),
-                String::from_utf8_lossy(&expected.stdout)
-                    .lines()
-                    .collect::<Vec<_>>()
-            );
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout, "target={target}");
+            assert_eq!(actual.stderr, expected.stderr, "target={target}");
         }
     }
 }
@@ -3691,36 +3678,15 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
     assert_eq!(actual.status.code(), expected.status.code());
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stdout)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stdout)
-            .lines()
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stderr)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stderr)
-            .lines()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 
     let arguments = ["-t", "targts"];
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
     assert_eq!(actual.status.code(), expected.status.code());
     assert_eq!(actual.stdout, expected.stdout);
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stderr)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stderr)
-            .lines()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(actual.stderr, expected.stderr);
 
     for arguments in [
         &["-j", "not-a-number"][..],
@@ -3736,15 +3702,7 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
             "{arguments:?}"
         );
         assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&actual.stderr)
-                .lines()
-                .collect::<Vec<_>>(),
-            String::from_utf8_lossy(&expected.stderr)
-                .lines()
-                .collect::<Vec<_>>(),
-            "{arguments:?}"
-        );
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
     }
 
     let fail_command = if cfg!(windows) {
@@ -3761,22 +3719,8 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
     assert_eq!(actual.status.code(), expected.status.code());
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stdout)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stdout)
-            .lines()
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stderr)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stderr)
-            .lines()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 
     let (fail_seven, fail_nine) = if cfg!(windows) {
         ("cmd /d /c exit 7", "cmd /d /c exit 9")
@@ -3794,22 +3738,8 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
     assert_eq!(actual.status.code(), expected.status.code());
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stdout)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stdout)
-            .lines()
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&actual.stderr)
-            .lines()
-            .collect::<Vec<_>>(),
-        String::from_utf8_lossy(&expected.stderr)
-            .lines()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 }
 
 #[cfg(unix)]
@@ -4099,7 +4029,10 @@ fn graph_tool_uses_ninja_graphviz_shape_and_implicit_defaults() {
     let actual = run(knight, temp.path(), &["-t", "graph"]);
     assert!(actual.status.success());
     let graph = String::from_utf8(actual.stdout).unwrap();
-    assert!(graph.starts_with("digraph ninja {\nrankdir=\"LR\"\n"));
+    assert_eq!(
+        graph.lines().take(2).collect::<Vec<_>>(),
+        ["digraph ninja {", "rankdir=\"LR\""]
+    );
     assert!(graph.contains("\"a\" -> \"final\" [label=\" phony\"]"));
     assert!(graph.contains("\"source\" -> \"a\" [label=\" phony\"]"));
     assert!(!graph.contains("shape=ellipse"));

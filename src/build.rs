@@ -20,6 +20,20 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+macro_rules! eprintln {
+    ($($argument:tt)*) => {{
+        write_build_stderr(format_args!($($argument)*));
+    }};
+}
+
+fn write_build_stderr(arguments: std::fmt::Arguments<'_>) {
+    let mut text = arguments.to_string();
+    text.push('\n');
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    write_build_text(&mut stderr, text.as_bytes()).expect("failed printing to stderr");
+}
+
 thread_local! {
     static LAST_BUILD_EXIT_CODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
@@ -4252,6 +4266,30 @@ struct BuildOutput {
     pending: Vec<u8>,
 }
 
+#[cfg(windows)]
+const BUILD_NEWLINE: &[u8] = b"\r\n";
+#[cfg(not(windows))]
+const BUILD_NEWLINE: &[u8] = b"\n";
+
+fn write_build_text(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        writer.write_all(bytes)
+    }
+    #[cfg(windows)]
+    {
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
+                writer.write_all(&bytes[start..index])?;
+                writer.write_all(BUILD_NEWLINE)?;
+                start = index + 1;
+            }
+        }
+        writer.write_all(&bytes[start..])
+    }
+}
+
 impl BuildOutput {
     fn new(fancy_status: bool, buffer_redirected_output: bool) -> Self {
         let is_terminal = io::stdout().is_terminal();
@@ -4291,8 +4329,7 @@ impl BuildOutput {
             return Ok(());
         }
         let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(&self.pending)
+        write_build_text(&mut stdout, &self.pending)
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("writing buffered console output: {error}"))?;
         self.pending.clear();
@@ -4302,7 +4339,7 @@ impl BuildOutput {
     fn print_status(&mut self, line: &str, full: bool) -> Result<(), String> {
         if self.buffered || self.suspended {
             self.pending.extend_from_slice(line.as_bytes());
-            self.pending.push(b'\n');
+            self.pending.extend_from_slice(BUILD_NEWLINE);
             return Ok(());
         }
         let mut stdout = io::stdout().lock();
@@ -4311,8 +4348,7 @@ impl BuildOutput {
                 .write_all(b"\r")
                 .map_err(|error| format!("writing build status: {error}"))?;
         }
-        stdout
-            .write_all(line.as_bytes())
+        write_build_text(&mut stdout, line.as_bytes())
             .map_err(|error| format!("writing build status: {error}"))?;
         if self.smart_terminal && !full {
             stdout
@@ -4321,7 +4357,7 @@ impl BuildOutput {
             self.have_blank_line = false;
         } else {
             stdout
-                .write_all(b"\n")
+                .write_all(BUILD_NEWLINE)
                 .map_err(|error| format!("writing build status: {error}"))?;
         }
         stdout
@@ -4332,7 +4368,7 @@ impl BuildOutput {
     fn print_on_new_line(&mut self, output: &[u8]) -> Result<(), String> {
         if self.buffered || self.suspended {
             if !self.have_blank_line {
-                self.pending.push(b'\n');
+                self.pending.extend_from_slice(BUILD_NEWLINE);
             }
             self.pending.extend_from_slice(output);
             self.have_blank_line = output.is_empty() || output.ends_with(b"\n");
@@ -4341,11 +4377,10 @@ impl BuildOutput {
         let mut stdout = io::stdout().lock();
         if !self.have_blank_line {
             stdout
-                .write_all(b"\n")
+                .write_all(BUILD_NEWLINE)
                 .map_err(|error| format!("writing command output: {error}"))?;
         }
-        stdout
-            .write_all(output)
+        write_build_text(&mut stdout, output)
             .map_err(|error| format!("writing command output: {error}"))?;
         self.have_blank_line = output.is_empty() || output.ends_with(b"\n");
         Ok(())
@@ -4368,8 +4403,7 @@ impl BuildOutput {
             return Ok(());
         }
         let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(&self.pending)
+        write_build_text(&mut stdout, &self.pending)
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("writing build output: {error}"))?;
         self.pending.clear();

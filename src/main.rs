@@ -22,6 +22,30 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
+macro_rules! print {
+    ($($argument:tt)*) => {{
+        write_stdout(format_args!($($argument)*), false);
+    }};
+}
+
+macro_rules! println {
+    () => {{
+        write_stdout(format_args!(""), true);
+    }};
+    ($($argument:tt)*) => {{
+        write_stdout(format_args!($($argument)*), true);
+    }};
+}
+
+macro_rules! eprintln {
+    () => {{
+        write_stderr(format_args!(""), true);
+    }};
+    ($($argument:tt)*) => {{
+        write_stderr(format_args!($($argument)*), true);
+    }};
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NINJA_COMPAT_VERSION: &str = "1.14.0";
 const MISSING_DEPS_EXIT: &str = "\0missingdeps";
@@ -68,6 +92,50 @@ const TOOLS: &[(&str, &str)] = &[
     ("wincodepage", "print the Windows code page used by ninja"),
 ];
 const HIDDEN_TOOLS: &[&str] = &["urtle"];
+
+fn write_stdout(arguments: std::fmt::Arguments<'_>, newline: bool) {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    write_text(&mut stdout, arguments, newline).expect("failed printing to stdout");
+}
+
+fn write_stderr(arguments: std::fmt::Arguments<'_>, newline: bool) {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    write_text(&mut stderr, arguments, newline).expect("failed printing to stderr");
+}
+
+fn write_text(
+    writer: &mut impl io::Write,
+    arguments: std::fmt::Arguments<'_>,
+    newline: bool,
+) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        writer.write_fmt(arguments)?;
+        if newline {
+            writer.write_all(b"\n")?;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut text = arguments.to_string();
+        if newline {
+            text.push('\n');
+        }
+        let bytes = text.as_bytes();
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
+                writer.write_all(&bytes[start..index])?;
+                writer.write_all(b"\r\n")?;
+                start = index + 1;
+            }
+        }
+        writer.write_all(&bytes[start..])?;
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 struct Cli {
@@ -1670,7 +1738,7 @@ fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
 fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<(), String> {
     let mut targets = Vec::new();
     let mut delimiter = "\t".to_owned();
-    let mut terminator = "\n";
+    let mut terminator = if cfg!(windows) { "\r\n" } else { "\n" };
     let mut dependency_order = false;
     let mut shell_escape = true;
     let mut index = 0;
