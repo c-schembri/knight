@@ -6105,7 +6105,6 @@ fn clean_supports_rules_and_generator_outputs() {
     assert!(!temp.path().join("generated.ninja").exists());
 }
 
-#[cfg(windows)]
 #[test]
 fn clean_loads_dyndeps_and_removes_dynamic_outputs() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
@@ -6120,7 +6119,7 @@ fn clean_loads_dyndeps_and_removes_dynamic_outputs() {
         fs::write(
             temp.path().join("build.ninja"),
             concat!(
-                "rule cc\n  command = cmd /d /c echo x>$out\n",
+                "rule cc\n  command = unused\n",
                 "build out: cc || deps.dd\n  dyndep = deps.dd\n",
             ),
         )
@@ -6142,6 +6141,313 @@ fn clean_loads_dyndeps_and_removes_dynamic_outputs() {
         );
         assert!(!temp.path().join("out").exists());
         assert!(!temp.path().join("out.dynamic").exists());
+    }
+}
+
+#[test]
+fn upstream_clean_all_target_rule_and_auxiliary_corpus_matches_ninja() {
+    struct Case {
+        name: &'static str,
+        manifest: &'static str,
+        files: &'static [&'static str],
+        arguments: &'static [&'static str],
+        present_after: &'static [&'static str],
+    }
+
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let base = concat!(
+        "rule cat\n  command = unused\n",
+        "rule cat_e\n  command = unused\n",
+        "build in1: cat_e src1\n",
+        "build out1: cat in1\n",
+        "build in2: cat_e src2\n",
+        "build out2: cat in2\n",
+    );
+    let cases = [
+        Case {
+            name: "CleanAll",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-t", "clean"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanAllDryRun",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-n", "-t", "clean"],
+            present_after: &["in1", "out1", "in2", "out2"],
+        },
+        Case {
+            name: "CleanTarget",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-t", "clean", "out1"],
+            present_after: &["in2", "out2"],
+        },
+        Case {
+            name: "CleanTargetDryRun",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-n", "-t", "clean", "out1"],
+            present_after: &["in1", "out1", "in2", "out2"],
+        },
+        Case {
+            name: "CleanRule",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-t", "clean", "-r", "cat_e"],
+            present_after: &["out1", "out2"],
+        },
+        Case {
+            name: "CleanRuleDryRun",
+            manifest: base,
+            files: &["in1", "out1", "in2", "out2"],
+            arguments: &["-n", "-t", "clean", "-r", "cat_e"],
+            present_after: &["in1", "out1", "in2", "out2"],
+        },
+        Case {
+            name: "CleanTargetMultiOutput",
+            manifest: concat!(
+                "rule cat\n  command = unused\n",
+                "build out1 out2: cat src1\n",
+                "build out3: cat src2\n",
+            ),
+            files: &["out1", "out2", "out3"],
+            arguments: &["-t", "clean", "out1"],
+            present_after: &["out3"],
+        },
+        Case {
+            name: "CleanRuleGeneratorDefault",
+            manifest: concat!(
+                "rule cat\n  command = unused\n",
+                "rule regen\n  command = unused\n  generator = 1\n",
+                "build out1: cat in1\n",
+                "build out2: regen in2\n",
+            ),
+            files: &["out1", "out2"],
+            arguments: &["-t", "clean"],
+            present_after: &["out2"],
+        },
+        Case {
+            name: "CleanRuleGeneratorIncluded",
+            manifest: concat!(
+                "rule cat\n  command = unused\n",
+                "rule regen\n  command = unused\n  generator = 1\n",
+                "build out1: cat in1\n",
+                "build out2: regen in2\n",
+            ),
+            files: &["out1", "out2"],
+            arguments: &["-t", "clean", "-g"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanDepFile",
+            manifest: concat!(
+                "rule cc\n  command = unused\n  depfile = $out.d\n",
+                "build out1: cc in1\n",
+            ),
+            files: &["out1", "out1.d"],
+            arguments: &["-t", "clean"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanDepFileOnCleanTarget",
+            manifest: concat!(
+                "rule cc\n  command = unused\n  depfile = $out.d\n",
+                "build out1: cc in1\n",
+            ),
+            files: &["out1", "out1.d"],
+            arguments: &["-t", "clean", "out1"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanDepFileOnCleanRule",
+            manifest: concat!(
+                "rule cc\n  command = unused\n  depfile = $out.d\n",
+                "build out1: cc in1\n",
+            ),
+            files: &["out1", "out1.d"],
+            arguments: &["-t", "clean", "-r", "cc"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanRspFile",
+            manifest: concat!(
+                "rule cc\n  command = unused\n  rspfile = cc1.rsp\n  rspfile_content = $in\n",
+                "build out1: cc in1\n",
+            ),
+            files: &["out1", "cc1.rsp"],
+            arguments: &["-t", "clean"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanRspTarget",
+            manifest: concat!(
+                "rule cat_rsp\n  command = unused\n  rspfile = $out.rsp\n  rspfile_content = $in\n",
+                "build in2: cat_rsp src2\n",
+                "build out2: cat_rsp in2\n",
+            ),
+            files: &["in2", "in2.rsp", "out2", "out2.rsp"],
+            arguments: &["-t", "clean", "out2"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanRspRule",
+            manifest: concat!(
+                "rule cat_rsp\n  command = unused\n  rspfile = $out.rsp\n  rspfile_content = $in\n",
+                "build in2: cat_rsp src2\n",
+                "build out2: cat_rsp in2\n",
+            ),
+            files: &["in2", "in2.rsp", "out2", "out2.rsp"],
+            arguments: &["-t", "clean", "-r", "cat_rsp"],
+            present_after: &[],
+        },
+        Case {
+            name: "CleanPhony",
+            manifest: concat!(
+                "rule cat\n  command = unused\n",
+                "build alias: phony t1 t2\n",
+                "build t1: cat\n",
+                "build t2: cat\n",
+            ),
+            files: &["alias", "t1", "t2"],
+            arguments: &["-t", "clean", "alias"],
+            present_after: &["alias"],
+        },
+        Case {
+            name: "CleanDepFileAndRspFileWithSpaces",
+            manifest: concat!(
+                "rule cc_dep\n  command = unused\n  depfile = $out.d\n",
+                "rule cc_rsp\n  command = unused\n  rspfile = $out.rsp\n  rspfile_content = $in\n",
+                "build out$ 1: cc_dep in$ 1\n",
+                "build out$ 2: cc_rsp in$ 1\n",
+            ),
+            files: &["out 1", "out 2", "out 1.d", "out 2.rsp"],
+            arguments: &["-t", "clean"],
+            present_after: &[],
+        },
+    ];
+
+    for case in cases {
+        let mut expected = None;
+        for executable in [Path::new(&ninja), knight] {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join("build.ninja"), case.manifest).unwrap();
+            for file in case.files {
+                fs::write(temp.path().join(file), []).unwrap();
+            }
+            let output = run(executable, temp.path(), case.arguments);
+            let state = case
+                .files
+                .iter()
+                .map(|path| temp.path().join(path).exists())
+                .collect::<Vec<_>>();
+            let result = (output.status.code(), output.stdout, output.stderr, state);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected, "{}", case.name);
+            } else {
+                expected = Some(result);
+            }
+            for file in case.files {
+                assert_eq!(
+                    temp.path().join(file).exists(),
+                    case.present_after.contains(file),
+                    "{}: {file}",
+                    case.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn upstream_clean_missing_dyndep_case_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let mut expected = None;
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule cat\n  command = unused\n",
+                "build out: cat in || dd\n  dyndep = dd\n",
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("out"), []).unwrap();
+        fs::write(temp.path().join("out.imp"), []).unwrap();
+        let output = run(executable, temp.path(), &["-t", "clean"]);
+        let result = (
+            output.status.code(),
+            output.stdout,
+            output.stderr,
+            temp.path().join("out").exists(),
+            temp.path().join("out.imp").exists(),
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert!(!temp.path().join("out").exists());
+        assert!(temp.path().join("out.imp").exists());
+    }
+}
+
+#[test]
+fn upstream_cleandead_removal_and_repeat_cases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let mut expected = None;
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "rule cat\n  command = unused\nbuild current: cat source\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(".ninja_log"),
+            "# ninja log v7\n0\t1\t0\tformer\t0\n0\t1\t0\tcurrent\t0\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("source"), []).unwrap();
+        fs::write(temp.path().join("former"), []).unwrap();
+        fs::write(temp.path().join("current"), []).unwrap();
+        let first = run(executable, temp.path(), &["-t", "cleandead"]);
+        let first_state = (
+            temp.path().join("former").exists(),
+            temp.path().join("current").exists(),
+        );
+        let second = run(executable, temp.path(), &["-t", "cleandead"]);
+        let result = (
+            first.status.code(),
+            first.stdout,
+            first.stderr,
+            first_state,
+            second.status.code(),
+            second.stdout,
+            second.stderr,
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert!(!temp.path().join("former").exists());
+        assert!(temp.path().join("current").exists());
     }
 }
 

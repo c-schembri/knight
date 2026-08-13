@@ -21,7 +21,7 @@ Status meanings:
 | :--- | ---: | :--- | :--- |
 | `build_log_test` | 11 | Mapped | Round-trip, signatures, duplicates, truncation, versions, spaces, restat, long lines, multi-output records, and recompaction |
 | `build_test` | 121 | Partial | Broad scheduling/build differentials; full case mapping remains open |
-| `clean_test` | 20 | Partial | Clean, rule clean, dyndep, dead-output, directory, and failure behavior |
+| `clean_test` | 20 | Mapped | All/target/rule and dry-run modes, multi-output/generator/phony edges, dep/rsp files, dyndeps, failures, spaces, and live/dead build-log outputs |
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |
 | `depfile_parser_test` | 29 | Mapped | `depfile::tests::upstream_depfile_parser_corpus` |
 | `deps_log_test` | 10 | Mapped | Round-trip, 100K inputs, deduplication, live recompaction, headers, truncation, reverse lookup, and malformed-record recovery |

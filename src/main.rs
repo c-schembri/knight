@@ -1836,7 +1836,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
     }
     let clean_all = operands.is_empty();
     if !options.quiet {
-        if options.verbose {
+        if options.verbose || options.dry_run {
             println!("Cleaning...");
         } else {
             print!("Cleaning... ");
@@ -1860,7 +1860,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
                 had_error = true;
                 continue;
             }
-            if options.verbose && !options.quiet {
+            if (options.verbose || options.dry_run) && !options.quiet {
                 println!("Rule {rule}");
             }
             for (id, edge) in manifest.edges.iter().enumerate() {
@@ -1913,7 +1913,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
                 had_error = true;
                 continue;
             }
-            if options.verbose && !options.quiet {
+            if (options.verbose || options.dry_run) && !options.quiet {
                 println!("Target {target}");
             }
             if let Some(id) = outputs.get(target.as_str()) {
@@ -2034,7 +2034,7 @@ fn clean_path(
             }
         }
     }
-    if options.verbose && !options.quiet {
+    if (options.verbose || options.dry_run) && !options.quiet {
         println!("Remove {path}");
     }
     (1, false)
@@ -2787,7 +2787,7 @@ fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), Str
         }
         return Ok(());
     };
-    if options.verbose && !options.quiet {
+    if (options.verbose || options.dry_run) && !options.quiet {
         println!("Cleaning...");
     }
     let mut removed = 0;
@@ -2804,7 +2804,7 @@ fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), Str
         }
     }
     if !options.quiet {
-        if options.verbose {
+        if options.verbose || options.dry_run {
             println!("{removed} files.");
         } else {
             println!("Cleaning... {removed} files.");

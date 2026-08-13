@@ -225,7 +225,12 @@ This is an evidence ledger, not a claim of full compatibility.
   files. Target cleaning traverses prerequisites, while rule cleaning retains
   Ninja's distinct behavior for paths produced by the built-in `phony` rule.
   `cleandead` preserves former outputs that remain explicit, implicit, or
-  order-only inputs in the current graph.
+  order-only inputs in the current graph. All 20 upstream clean cases are now
+  mapped byte-for-byte on Windows and Linux, including repeated and dry-run
+  all/target/rule cleanup, multi-output and generator edges, depfiles and
+  response files (with spaces), loaded and missing dyndeps, phony preservation,
+  removal failures, and live/dead build-log entries. As in Ninja, `-n` implies
+  verbose clean output even without an explicit `-v`.
   Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
   phony-edge filtering behavior. Compilation databases use Ninja's exact
   pretty-printed JSON shape, platform newline bytes, and JSON control-character
@@ -355,8 +360,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 93
-  library, 6 CLI, and 129 differential tests; Linux-under-WSL passes 88 library,
-  5 CLI, and 102 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 132 differential tests; Linux-under-WSL passes 88 library,
+  5 CLI, and 106 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
