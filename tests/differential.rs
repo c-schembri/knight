@@ -5014,7 +5014,7 @@ fn browse_help_matches_ninjas_embedded_tool() {
 #[cfg(unix)]
 #[test]
 fn browse_server_serves_query_pages_like_ninja() {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -5079,7 +5079,19 @@ fn browse_server_serves_query_pages_like_ninja() {
             .write_all(b"GET /?out HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .unwrap();
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
+        loop {
+            let mut buffer = [0; 8192];
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => response.extend_from_slice(&buffer[..count]),
+                Err(error)
+                    if error.kind() == ErrorKind::ConnectionReset && !response.is_empty() =>
+                {
+                    break;
+                }
+                Err(error) => panic!("reading browse response: {error}"),
+            }
+        }
         child.kill().unwrap();
         child.wait().unwrap();
         let separator = response
