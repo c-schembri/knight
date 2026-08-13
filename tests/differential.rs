@@ -861,6 +861,49 @@ fn nan_load_limit_does_not_throttle_parallelism_like_ninja() {
 }
 
 #[test]
+fn commands_that_expand_empty_match_ninjas_platform_behavior() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let manifest = "rule empty\n  command = $undefined\nbuild out: empty\ndefault out\n";
+
+    for arguments in [&["-n"][..], &[][..]] {
+        let mut observed = Vec::new();
+        for executable in [Path::new(&ninja), knight] {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+            observed.push(run(executable, temp.path(), arguments));
+        }
+        assert_eq!(observed[1].status.code(), observed[0].status.code());
+        assert_eq!(observed[1].stdout, observed[0].stdout);
+        let expected_error =
+            String::from_utf8_lossy(&observed[0].stderr).replace("ninja:", "tool:");
+        let actual_error = String::from_utf8_lossy(&observed[1].stderr).replace("knight:", "tool:");
+        if cfg!(windows) && arguments.is_empty() {
+            assert!(expected_error.contains("CreateProcess failed"));
+            assert!(actual_error.contains("starting command '': empty command"));
+        } else {
+            assert_eq!(actual_error, expected_error);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let alias = temp.path().join("ninja.exe");
+        fs::copy(knight, &alias).unwrap();
+        let expected = run(Path::new(&ninja), temp.path(), &[]);
+        let actual = run(&alias, temp.path(), &[]);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    }
+}
+
+#[test]
 fn initial_pool_frontier_includes_clean_phony_dependents() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let arguments = ["-n", "-j1"];

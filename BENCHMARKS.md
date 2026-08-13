@@ -224,11 +224,13 @@ the alternating timed samples.
 | 1,000 | 3,000 | 100 | Knight | 19.896 ms | 18.312 ms | 66.984 ms |
 | 3,000 | 9,000 | 30 | Ninja | 240.462 ms | 235.908 ms | 338.845 ms |
 | 3,000 | 9,000 | 30 | Knight | 35.824 ms | 33.816 ms | 81.684 ms |
-| 10,000 | 30,000 | 20 | Ninja | 832.032 ms | 819.452 ms | 882.834 ms |
-| 10,000 | 30,000 | 20 | Knight | 106.229 ms | 103.210 ms | 153.709 ms |
+| 10,000 | 30,000 | 50 | Ninja | 858.117 ms | 836.220 ms | 945.050 ms |
+| 10,000 | 30,000 | 50 | Knight | 100.846 ms | 93.159 ms | 152.539 ms |
 
-Knight is 4.5x, 6.7x, and 7.8x faster by median as the corpus grows, with
-2.8x-5.7x lower P95. Instrumentation on the 30,000-edge case attributes about
+Knight is 4.5x, 6.7x, and 8.5x faster by median as the corpus grows, with
+2.8x-6.2x lower P95. Quiet dry runs no longer materialize command,
+description, or response-file expansions after an edge is already known dirty.
+Instrumentation on the 30,000-edge case attributes about
 19.3 ms to manifest parsing, 9.7 ms to filesystem stat, 7.5 ms to scheduler-
-graph construction, and 56.1 ms to edge evaluation. This path is approaching,
+graph construction, and 47.4 ms to edge evaluation. This path is approaching,
 but has not reached, the project-wide 10x requirement.

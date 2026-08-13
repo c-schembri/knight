@@ -2262,6 +2262,7 @@ fn run_build_prepared<'a>(
                     restat_cleaned_outputs: &restat_cleaned_outputs,
                 },
                 &mut command_buffer,
+                !(options.dry_run && options.quiet),
             )?;
             if !evaluated.dirty {
                 outcome.edges_clean += 1;
@@ -2561,9 +2562,23 @@ fn run_build_prepared<'a>(
             &mut pool_reserved,
             &mut pool_usage,
         );
-        let mut output = completion
-            .output
-            .map_err(|error| format!("starting command '{}': {error}", completion.command))?;
+        let mut output = match completion.output {
+            Ok(output) => output,
+            #[cfg(windows)]
+            Err(_error) if completion.command.trim().is_empty() && program_name() == "ninja" => {
+                eprintln!("\nCreateProcess failed. Command attempted:\n\"\"");
+                return Err(
+                    "\0fatal:CreateProcess: The parameter is incorrect.\r\r\n (is the command line too long?)"
+                        .to_owned(),
+                );
+            }
+            Err(error) => {
+                return Err(format!(
+                    "starting command '{}': {error}",
+                    completion.command
+                ));
+            }
+        };
         #[cfg(unix)]
         if output.status.code() == Some(130) {
             LAST_BUILD_EXIT_CODE.with(|code| code.set(130));
@@ -2844,6 +2859,7 @@ fn initially_dirty_edges(
                 restat_cleaned_outputs: &restat_cleaned_outputs,
             },
             &mut command_buffer,
+            false,
         )
         .map_or(true, |evaluated| evaluated.dirty);
         if dirty[edge_id] {
@@ -3890,6 +3906,7 @@ fn evaluate_edge(
     edge: &Edge,
     context: &mut EvaluationContext<'_, '_>,
     command_buffer: &mut String,
+    materialize_dirty_command: bool,
 ) -> Result<EvaluatedEdge, String> {
     let manifest = context.manifest;
     let output_map = context.output_map;
@@ -3897,18 +3914,6 @@ fn evaluate_edge(
     if let Some(error) = &context.discovered.errors[edge_id] {
         return Err(error.clone());
     }
-    command_buffer.clear();
-    evaluate_binding_into(manifest, edge, "command", true, command_buffer);
-    if command_buffer.trim().is_empty() {
-        return Err(format!("rule '{}' has no command", edge.rule));
-    }
-    let rspfile_content = evaluate_binding(manifest, edge, "rspfile_content");
-    let expanded_log_command = if rspfile_content.is_empty() {
-        None
-    } else {
-        Some(format!("{command_buffer};rspfile={rspfile_content}"))
-    };
-    let log_command = expanded_log_command.as_deref().unwrap_or(command_buffer);
     let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
     let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
     let use_restat = restat
@@ -3966,10 +3971,24 @@ fn evaluate_edge(
     for input in &edge.order_only_inputs {
         let _ = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
     }
+    let mut command_evaluated = false;
+    let mut rspfile_content = String::new();
+    let mut expanded_log_command = None;
+    if !dirty {
+        command_buffer.clear();
+        evaluate_binding_into(manifest, edge, "command", true, command_buffer);
+        rspfile_content = evaluate_binding(manifest, edge, "rspfile_content");
+        if !rspfile_content.is_empty() {
+            expanded_log_command = Some(format!("{command_buffer};rspfile={rspfile_content}"));
+        }
+        command_evaluated = true;
+    }
     if !dirty
-        && context
-            .build_log
-            .command_changed(edge, log_command, generator)
+        && context.build_log.command_changed(
+            edge,
+            expanded_log_command.as_deref().unwrap_or(command_buffer),
+            generator,
+        )
     {
         dirty = true;
         reason = "command line changed".to_owned();
@@ -3995,6 +4014,29 @@ fn evaluate_edge(
             rspfile_content: None,
             newest_input,
         });
+    }
+
+    if !materialize_dirty_command {
+        return Ok(EvaluatedEdge {
+            dirty: true,
+            reason,
+            command: String::new(),
+            log_command: String::new(),
+            description: String::new(),
+            pool: edge_pool(manifest, edge),
+            rspfile: None,
+            rspfile_content: None,
+            newest_input,
+        });
+    }
+
+    if !command_evaluated {
+        command_buffer.clear();
+        evaluate_binding_into(manifest, edge, "command", true, command_buffer);
+        rspfile_content = evaluate_binding(manifest, edge, "rspfile_content");
+        if !rspfile_content.is_empty() {
+            expanded_log_command = Some(format!("{command_buffer};rspfile={rspfile_content}"));
+        }
     }
 
     let rspfile = evaluate_unescaped_binding(manifest, edge, "rspfile");

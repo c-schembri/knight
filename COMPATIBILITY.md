@@ -109,6 +109,10 @@ This is an evidence ledger, not a claim of full compatibility.
   Load limiting computes Ninja's integer launch capacity for each scheduling
   sweep, decrements it as commands start, always permits one command to make
   progress from idle, and preserves `strtod` NaN as a disabled limit.
+  Rule commands that expand to an empty string retain Ninja's platform split:
+  they are valid no-op shell commands on POSIX and dry runs, while Windows
+  execution preserves Ninja's `CreateProcess` failure framing when invoked as
+  `ninja` and gives the native `knight` command a shorter diagnostic.
 - Debug modes `explain`, `keepdepfile`, `keeprsp`, and `nostatcache`, plus the
   `phonycycle` warning policy, including the legacy self-reference behavior
   exposed by graph tools. The compatibility exception is restricted to
@@ -241,8 +245,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 65
-  library, 2 CLI, and 109 differential tests; Linux-under-WSL passes 64 library,
-  2 CLI, and 82 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 110 differential tests; Linux-under-WSL passes 64 library,
+  2 CLI, and 83 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
