@@ -1206,7 +1206,7 @@ fn subprocess_set_supports_more_than_1024_parallel_processes() {
         assert_eq!(actual.stdout, expected.stdout);
         assert_eq!(actual.stderr, expected.stderr);
     } else {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "netbsd")))]
         panic!(
             "Ninja failed: stdout={} stderr={}",
             String::from_utf8_lossy(&expected.stdout),

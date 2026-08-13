@@ -146,16 +146,24 @@ pub fn install_interrupt_handler() -> Result<(), String> {
 
 #[cfg(unix)]
 pub fn install_interrupt_handler() -> Result<(), String> {
-    ctrlc::set_handler(|| {
-        let interrupted_command = terminate_active_process_groups();
-        cleanup_interrupted_outputs();
-        if !interrupted_command {
-            // There is no command completion to wake the build loop. Ninja
-            // reports every handled POSIX termination signal as 128 + SIGINT.
-            std::process::exit(130);
-        }
-    })
-    .map_err(|error| format!("installing interrupt handler: {error}"))
+    let mut signals =
+        signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM, libc::SIGHUP])
+            .map_err(|error| format!("installing interrupt handler: {error}"))?;
+    std::thread::Builder::new()
+        .name("knight-signals".to_owned())
+        .spawn(move || {
+            for _ in signals.forever() {
+                let interrupted_command = terminate_active_process_groups();
+                cleanup_interrupted_outputs();
+                if !interrupted_command {
+                    // There is no command completion to wake the build loop. Ninja
+                    // reports every handled POSIX termination signal as 128 + SIGINT.
+                    std::process::exit(130);
+                }
+            }
+        })
+        .map_err(|error| format!("starting interrupt handler: {error}"))?;
+    Ok(())
 }
 
 #[cfg(unix)]

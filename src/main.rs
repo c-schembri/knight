@@ -1466,14 +1466,13 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
                     #[cfg(any(
                         target_os = "dragonfly",
                         target_os = "freebsd",
-                        target_os = "macos",
-                        target_os = "netbsd"
+                        target_os = "macos"
                     ))]
                     eprintln!(
                         "{}: option `--help' doesn't allow an argument",
                         program_name()
                     );
-                    #[cfg(target_os = "openbsd")]
+                    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
                     eprintln!(
                         "{}: option doesn't take an argument -- help",
                         program_name()
@@ -1768,9 +1767,9 @@ fn print_invalid_tool_option(tool: &str, option: char) {
     eprintln!("{tool}: invalid option -- `-{option}'");
     #[cfg(target_os = "macos")]
     eprintln!("{tool}: illegal option -- {option}");
-    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))]
+    #[cfg(any(target_os = "dragonfly", target_os = "freebsd"))]
     eprintln!("{}: illegal option -- {option}", program_name());
-    #[cfg(target_os = "openbsd")]
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
     eprintln!("{}: unknown option -- {option}", program_name());
     #[cfg(all(
         not(windows),
@@ -1796,14 +1795,9 @@ fn print_unrecognized_tool_option(tool: &str, argument: &str) {
     let _ = tool;
     #[cfg(windows)]
     print_invalid_tool_option(tool, argument[2..].chars().next().unwrap_or('?'));
-    #[cfg(any(
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "macos",
-        target_os = "netbsd"
-    ))]
+    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "macos"))]
     eprintln!("{}: unrecognized option `{argument}'", program_name());
-    #[cfg(target_os = "openbsd")]
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
     eprintln!(
         "{}: unknown option -- {}",
         program_name(),
@@ -1831,14 +1825,9 @@ fn print_invalid_long_tool_option(tool: &str, option: char) {
         target_os = "openbsd"
     ))]
     let _ = tool;
-    #[cfg(any(
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "macos",
-        target_os = "netbsd"
-    ))]
+    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "macos"))]
     eprintln!("{}: invalid option -- {option}", program_name());
-    #[cfg(target_os = "openbsd")]
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
     eprintln!("{}: unknown option -- {option}", program_name());
     #[cfg(not(any(
         target_os = "dragonfly",
@@ -2304,14 +2293,13 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                     #[cfg(any(
                         target_os = "dragonfly",
                         target_os = "freebsd",
-                        target_os = "macos",
-                        target_os = "netbsd"
+                        target_os = "macos"
                     ))]
                     eprintln!(
                         "{}: option `{option}' doesn't allow an argument",
                         program_name()
                     );
-                    #[cfg(target_os = "openbsd")]
+                    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
                     eprintln!(
                         "{}: option doesn't take an argument -- {}",
                         program_name(),
@@ -2513,7 +2501,7 @@ fn print_required_tool_argument(tool: &str, option: &str, long: bool) {
         target_os = "openbsd"
     ))]
     let _ = tool;
-    #[cfg(target_os = "openbsd")]
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
     let _ = long;
     #[cfg(windows)]
     if long {
@@ -2521,12 +2509,7 @@ fn print_required_tool_argument(tool: &str, option: &str, long: bool) {
     } else {
         eprintln!("{tool}: argument required for option `-{option}'");
     }
-    #[cfg(any(
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "macos",
-        target_os = "netbsd"
-    ))]
+    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "macos"))]
     if long {
         eprintln!("{}: option `{option}' requires an argument", program_name());
     } else {
@@ -2535,7 +2518,7 @@ fn print_required_tool_argument(tool: &str, option: &str, long: bool) {
             program_name()
         );
     }
-    #[cfg(target_os = "openbsd")]
+    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
     eprintln!(
         "{}: option requires an argument -- {}",
         program_name(),

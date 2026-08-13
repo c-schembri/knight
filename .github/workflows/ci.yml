@@ -83,7 +83,9 @@ jobs:
         with:
           release: "10.1"
           envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
-          prepare: /usr/sbin/pkg_add -u rust git cmake python313
+          prepare: |
+            /usr/sbin/pkg_add -u rust git cmake python313
+            ln -sf /usr/pkg/bin/python3.13 /usr/pkg/bin/python3
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
