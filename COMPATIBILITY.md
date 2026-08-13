@@ -17,7 +17,12 @@ This is an evidence ledger, not a claim of full compatibility.
   newline escape are supported. Special depfile, dyndep, and response-file path
   bindings use Ninja's unescaped `$in`/`$out` expansion. Paths are canonicalized
   to Ninja identity rules across manifests, depfiles, dyndeps, dependency logs,
-  tools, and CLI targets.
+  tools, and CLI targets. On Windows, Knight separately retains Ninja's
+  first-observed per-node separator spelling and restores it in `$in`,
+  `$in_newline`, and `$out`, including mixed separators, path-variable
+  expansion, and `.`/`..` canonicalization. The complete upstream generic and
+  Windows canonicalization samples plus all 16 `SlashTracking` cases are mapped
+  directly, with byte-exact `commands` and verbose dry-run differentials.
 - Edge-local bindings can participate in output, input, order-only, validation,
   and implicit path expansion, matching Ninja's post-binding path evaluation.
 - Duplicate-output, invalid escape, malformed declaration, response-file pair,
@@ -281,7 +286,9 @@ This is an evidence ledger, not a claim of full compatibility.
   path-behavior groups from the upstream `IncludesNormalize` corpus are mapped
   directly; Knight deliberately retains its long-path support instead of
   reproducing Ninja's two `MAX_PATH` rejection cases. The deprecated `msvc`
-  helper also writes Ninja's CRLF depfile bytes.
+  helper also writes Ninja's CRLF depfile bytes and space escapes, preserves
+  raw child output when dependency extraction is not requested, imports its
+  binary environment block, and forwards child stderr byte-for-byte.
 - Diagnostic identity follows the invocation name: the normal executable uses
   `knight:`, while a copy or link installed as `ninja` uses Ninja-compatible
   `ninja:`/`ninja explain:` prefixes. `-d explain` identifies the dirty input
@@ -304,8 +311,8 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 72
-  library, 3 CLI, and 117 differential tests; Linux-under-WSL passes 70 library,
+- Broader cross-platform runtime validation. The current Windows gates pass 76
+  library, 4 CLI, and 119 differential tests; Linux-under-WSL passes 71 library,
   3 CLI, and 89 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.

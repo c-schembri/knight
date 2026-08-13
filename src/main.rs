@@ -20,6 +20,8 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Output;
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
@@ -940,6 +942,11 @@ fn print_msvc_usage() {
 }
 
 #[cfg(windows)]
+fn escape_msvc_depfile_path(path: &str) -> String {
+    path.replace(' ', "\\ ")
+}
+
+#[cfg(windows)]
 fn tool_msvc(args: &[String]) -> Result<(), String> {
     use std::io::Write as _;
 
@@ -1022,20 +1029,29 @@ fn tool_msvc(args: &[String]) -> Result<(), String> {
     let output = command
         .output()
         .map_err(|error| format!("running '{}': {error}", command_line.join(" ")))?;
+    let Output {
+        status,
+        stdout,
+        stderr,
+    } = output;
     let mut includes = BTreeSet::new();
-    let stdout = filter_msvc_output(&output.stdout, &prefix, &mut includes)?;
+    let stdout = if object.is_some() {
+        filter_msvc_output(&stdout, &prefix, &mut includes)?
+    } else {
+        stdout
+    };
     io::stdout()
         .write_all(&stdout)
         .map_err(|error| format!("writing compiler output: {error}"))?;
     io::stderr()
-        .write_all(&output.stderr)
+        .write_all(&stderr)
         .map_err(|error| format!("writing compiler error output: {error}"))?;
 
     if let Some(object) = object {
         let depfile = format!("{object}.d");
         let mut contents = format!("{object}: ");
         for include in includes {
-            contents.push_str(&include.replace(' ', "\\ "));
+            contents.push_str(&escape_msvc_depfile_path(&include));
             contents.push_str("\r\n");
         }
         if let Err(error) = fs::write(&depfile, contents) {
@@ -1044,12 +1060,12 @@ fn tool_msvc(args: &[String]) -> Result<(), String> {
             return Err(format!("writing {depfile}: {error}"));
         }
     }
-    if output.status.success() {
+    if status.success() {
         Ok(())
     } else {
         Err(format!(
             "{TOOL_EXIT_PREFIX}{}",
-            output.status.code().unwrap_or(1).clamp(1, 255)
+            status.code().unwrap_or(1).clamp(1, 255)
         ))
     }
 }
@@ -2945,6 +2961,15 @@ mod tests {
         );
         assert_eq!(json_escape("\u{0001}\u{001f}"), "\\u0001\\u001f");
         assert_eq!(json_escape("你好"), "你好");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upstream_msvc_depfile_escape_corpus() {
+        assert_eq!(
+            super::escape_msvc_depfile_path(r"sub\some sdk\foo.h"),
+            r"sub\some\ sdk\foo.h"
+        );
     }
 
     #[test]

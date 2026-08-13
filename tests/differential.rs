@@ -950,6 +950,64 @@ fn commands_that_expand_empty_match_ninjas_platform_behavior() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn command_path_separator_spelling_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    for (name, manifest) in [
+        (
+            "direct",
+            "rule echo\n  command = echo [$in] [$in_newline] [$out]\nbuild out\\file: echo in\\file\n",
+        ),
+        (
+            "first-node-spelling",
+            "rule echo\n  command = echo [$in] [$out]\nbuild seed: phony dir/file\nbuild out\\file: echo dir\\file\n",
+        ),
+        (
+            "variable-expanded",
+            "rule echo\n  command = echo [$in] [$out]\ndir = nested\\dir\nbuild $dir\\out: echo $dir\\in\n",
+        ),
+        (
+            "canonicalized",
+            "rule echo\n  command = echo [$in] [$out]\nbuild old\\..\\final\\file: echo src\\part\\..\\file\n",
+        ),
+        (
+            "mixed-separator-output",
+            "rule echo\n  command = echo [$in] [$out]\nbuild out\\out2/out3\\out4: echo src\\in1\n",
+        ),
+        (
+            "implicit-first-node-spelling",
+            "rule echo\n  command = echo [$in] [$out]\nbuild seed: phony | dir/file\nbuild out\\file: echo dir\\file\n",
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        for source in [
+            "in/file",
+            "dir/file",
+            "nested/dir/in",
+            "src/file",
+            "src/in1",
+        ] {
+            let source = temp.path().join(source);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(source, "source").unwrap();
+        }
+        for arguments in [&["-t", "commands"][..], &["-n", "-v"][..]] {
+            let expected = run(ninja, temp.path(), arguments);
+            let actual = run(knight, temp.path(), arguments);
+            assert_eq!(actual.status.code(), expected.status.code(), "{name}");
+            assert_eq!(actual.stdout, expected.stdout, "{name}");
+            assert_eq!(actual.stderr, expected.stderr, "{name}");
+        }
+    }
+}
+
 #[test]
 fn initial_pool_frontier_includes_clean_phony_dependents() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
@@ -2511,6 +2569,51 @@ fn msvc_helper_normalizes_include_paths_like_ninja() {
         let actual_depfile = fs::read(temp.path().join("obj.d")).unwrap();
         assert_eq!(actual.status.code(), expected.status.code(), "{include}");
         assert_eq!(actual_depfile, expected_depfile, "{include}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn msvc_helper_environment_and_stderr_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("environment.bin"), b"foo=bar\0\0").unwrap();
+
+    for arguments in [
+        &[
+            "-t",
+            "msvc",
+            "-e",
+            "environment.bin",
+            "--",
+            "cmd",
+            "/d",
+            "/c",
+            "echo foo is %foo%",
+        ][..],
+        &[
+            "-t",
+            "msvc",
+            "--",
+            "cmd",
+            "/d",
+            "/c",
+            "echo to stdout&& echo to stderr 1>&2",
+        ][..],
+    ] {
+        let expected = run(Path::new(&ninja), temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
     }
 }
 

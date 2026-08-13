@@ -9,6 +9,11 @@ use std::sync::Arc;
 
 const SUPPORTED_SYNTAX_VERSION: &str = "1.14.0";
 
+#[cfg(windows)]
+type EdgeSlashKey = (usize, usize);
+#[cfg(windows)]
+type EdgeSlashBits = HashMap<EdgeSlashKey, Box<[u64]>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct Rule {
     pub name: String,
@@ -80,6 +85,10 @@ pub struct Manifest {
     has_pool_binding: bool,
     has_dyndep_binding: bool,
     has_dependency_binding: bool,
+    #[cfg(windows)]
+    path_slash_bits: Option<HashMap<String, u64>>,
+    #[cfg(windows)]
+    edge_slash_bits: Option<EdgeSlashBits>,
 }
 
 impl Manifest {
@@ -133,10 +142,47 @@ impl Manifest {
         self.has_pool_binding
     }
 
+    pub(crate) fn explicit_output_slash_bits(&self, edge: &Edge) -> &[u64] {
+        #[cfg(windows)]
+        {
+            self.edge_slash_bits
+                .as_ref()
+                .and_then(|edges| edges.get(&edge_slash_key(edge)))
+                .and_then(|bits| bits.get(..edge.explicit_outputs.len()))
+                .unwrap_or(&[])
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = edge;
+            &[]
+        }
+    }
+
+    pub(crate) fn explicit_input_slash_bits(&self, edge: &Edge) -> &[u64] {
+        #[cfg(windows)]
+        {
+            self.edge_slash_bits
+                .as_ref()
+                .and_then(|edges| edges.get(&edge_slash_key(edge)))
+                .and_then(|bits| bits.get(edge.explicit_outputs.len()..))
+                .unwrap_or(&[])
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = edge;
+            &[]
+        }
+    }
+
     fn sync_root_scope(&mut self) {
         self.variables = self.scopes[0].variables.clone();
         self.rules = self.scopes[0].rules.clone();
     }
+}
+
+#[cfg(windows)]
+fn edge_slash_key(edge: &Edge) -> EdgeSlashKey {
+    (Arc::as_ptr(&edge.source) as usize, edge.line)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -247,20 +293,54 @@ enum DeferredPathKind {
     Validation,
 }
 
+#[derive(Clone, Copy)]
+struct ParsedPath {
+    kind: DeferredPathKind,
+    index: usize,
+    deferred: bool,
+    #[cfg(windows)]
+    slash_bits: u64,
+}
+
 #[derive(Default)]
-struct DeferredPaths(Vec<(DeferredPathKind, usize)>);
+struct ParsedEdgePaths(Vec<ParsedPath>);
+
+impl ParsedEdgePaths {
+    #[inline]
+    fn push(&mut self, kind: DeferredPathKind, index: usize, is_deferred: bool, slash_bits: u64) {
+        #[cfg(not(windows))]
+        let _ = slash_bits;
+        self.0.push(ParsedPath {
+            kind,
+            index,
+            deferred: is_deferred,
+            #[cfg(windows)]
+            slash_bits,
+        });
+    }
+}
 
 fn expand_deferred_paths(
     manifest: &mut Manifest,
     edge_id: usize,
-    deferred: &DeferredPaths,
+    paths: &mut ParsedEdgePaths,
 ) -> Result<(), Diagnostic> {
-    if deferred.0.is_empty() {
+    if paths.0.is_empty() {
+        #[cfg(windows)]
+        if manifest.path_slash_bits.is_none() {
+            return Ok(());
+        }
+        #[cfg(not(windows))]
         return Ok(());
     }
     let mut edge = std::mem::take(&mut manifest.edges[edge_id]);
     let result = (|| {
-        for &(kind, index) in &deferred.0 {
+        for parsed in &mut paths.0 {
+            if !parsed.deferred {
+                continue;
+            }
+            let kind = parsed.kind;
+            let index = parsed.index;
             let raw = match kind {
                 DeferredPathKind::ExplicitOutput => {
                     std::mem::take(&mut edge.explicit_outputs[index])
@@ -290,7 +370,13 @@ fn expand_deferred_paths(
                     "empty path",
                 ));
             }
-            let expanded = canonicalize_owned_path(expanded);
+            let (expanded, slash_bits) = canonicalize_owned_path_with_bits(expanded);
+            #[cfg(not(windows))]
+            let _ = slash_bits;
+            #[cfg(windows)]
+            {
+                parsed.slash_bits = slash_bits;
+            }
             match kind {
                 DeferredPathKind::ExplicitOutput => edge.explicit_outputs[index] = expanded,
                 DeferredPathKind::ImplicitOutput => edge.implicit_outputs[index] = expanded,
@@ -300,10 +386,93 @@ fn expand_deferred_paths(
                 DeferredPathKind::Validation => edge.validations[index] = expanded,
             }
         }
+        #[cfg(windows)]
+        register_edge_slash_bits(manifest, edge_id, &mut edge, paths);
         Ok(())
     })();
     manifest.edges[edge_id] = edge;
     result
+}
+
+#[cfg(windows)]
+fn register_edge_slash_bits(
+    manifest: &mut Manifest,
+    edge_id: usize,
+    edge: &mut Edge,
+    paths: &ParsedEdgePaths,
+) {
+    if manifest.path_slash_bits.is_none() {
+        if !paths.0.iter().any(|path| path.slash_bits != 0) {
+            return;
+        }
+        let mut registry = HashMap::with_capacity(edge_id.saturating_mul(2));
+        for previous in &manifest.edges[..edge_id] {
+            for path in previous
+                .outputs()
+                .chain(previous.inputs())
+                .chain(previous.validations.iter().map(String::as_str))
+            {
+                registry.entry(path.to_owned()).or_insert(0);
+            }
+        }
+        manifest.path_slash_bits = Some(registry);
+    }
+
+    let path_count = edge.outputs().count() + edge.inputs().count() + edge.validations.len();
+    let mut parsed_bits = vec![0u64; path_count];
+    for parsed in &paths.0 {
+        parsed_bits[edge_path_index(edge, parsed.kind, parsed.index)] = parsed.slash_bits;
+    }
+    let registry = manifest.path_slash_bits.as_mut().unwrap();
+    let mut explicit_bits =
+        Vec::with_capacity(edge.explicit_outputs.len() + edge.explicit_inputs.len());
+    let mut bit_index = 0usize;
+    let mut register = |path: &str| {
+        let parsed = parsed_bits[bit_index];
+        bit_index += 1;
+        *registry.entry(path.to_owned()).or_insert(parsed)
+    };
+    for path in &edge.explicit_outputs {
+        explicit_bits.push(register(path));
+    }
+    for path in &edge.implicit_outputs {
+        register(path);
+    }
+    for path in &edge.explicit_inputs {
+        explicit_bits.push(register(path));
+    }
+    for path in &edge.implicit_inputs {
+        register(path);
+    }
+    for path in &edge.order_only_inputs {
+        register(path);
+    }
+    for path in &edge.validations {
+        register(path);
+    }
+    debug_assert_eq!(bit_index, path_count);
+    if explicit_bits.iter().any(|bits| *bits != 0) {
+        manifest
+            .edge_slash_bits
+            .get_or_insert_with(HashMap::new)
+            .insert(edge_slash_key(edge), explicit_bits.into_boxed_slice());
+    }
+}
+
+#[cfg(windows)]
+fn edge_path_index(edge: &Edge, kind: DeferredPathKind, index: usize) -> usize {
+    let outputs = edge.explicit_outputs.len() + edge.implicit_outputs.len();
+    let explicit_inputs = outputs + edge.explicit_inputs.len();
+    let implicit_inputs = explicit_inputs + edge.implicit_inputs.len();
+    let order_only_inputs = implicit_inputs + edge.order_only_inputs.len();
+    match kind {
+        DeferredPathKind::ExplicitOutput => index,
+        DeferredPathKind::ImplicitOutput => edge.explicit_outputs.len() + index,
+        DeferredPathKind::ExplicitInput => outputs + index,
+        DeferredPathKind::ImplicitInput => explicit_inputs + index,
+        DeferredPathKind::OrderOnlyInput => implicit_inputs + index,
+        DeferredPathKind::Validation => order_only_inputs + index,
+    }
 }
 
 fn finalize_parent(
@@ -313,7 +482,7 @@ fn finalize_parent(
     current_rule: Option<&str>,
     current_edge: Option<usize>,
     current_pool: Option<&str>,
-    deferred_paths: Option<&DeferredPaths>,
+    deferred_paths: Option<&mut ParsedEdgePaths>,
 ) -> Result<(), Diagnostic> {
     match parent {
         Some(Parent::Rule) => {
@@ -427,6 +596,10 @@ pub fn load_manifest(path: impl AsRef<Path>) -> Result<Manifest, Diagnostic> {
     parse_file_into(path, &mut manifest, &mut stack, 0)?;
     manifest.sync_root_scope();
     validate(&manifest)?;
+    #[cfg(windows)]
+    {
+        manifest.path_slash_bits = None;
+    }
     Ok(manifest)
 }
 
@@ -470,6 +643,10 @@ pub fn parse_manifest(source: &str, path: impl AsRef<Path>) -> Result<Manifest, 
     parse_source_into(source, path, &mut manifest, 0)?;
     manifest.sync_root_scope();
     validate(&manifest)?;
+    #[cfg(windows)]
+    {
+        manifest.path_slash_bits = None;
+    }
     Ok(manifest)
 }
 
@@ -516,7 +693,7 @@ fn parse_source_into_with_loader(
     let mut current_rule: Option<String> = None;
     let mut current_edge: Option<usize> = None;
     let mut current_pool: Option<String> = None;
-    let mut deferred_paths: Option<DeferredPaths> = None;
+    let mut deferred_paths: Option<ParsedEdgePaths> = None;
     let ninja_compat = crate::program_name() == "ninja";
 
     for (line_no, raw_line) in logical_lines {
@@ -530,7 +707,7 @@ fn parse_source_into_with_loader(
                     current_rule.as_deref(),
                     current_edge,
                     current_pool.as_deref(),
-                    deferred_paths.as_ref(),
+                    deferred_paths.as_mut(),
                 )?;
                 parent = None;
                 current_rule = None;
@@ -699,7 +876,7 @@ fn parse_source_into_with_loader(
             current_rule.as_deref(),
             current_edge,
             current_pool.as_deref(),
-            deferred_paths.as_ref(),
+            deferred_paths.as_mut(),
         )?;
         parent = None;
         current_rule = None;
@@ -925,7 +1102,7 @@ fn parse_source_into_with_loader(
         current_rule.as_deref(),
         current_edge,
         current_pool.as_deref(),
-        deferred_paths.as_ref(),
+        deferred_paths.as_mut(),
     )?;
 
     Ok(())
@@ -1184,9 +1361,27 @@ fn evaluate_edge_binding(manifest: &Manifest, edge: &Edge, name: &str, depth: us
         return String::new();
     }
     match name {
-        "in" => return edge.explicit_inputs.join(" "),
-        "in_newline" => return edge.explicit_inputs.join("\n"),
-        "out" => return edge.explicit_outputs.join(" "),
+        "in" => {
+            return join_decanonicalized_paths(
+                &edge.explicit_inputs,
+                manifest.explicit_input_slash_bits(edge),
+                ' ',
+            );
+        }
+        "in_newline" => {
+            return join_decanonicalized_paths(
+                &edge.explicit_inputs,
+                manifest.explicit_input_slash_bits(edge),
+                '\n',
+            );
+        }
+        "out" => {
+            return join_decanonicalized_paths(
+                &edge.explicit_outputs,
+                manifest.explicit_output_slash_bits(edge),
+                ' ',
+            );
+        }
         _ => {}
     }
     if let Some(value) = edge.bindings.get(name) {
@@ -1204,6 +1399,22 @@ fn evaluate_edge_binding(manifest: &Manifest, edge: &Edge, name: &str, depth: us
         .lookup_variable(edge.scope, name)
         .unwrap_or_default()
         .to_owned()
+}
+
+fn join_decanonicalized_paths(paths: &[String], slash_bits: &[u64], separator: char) -> String {
+    let capacity = paths.iter().map(String::len).sum::<usize>()
+        + paths.len().saturating_sub(1) * separator.len_utf8();
+    let mut result = String::with_capacity(capacity);
+    for (index, path) in paths.iter().enumerate() {
+        if index != 0 {
+            result.push(separator);
+        }
+        result.push_str(&decanonicalize_path(
+            path,
+            slash_bits.get(index).copied().unwrap_or(0),
+        ));
+    }
+    result
 }
 
 fn parse_binding(line: &str) -> Option<(&str, &str)> {
@@ -1324,7 +1535,7 @@ fn parse_edge(
     input: &str,
     path: &Arc<PathBuf>,
     line: usize,
-) -> Result<(Edge, DeferredPaths), Diagnostic> {
+) -> Result<(Edge, ParsedEdgePaths), Diagnostic> {
     let tokens = lex_build(input);
     let colon = tokens
         .iter()
@@ -1342,30 +1553,41 @@ fn parse_edge(
         line,
         ..Edge::default()
     };
-    let mut deferred = DeferredPaths::default();
+    let mut deferred = ParsedEdgePaths::default();
     let mut implicit = false;
     for (token_index, token) in tokens[..colon].iter().enumerate() {
         match token {
             BuildToken::Pipe if !implicit => implicit = true,
             BuildToken::Word(word, needs_canonicalization) => {
-                let (value, is_deferred) = if word.contains('$') {
-                    ((*word).to_owned(), true)
+                let (value, is_deferred, slash_bits) = if word.contains('$') {
+                    ((*word).to_owned(), true, 0)
                 } else if *needs_canonicalization {
-                    (canonicalize_owned_path((*word).to_owned()), false)
+                    let (path, slash_bits) = canonicalize_owned_path_with_bits((*word).to_owned());
+                    (path, false, slash_bits)
                 } else {
-                    ((*word).to_owned(), false)
+                    ((*word).to_owned(), false, 0)
                 };
                 if implicit {
                     let index = edge.implicit_outputs.len();
                     edge.implicit_outputs.push(value);
-                    if is_deferred {
-                        deferred.0.push((DeferredPathKind::ImplicitOutput, index));
+                    if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                        deferred.push(
+                            DeferredPathKind::ImplicitOutput,
+                            index,
+                            is_deferred,
+                            slash_bits,
+                        );
                     }
                 } else {
                     let index = edge.explicit_outputs.len();
                     edge.explicit_outputs.push(value);
-                    if is_deferred {
-                        deferred.0.push((DeferredPathKind::ExplicitOutput, index));
+                    if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                        deferred.push(
+                            DeferredPathKind::ExplicitOutput,
+                            index,
+                            is_deferred,
+                            slash_bits,
+                        );
                     }
                 }
             }
@@ -1449,40 +1671,61 @@ fn parse_edge(
                 kind = InputKind::Validation;
             }
             BuildToken::Word(word, needs_canonicalization) => {
-                let (value, is_deferred) = if word.contains('$') {
-                    ((*word).to_owned(), true)
+                let (value, is_deferred, slash_bits) = if word.contains('$') {
+                    ((*word).to_owned(), true, 0)
                 } else if *needs_canonicalization {
-                    (canonicalize_owned_path((*word).to_owned()), false)
+                    let (path, slash_bits) = canonicalize_owned_path_with_bits((*word).to_owned());
+                    (path, false, slash_bits)
                 } else {
-                    ((*word).to_owned(), false)
+                    ((*word).to_owned(), false, 0)
                 };
                 match kind {
                     InputKind::Explicit => {
                         let index = edge.explicit_inputs.len();
                         edge.explicit_inputs.push(value);
-                        if is_deferred {
-                            deferred.0.push((DeferredPathKind::ExplicitInput, index));
+                        if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                            deferred.push(
+                                DeferredPathKind::ExplicitInput,
+                                index,
+                                is_deferred,
+                                slash_bits,
+                            );
                         }
                     }
                     InputKind::Implicit => {
                         let index = edge.implicit_inputs.len();
                         edge.implicit_inputs.push(value);
-                        if is_deferred {
-                            deferred.0.push((DeferredPathKind::ImplicitInput, index));
+                        if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                            deferred.push(
+                                DeferredPathKind::ImplicitInput,
+                                index,
+                                is_deferred,
+                                slash_bits,
+                            );
                         }
                     }
                     InputKind::OrderOnly => {
                         let index = edge.order_only_inputs.len();
                         edge.order_only_inputs.push(value);
-                        if is_deferred {
-                            deferred.0.push((DeferredPathKind::OrderOnlyInput, index));
+                        if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                            deferred.push(
+                                DeferredPathKind::OrderOnlyInput,
+                                index,
+                                is_deferred,
+                                slash_bits,
+                            );
                         }
                     }
                     InputKind::Validation => {
                         let index = edge.validations.len();
                         edge.validations.push(value);
-                        if is_deferred {
-                            deferred.0.push((DeferredPathKind::Validation, index));
+                        if is_deferred || (cfg!(windows) && slash_bits != 0) {
+                            deferred.push(
+                                DeferredPathKind::Validation,
+                                index,
+                                is_deferred,
+                                slash_bits,
+                            );
                         }
                     }
                 }
@@ -1725,9 +1968,38 @@ fn edit_distance_with_replacements(
     row[right.len()]
 }
 
+pub(crate) fn decanonicalize_path(path: &str, slash_bits: u64) -> Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        if slash_bits == 0 {
+            return Cow::Borrowed(path);
+        }
+        let mut bytes = path.as_bytes().to_owned();
+        let mut mask = 1u64;
+        for byte in &mut bytes {
+            if *byte == b'/' {
+                if slash_bits & mask != 0 {
+                    *byte = b'\\';
+                }
+                mask <<= 1;
+            }
+        }
+        Cow::Owned(String::from_utf8(bytes).expect("separator replacement preserves UTF-8"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = slash_bits;
+        Cow::Borrowed(path)
+    }
+}
+
 pub fn canonicalize_owned_path(path: String) -> String {
+    canonicalize_owned_path_with_bits(path).0
+}
+
+fn canonicalize_owned_path_with_bits(path: String) -> (String, u64) {
     if path.is_empty() {
-        return path;
+        return (path, 0);
     }
     let has_platform_separator = cfg!(windows) && path.as_bytes().contains(&b'\\');
     if !has_platform_separator
@@ -1737,56 +2009,135 @@ pub fn canonicalize_owned_path(path: String) -> String {
             .split('/')
             .any(|component| matches!(component, "." | ".."))
     {
-        return path;
+        return (path, 0);
     }
-    #[cfg(windows)]
-    let normalized = path.replace('\\', "/");
-    #[cfg(not(windows))]
-    let normalized = path;
 
-    let (prefix, rest, drive_relative) = if normalized.starts_with("//") {
-        (
-            if cfg!(windows) { "//" } else { "/" },
-            normalized.trim_start_matches('/'),
-            false,
-        )
-    } else if normalized.starts_with('/') {
-        ("/", normalized.trim_start_matches('/'), false)
-    } else if normalized.len() >= 3
-        && normalized.as_bytes()[1] == b':'
-        && normalized.as_bytes()[2] == b'/'
-    {
-        (&normalized[..3], &normalized[3..], false)
-    } else if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        (&normalized[..2], &normalized[2..], true)
-    } else {
-        ("", normalized.as_str(), false)
-    };
-
-    let mut components = Vec::new();
-    for component in rest.split('/') {
-        match component {
-            "" | "." => {}
-            ".." if components.last().is_some_and(|last| *last != "..") => {
-                components.pop();
-            }
-            component => components.push(component),
-        }
-    }
-    let joined = components.join("/");
-    if prefix.is_empty() {
-        if joined.is_empty() {
-            ".".to_owned()
+    let is_separator = |byte| byte == b'/' || (cfg!(windows) && byte == b'\\');
+    let mut bytes = path.into_bytes();
+    let end = bytes.len();
+    let mut source = 0usize;
+    let mut destination = 0usize;
+    let mut destination_start = 0usize;
+    if is_separator(bytes[0]) {
+        if cfg!(windows) && end >= 2 && is_separator(bytes[1]) {
+            source = 2;
+            destination = 2;
         } else {
-            joined
+            source = 1;
+            destination = 1;
         }
-    } else if drive_relative {
-        format!("{prefix}{joined}")
-    } else if joined.is_empty() {
-        prefix.to_owned()
+        destination_start = destination;
     } else {
-        format!("{prefix}{joined}")
+        while source + 3 <= end
+            && bytes[source] == b'.'
+            && bytes[source + 1] == b'.'
+            && is_separator(bytes[source + 2])
+        {
+            source += 3;
+            destination += 3;
+        }
     }
+
+    let destination_base = destination;
+    let mut component_count = 0usize;
+    while source < end {
+        let Some(next_separator) = (source..end).find(|index| is_separator(bytes[*index])) else {
+            break;
+        };
+        let source_next = next_separator + 1;
+        let component_len = next_separator - source;
+        if component_len <= 2 {
+            if component_len == 0 {
+                source = source_next;
+                continue;
+            }
+            if bytes[source] == b'.' {
+                if component_len == 1 {
+                    source = source_next;
+                    continue;
+                }
+                if bytes[source + 1] == b'.' {
+                    if component_count > 0 {
+                        component_count -= 1;
+                        destination -= 1;
+                        while destination > destination_base
+                            && !is_separator(bytes[destination - 1])
+                        {
+                            destination -= 1;
+                        }
+                    } else {
+                        bytes[destination] = b'.';
+                        bytes[destination + 1] = b'.';
+                        bytes[destination + 2] = bytes[source + 2];
+                        destination += 3;
+                    }
+                    source = source_next;
+                    continue;
+                }
+            }
+        }
+        component_count += 1;
+        if destination != source {
+            bytes.copy_within(source..source_next, destination);
+        }
+        destination += source_next - source;
+        source = source_next;
+    }
+
+    let component_len = end - source;
+    if component_len != 0 {
+        if bytes[source] == b'.' {
+            if component_len == 2 && bytes[source + 1] == b'.' {
+                if component_count > 0 {
+                    destination -= 1;
+                    while destination > destination_base && !is_separator(bytes[destination - 1]) {
+                        destination -= 1;
+                    }
+                } else {
+                    bytes[destination] = b'.';
+                    bytes[destination + 1] = b'.';
+                    destination += 2;
+                }
+            } else if component_len != 1 {
+                if destination != source {
+                    bytes.copy_within(source..end, destination);
+                }
+                destination += component_len;
+            }
+        } else {
+            if destination != source {
+                bytes.copy_within(source..end, destination);
+            }
+            destination += component_len;
+        }
+    }
+
+    if destination > destination_start && is_separator(bytes[destination - 1]) {
+        destination -= 1;
+    }
+    if destination == 0 {
+        bytes[0] = b'.';
+        destination = 1;
+    }
+    bytes.truncate(destination);
+
+    let mut slash_bits = 0u64;
+    if cfg!(windows) {
+        let mut mask = 1u64;
+        for byte in &mut bytes {
+            if *byte == b'\\' {
+                slash_bits |= mask;
+                *byte = b'/';
+            }
+            if *byte == b'/' {
+                mask <<= 1;
+            }
+        }
+    }
+    (
+        String::from_utf8(bytes).expect("canonicalization preserves UTF-8 boundaries"),
+        slash_bits,
+    )
 }
 
 struct LogicalLines<'a> {
@@ -2048,6 +2399,129 @@ default obj/foo$ bar.o
         ] {
             assert_eq!(canonicalize_path(input), expected, "input={input}");
         }
+    }
+
+    #[test]
+    fn upstream_canonicalize_path_corpus() {
+        for (input, expected) in [
+            ("", ""),
+            ("foo.h", "foo.h"),
+            ("./foo.h", "foo.h"),
+            ("./foo/./bar.h", "foo/bar.h"),
+            ("./x/foo/../bar.h", "x/bar.h"),
+            ("./x/foo/../../bar.h", "bar.h"),
+            ("foo//bar", "foo/bar"),
+            ("foo//.//..///bar", "bar"),
+            ("./x/../foo/../../bar.h", "../bar.h"),
+            ("foo/./.", "foo"),
+            ("foo/bar/..", "foo"),
+            ("foo/.hidden_bar", "foo/.hidden_bar"),
+            ("/foo", "/foo"),
+            ("//foo", if cfg!(windows) { "//foo" } else { "/foo" }),
+            ("..", ".."),
+            ("../", ".."),
+            ("../foo", "../foo"),
+            ("../foo/", "../foo"),
+            ("../..", "../.."),
+            ("../../", "../.."),
+            ("./../", ".."),
+            ("/..", "/.."),
+            ("/../", "/.."),
+            ("/../..", "/../.."),
+            ("/../../", "/../.."),
+            ("/", "/"),
+            ("/foo/..", "/"),
+            (".", "."),
+            ("./.", "."),
+            ("foo/..", "."),
+            ("foo/.._bar", "foo/.._bar"),
+            ("../../foo/bar.h", "../../foo/bar.h"),
+            ("test/../../foo/bar.h", "../foo/bar.h"),
+            ("/usr/include/stdio.h", "/usr/include/stdio.h"),
+        ] {
+            assert_eq!(canonicalize_path(input), expected, "input={input}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upstream_windows_slash_tracking_corpus() {
+        for (input, expected, slash_bits) in [
+            (r"foo.h", "foo.h", 0),
+            (r"a\foo.h", "a/foo.h", 1),
+            (r"a/bcd/efh\foo.h", "a/bcd/efh/foo.h", 4),
+            (r"a\bcd/efh\foo.h", "a/bcd/efh/foo.h", 5),
+            (r"a\bcd\efh\foo.h", "a/bcd/efh/foo.h", 7),
+            (r"a/bcd/efh/foo.h", "a/bcd/efh/foo.h", 0),
+            (r"a\./efh\foo.h", "a/efh/foo.h", 3),
+            (r"a\../efh\foo.h", "efh/foo.h", 1),
+            (r"a\b\c\d\e\f\g\foo.h", "a/b/c/d/e/f/g/foo.h", 127),
+            (r"a\b\c\..\..\..\g\foo.h", "g/foo.h", 1),
+            (r"a\b/c\../../..\g\foo.h", "g/foo.h", 1),
+            (r"a\b/c\./../..\g\foo.h", "a/g/foo.h", 3),
+            (r"a\b/c\./../..\g/foo.h", "a/g/foo.h", 1),
+            (r"a\\\foo.h", "a/foo.h", 1),
+            (r"a/\\foo.h", "a/foo.h", 0),
+            (r"a\//foo.h", "a/foo.h", 1),
+        ] {
+            assert_eq!(
+                canonicalize_owned_path_with_bits(input.to_owned()),
+                (expected.to_owned(), slash_bits),
+                "input={input}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upstream_windows_canonicalize_path_corpus() {
+        for (input, expected) in [
+            (r"", ""),
+            (r"foo.h", "foo.h"),
+            (r".\foo.h", "foo.h"),
+            (r".\foo\.\bar.h", "foo/bar.h"),
+            (r".\x\foo\..\bar.h", "x/bar.h"),
+            (r".\x\foo\..\..\bar.h", "bar.h"),
+            (r"foo\\bar", "foo/bar"),
+            (r"foo\\.\\..\\\bar", "bar"),
+            (r".\x\..\foo\..\..\bar.h", "../bar.h"),
+            (r"foo\.\.", "foo"),
+            (r"foo\bar\..", "foo"),
+            (r"foo\.hidden_bar", "foo/.hidden_bar"),
+            (r"\foo", "/foo"),
+            (r"\\foo", "//foo"),
+            (r"\", "/"),
+        ] {
+            assert_eq!(canonicalize_path(input), expected, "input={input}");
+        }
+
+        let path = std::iter::repeat_n("a", 220)
+            .chain(std::iter::once("x.h"))
+            .collect::<Vec<_>>()
+            .join(r"\");
+        let (canonical, slash_bits) = canonicalize_owned_path_with_bits(path);
+        assert_eq!(canonical.matches('/').count(), 220);
+        assert_eq!(slash_bits, u64::MAX);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preserves_ninja_first_node_separator_spelling() {
+        let manifest = parse_manifest(
+            "rule echo\n  command = echo $in $out\n\
+             build seed: phony dir/file\n\
+             build out\\mixed/path\\file: echo dir\\file\n",
+            "build.ninja",
+        )
+        .unwrap();
+        let edge = &manifest.edges[1];
+        assert_eq!(manifest.explicit_output_slash_bits(edge), &[5]);
+        assert_eq!(manifest.explicit_input_slash_bits(edge), &[0]);
+        assert_eq!(
+            evaluate_edge_binding(&manifest, edge, "out", 0),
+            r"out\mixed/path\file"
+        );
+        assert_eq!(evaluate_edge_binding(&manifest, edge, "in", 0), "dir/file");
     }
 
     #[test]

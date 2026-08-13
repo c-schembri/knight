@@ -28,6 +28,13 @@ faster at 10,000 independent edges, while its median trails Ninja by 2.7% at
 lower in all three sweeps by 18.1-36.9%. Its warm 10,000-edge manifest load is
 about 4.2-4.6 ms under `-d stats` instrumentation.
 
+Windows command-path separator tracking is dormant for ordinary forward-slash
+manifests and stores presentation metadata only after a backslash is observed.
+A 100-sample direct A/B of the 10,000-edge forward-slash parser corpus measured
+6.006 ms for the compatibility branch versus 6.018 ms for the preceding pushed
+commit on the same host, with no measurable regression. The first unconditional
+metadata design measured roughly 10.36 ms and was discarded.
+
 The byte-exact parser-diagnostic work was benchmarked repeatedly while its
 source-position representation was refined. A first positioned-token design
 regressed the 10,000-edge parser to roughly 15.75 ms and was discarded. The

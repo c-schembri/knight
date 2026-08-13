@@ -2,7 +2,8 @@ use crate::depfile::parse_depfile;
 use crate::deps_log::{DepsLog, deps_log_path};
 use crate::dyndep::{DyndepRecord, parse_dyndep_with_resolver};
 use crate::manifest::{
-    Edge, Manifest, canonicalize_owned_path, canonicalize_path, unknown_target_message,
+    Edge, Manifest, canonicalize_owned_path, canonicalize_path, decanonicalize_path,
+    unknown_target_message,
 };
 use crate::program_name;
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
@@ -4342,15 +4343,33 @@ fn evaluate_binding_into(
         }
         match name {
             "in" => {
-                append_path_list(output, &edge.explicit_inputs, ' ', escape_paths);
+                append_path_list(
+                    output,
+                    &edge.explicit_inputs,
+                    manifest.explicit_input_slash_bits(edge),
+                    ' ',
+                    escape_paths,
+                );
                 return;
             }
             "in_newline" => {
-                append_path_list(output, &edge.explicit_inputs, '\n', escape_paths);
+                append_path_list(
+                    output,
+                    &edge.explicit_inputs,
+                    manifest.explicit_input_slash_bits(edge),
+                    '\n',
+                    escape_paths,
+                );
                 return;
             }
             "out" => {
-                append_path_list(output, &edge.explicit_outputs, ' ', escape_paths);
+                append_path_list(
+                    output,
+                    &edge.explicit_outputs,
+                    manifest.explicit_output_slash_bits(edge),
+                    ' ',
+                    escape_paths,
+                );
                 return;
             }
             _ => {}
@@ -4457,19 +4476,26 @@ pub fn render_unescaped_binding(manifest: &Manifest, edge: &Edge, name: &str) ->
     evaluate_unescaped_binding(manifest, edge, name)
 }
 
-fn append_path_list(output: &mut String, paths: &[String], separator: char, escape: bool) {
+fn append_path_list(
+    output: &mut String,
+    paths: &[String],
+    slash_bits: &[u64],
+    separator: char,
+    escape: bool,
+) {
     for (index, path) in paths.iter().enumerate() {
         if index != 0 {
             output.push(separator);
         }
+        let path = decanonicalize_path(path, slash_bits.get(index).copied().unwrap_or(0));
         if escape
             && path
                 .bytes()
                 .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
         {
-            output.push_str(&shell_escape_path(path));
+            output.push_str(&shell_escape_path(&path));
         } else {
-            output.push_str(path);
+            output.push_str(&path);
         }
     }
 }
