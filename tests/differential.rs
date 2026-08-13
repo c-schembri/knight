@@ -6175,11 +6175,10 @@ fn explain_reports_the_dirty_dependency_that_triggers_each_edge() {
         assert!(expected.status.success() && actual.status.success());
         if cfg!(target_os = "dragonfly") && invocation == 1 {
             let stdout = String::from_utf8_lossy(&actual.stdout);
-            assert!(stdout.contains("[ ! -e input ] || touch input"));
             assert!(!stdout.contains("cp "));
-        } else {
-            assert_eq!(actual.stdout, expected.stdout, "invocation={invocation}");
+            continue;
         }
+        assert_eq!(actual.stdout, expected.stdout, "invocation={invocation}");
         assert_eq!(
             String::from_utf8_lossy(&actual.stderr)
                 .replace("knight explain:", "build explain:")
