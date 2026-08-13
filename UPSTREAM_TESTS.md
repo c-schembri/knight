@@ -52,8 +52,8 @@ parity blocker regardless of how many adjacent Knight tests pass.
 
 | Upstream suite | Cases | Status | Current evidence |
 | :--- | ---: | :--- | :--- |
-| `misc/jobserver_pool_test.py` | 5 | Partial | Pool/token behavior covered, but unchanged-suite closure is not recorded |
-| `misc/jobserver_test.py` | 5 | Partial | Native Knight passes 4/5; the `ninja` alias reproduces the unsupported pipe policy |
+| `misc/jobserver_pool_test.py` | 5 | Implementation-specific | Tests Ninja's standalone Python pool wrapper rather than the Ninja executable; 4 pass and 1 platform case skips unchanged under WSL |
+| `misc/jobserver_test.py` | 5 | Upstream pass | All five executable jobserver cases pass unchanged under WSL, including FIFO token wakeups and Ninja-alias pipe warnings |
 | `misc/ninja_syntax_test.py` | 21 | Implementation-specific | Tests Ninja's optional Python manifest-writer module, not the executable |
 | `misc/output_test.py` | 24 | Upstream pass | All 24 tests pass unchanged under WSL |
 | `tests/builddir_target/test_builddir_target.py` | 5 | Upstream pass | All five build-directory target cases pass unchanged under WSL |
@@ -62,6 +62,11 @@ parity blocker regardless of how many adjacent Knight tests pass.
 
 The Python inventory contains 66 cases. Together with the 448 C++ cases above,
 this ledger tracks all 514 upstream test cases in the pinned source tree.
+
+Of those, 36 cases exercise implementation-specific C++ helpers or optional
+Python support modules rather than the Ninja executable. The executable-parity
+scope is therefore 478 cases: 249 are explicitly mapped or pass unchanged, and
+the remaining 229 are the three Partial C++ suites above.
 
 The next parity work should turn **Partial** executable suites into **Mapped**
 or **Upstream pass** rows. New performance work does not close this ledger.

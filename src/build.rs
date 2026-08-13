@@ -308,6 +308,13 @@ struct Completion {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // Keep command completions allocation-free.
+enum SchedulerEvent {
+    Completion(Completion),
+    JobToken(io::Result<jobserver::Acquired>),
+}
+
+#[derive(Debug)]
 struct LockFileGuard(PathBuf);
 
 impl Drop for LockFileGuard {
@@ -2085,7 +2092,20 @@ fn run_build_prepared<'a>(
     let mut dry_run_pending = VecDeque::<(usize, Option<String>)>::new();
     let mut command_buffer = String::new();
     let start = Instant::now();
-    let (tx, rx) = mpsc::channel::<Completion>();
+    let (tx, rx) = mpsc::channel::<SchedulerEvent>();
+    let mut job_token = None;
+    let mut job_token_requested = false;
+    let jobserver_helper = options
+        .jobserver
+        .as_ref()
+        .map(|client| {
+            let tx = tx.clone();
+            client.clone().into_helper_thread(move |token| {
+                let _ = tx.send(SchedulerEvent::JobToken(token));
+            })
+        })
+        .transpose()
+        .map_err(|error| format!("starting jobserver helper: {error}"))?;
     let mut initially_dirty = None;
     let mut status_total = closure
         .iter()
@@ -2506,11 +2526,21 @@ fn run_build_prepared<'a>(
                 let slot = if implicit_job_slot {
                     implicit_job_slot = false;
                     Some(JobSlot::Implicit)
+                } else if let Some(token) = job_token.take() {
+                    Some(JobSlot::Explicit { _token: token })
                 } else {
-                    client
+                    let token = client
                         .try_acquire()
                         .map_err(|error| format!("acquiring jobserver token: {error}"))?
-                        .map(|token| JobSlot::Explicit { _token: token })
+                        .map(|token| JobSlot::Explicit { _token: token });
+                    if token.is_none()
+                        && !job_token_requested
+                        && let Some(helper) = &jobserver_helper
+                    {
+                        helper.request_token();
+                        job_token_requested = true;
+                    }
+                    token
                 };
                 let Some(slot) = slot else {
                     ready.push((critical_path[edge_id], Reverse(edge_id)));
@@ -2602,7 +2632,7 @@ fn run_build_prepared<'a>(
             thread::spawn(move || {
                 let output = execute_command(&command, is_console, jobserver.as_ref());
                 let end_ms = start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                let _ = tx.send(Completion {
+                let _ = tx.send(SchedulerEvent::Completion(Completion {
                     edge: edge_id,
                     command,
                     log_command,
@@ -2613,7 +2643,7 @@ fn run_build_prepared<'a>(
                     end_ms,
                     start_mtime,
                     prior_output_mtimes,
-                });
+                }));
             });
             running += 1;
             launch_capacity = launch_capacity.saturating_sub(1);
@@ -2689,9 +2719,18 @@ fn run_build_prepared<'a>(
             continue;
         }
 
-        let completion = rx
+        let event = rx
             .recv()
-            .map_err(|_| "command worker terminated unexpectedly")?;
+            .map_err(|_| "scheduler event channel terminated unexpectedly")?;
+        let completion = match event {
+            SchedulerEvent::Completion(completion) => completion,
+            SchedulerEvent::JobToken(token) => {
+                job_token_requested = false;
+                job_token =
+                    Some(token.map_err(|error| format!("acquiring jobserver token: {error}"))?);
+                continue;
+            }
+        };
         running -= 1;
         let edge = &manifest.edges[completion.edge];
         if let Some(slot) = job_slots.remove(&completion.edge)

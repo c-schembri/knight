@@ -7017,6 +7017,67 @@ fn inherited_pipe_jobserver_limits_parallel_commands() {
     assert_eq!(active, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn returned_jobserver_token_wakes_a_waiting_build_client() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let root = tempdir().unwrap();
+    let short = root.path().join("short");
+    let long = root.path().join("long");
+    fs::create_dir_all(&short).unwrap();
+    fs::create_dir_all(&long).unwrap();
+    let manifest = |duration: &str| {
+        format!(
+            concat!(
+                "rule work\n",
+                "  command = date +%s%N > $out; sleep {duration}; date +%s%N >> $out\n",
+                "build out0: work\n",
+                "build out1: work\n",
+                "build all: phony out0 out1\n",
+                "default all\n",
+            ),
+            duration = duration,
+        )
+    };
+    fs::write(short.join("build.ninja"), manifest("0.3")).unwrap();
+    fs::write(long.join("build.ninja"), manifest("0.8")).unwrap();
+
+    let jobserver = jobserver::Client::new(1).unwrap();
+    let mut short_command = Command::new(knight);
+    short_command.current_dir(&short).arg("--quiet");
+    jobserver.configure_make(&mut short_command);
+    let mut short_child = short_command.spawn().unwrap();
+    for _ in 0..200 {
+        if short.join("out0").exists() && short.join("out1").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(short.join("out0").exists() && short.join("out1").exists());
+
+    let mut long_command = Command::new(knight);
+    long_command.current_dir(&long).arg("--quiet");
+    jobserver.configure_make(&mut long_command);
+    let mut long_child = long_command.spawn().unwrap();
+    assert!(short_child.wait().unwrap().success());
+    assert!(long_child.wait().unwrap().success());
+
+    let spans = ["out0", "out1"].map(|output| {
+        let values = fs::read_to_string(long.join(output))
+            .unwrap()
+            .lines()
+            .map(|line| line.parse::<u128>().unwrap())
+            .collect::<Vec<_>>();
+        (values[0], values[1])
+    });
+    let later_start = spans.iter().map(|span| span.0).max().unwrap();
+    let earlier_end = spans.iter().map(|span| span.1).min().unwrap();
+    assert!(
+        later_start < earlier_end,
+        "returned token did not wake the second long command: {spans:?}"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn inherited_jobserver_is_forwarded_to_child_build_tools() {
