@@ -153,6 +153,14 @@ This is an evidence ledger, not a claim of full compatibility.
   they are valid no-op shell commands on POSIX and dry runs, while Windows
   execution preserves Ninja's `CreateProcess` failure framing when invoked as
   `ninja` and gives the native `knight` command a shorter diagnostic.
+  All 14 cases in Ninja's upstream `SubprocessTest` suite now have explicit
+  integration-level coverage. This includes byte-exact Windows command-start
+  failures, child- and parent-directed INT/TERM/HUP handling, inherited console
+  descriptors in a real Linux pseudo-terminal, more than 1,024 simultaneous
+  processes, closed stdin, multi-process execution, and jobserver wakeups.
+  Parent-directed POSIX signals terminate active process groups and return
+  through the build loop so the `ninja` alias retains Ninja's build-stop output
+  instead of exiting silently from the signal handler.
 - Debug modes `explain`, `keepdepfile`, `keeprsp`, and `nostatcache`, plus the
   `phonycycle` warning policy, including the legacy self-reference behavior
   exposed by graph tools. The compatibility exception is restricted to
@@ -312,8 +320,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 76
-  library, 6 CLI, and 120 differential tests; Linux-under-WSL passes 71 library,
-  5 CLI, and 90 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 121 differential tests; Linux-under-WSL passes 71 library,
+  5 CLI, and 96 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
@@ -331,3 +339,7 @@ This is an evidence ledger, not a claim of full compatibility.
   the 10,000-edge median and all three P95 measurements in the latest warm
   no-op sweep, but trails two 1,000-edge medians and is nowhere near the
   requested order of magnitude; see `BENCHMARKS.md`.
+
+Case-level closure is tracked in `UPSTREAM_TESTS.md`. Partial executable-suite
+rows in that ledger are parity blockers, even when the corresponding feature
+already has broad differential coverage.

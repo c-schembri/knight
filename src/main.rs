@@ -163,7 +163,11 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             if error == "build stopped: interrupted by user." {
-                eprintln!("{}: {error}", program_name());
+                if program_name() == "ninja" {
+                    println!("ninja: {error}");
+                } else {
+                    eprintln!("{}: {error}", program_name());
+                }
                 return ExitCode::from(last_build_exit_code().unwrap_or(130));
             }
             if program_name() == "ninja"

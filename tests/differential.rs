@@ -950,6 +950,141 @@ fn commands_that_expand_empty_match_ninjas_platform_behavior() {
     }
 }
 
+#[test]
+fn subprocess_command_start_failures_match_ninja_alias() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for command in if cfg!(windows) {
+        ["ninja_no_such_command", "cmd /d /c ninja_no_such_command"]
+    } else {
+        ["ninja_no_such_command", "sh -c ninja_no_such_command"]
+    } {
+        let temp = tempdir().unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        fs::copy(knight, &alias).unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!("rule fail\n  command = {command}\nbuild out: fail\ndefault out\n"),
+        )
+        .unwrap();
+        let expected = run(Path::new(&ninja), temp.path(), &[]);
+        let actual = run(&alias, temp.path(), &[]);
+        assert_eq!(actual.status.code(), expected.status.code(), "{command}");
+        assert_eq!(actual.stdout, expected.stdout, "{command}");
+        assert_eq!(actual.stderr, expected.stderr, "{command}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_child_signal_statuses_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for signal in ["INT", "TERM", "HUP"] {
+        let temp = tempdir().unwrap();
+        let alias = temp.path().join("ninja");
+        fs::copy(knight, &alias).unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                "rule signal\n  command = kill -{signal} $$$$\nbuild out: signal\ndefault out\n"
+            ),
+        )
+        .unwrap();
+        let expected = run(Path::new(&ninja), temp.path(), &[]);
+        let actual = run(&alias, temp.path(), &[]);
+        assert_eq!(actual.status.code(), expected.status.code(), "{signal}");
+        assert_eq!(actual.stdout, expected.stdout, "{signal}");
+        assert_eq!(actual.stderr, expected.stderr, "{signal}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_parent_signal_statuses_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for signal in ["INT", "TERM", "HUP"] {
+        let expected_dir = tempdir().unwrap();
+        let actual_dir = tempdir().unwrap();
+        let alias = actual_dir.path().join("ninja");
+        fs::copy(knight, &alias).unwrap();
+        let manifest = format!(
+            "rule signal\n  command = kill -{signal} $$PPID; sleep 1\nbuild out: signal\ndefault out\n"
+        );
+        fs::write(expected_dir.path().join("build.ninja"), &manifest).unwrap();
+        fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
+        let expected = run(Path::new(&ninja), expected_dir.path(), &[]);
+        let actual = run(&alias, actual_dir.path(), &[]);
+        assert_eq!(actual.status.code(), expected.status.code(), "{signal}");
+        assert_eq!(actual.stdout, expected.stdout, "{signal}");
+        assert_eq!(actual.stderr, expected.stderr, "{signal}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_closes_stdin_for_non_console_commands() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "rule read\n  command = cat -\nbuild out: read\ndefault out\n",
+    )
+    .unwrap();
+    let expected = run(Path::new(&ninja), temp.path(), &[]);
+    let actual = run(knight, temp.path(), &[]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_set_supports_more_than_1024_parallel_processes() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    const PROCESS_COUNT: usize = 1025;
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let expected_dir = tempdir().unwrap();
+    let actual_dir = tempdir().unwrap();
+    let mut manifest = String::from("rule echo\n  command = /bin/echo\n");
+    for index in 0..PROCESS_COUNT {
+        manifest.push_str(&format!("build out{index}: echo\n"));
+    }
+    manifest.push_str("default");
+    for index in 0..PROCESS_COUNT {
+        manifest.push_str(&format!(" out{index}"));
+    }
+    manifest.push('\n');
+    fs::write(expected_dir.path().join("build.ninja"), &manifest).unwrap();
+    fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
+    let args = ["--quiet", "-j1025"];
+    let expected = run(Path::new(&ninja), expected_dir.path(), &args);
+    let actual = run(knight, actual_dir.path(), &args);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(actual.stdout, vec![b'\n'; PROCESS_COUNT]);
+}
+
 #[cfg(windows)]
 #[test]
 fn command_path_separator_spelling_matches_ninja() {
@@ -5202,6 +5337,46 @@ fn smart_terminal_status_and_output_framing_match_ninja() {
         assert_eq!(actual.stdout, expected.stdout, "arguments={arguments:?}");
         assert_eq!(actual.stderr, expected.stderr, "arguments={arguments:?}");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn console_pool_inherits_all_terminal_descriptors_like_ninja() {
+    fn shell_word(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    fn run_in_pty(executable: &Path, directory: &Path) -> Output {
+        let command = shell_word(&executable.to_string_lossy());
+        Command::new("script")
+            .current_dir(directory)
+            .args(["-qfec", &command, "/dev/null"])
+            .env("TERM", "")
+            .output()
+            .unwrap()
+    }
+
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let expected_dir = tempdir().unwrap();
+    let actual_dir = tempdir().unwrap();
+    let manifest = concat!(
+        "rule console\n",
+        "  command = test -t 0 -a -t 1 -a -t 2\n",
+        "  pool = console\n",
+        "build out: console\n",
+        "default out\n",
+    );
+    fs::write(expected_dir.path().join("build.ninja"), manifest).unwrap();
+    fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
+    let expected = run_in_pty(Path::new(&ninja), expected_dir.path());
+    let actual = run_in_pty(knight, actual_dir.path());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 }
 
 #[cfg(target_os = "linux")]

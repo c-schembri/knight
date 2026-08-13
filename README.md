@@ -36,4 +36,6 @@ python scripts\differential-fuzz.py --ninja C:\path\to\ninja.exe --knight target
 python scripts\differential-fuzz.py --ninja C:\path\to\ninja.exe --knight target\release\knight.exe --missing-sources --execute
 ```
 
-See [COMPATIBILITY.md](COMPATIBILITY.md) for the current audited surface.
+See [COMPATIBILITY.md](COMPATIBILITY.md) for the current audited surface,
+[UPSTREAM_TESTS.md](UPSTREAM_TESTS.md) for case-level upstream traceability,
+and [BENCHMARKS.md](BENCHMARKS.md) for reproducible performance evidence.

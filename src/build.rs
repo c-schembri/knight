@@ -147,25 +147,30 @@ pub fn install_interrupt_handler() -> Result<(), String> {
 #[cfg(unix)]
 pub fn install_interrupt_handler() -> Result<(), String> {
     ctrlc::set_handler(|| {
-        terminate_active_process_groups();
+        let interrupted_command = terminate_active_process_groups();
         cleanup_interrupted_outputs();
-        // Ninja reports every handled POSIX termination signal as 128 + SIGINT.
-        std::process::exit(130);
+        if !interrupted_command {
+            // There is no command completion to wake the build loop. Ninja
+            // reports every handled POSIX termination signal as 128 + SIGINT.
+            std::process::exit(130);
+        }
     })
     .map_err(|error| format!("installing interrupt handler: {error}"))
 }
 
 #[cfg(unix)]
-fn terminate_active_process_groups() {
+fn terminate_active_process_groups() -> bool {
+    let mut interrupted = false;
     if let Some(groups) = ACTIVE_PROCESS_GROUPS.get()
         && let Ok(groups) = groups.try_lock()
     {
         for group in groups.iter() {
             // SAFETY: each id is recorded immediately after spawning a child
             // whose process group id equals its process id.
-            unsafe { libc::kill(-(*group as i32), libc::SIGTERM) };
+            interrupted |= unsafe { libc::kill(-(*group as i32), libc::SIGTERM) } == 0;
         }
     }
+    interrupted
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -2652,6 +2657,10 @@ fn run_build_prepared<'a>(
             &mut pool_reserved,
             &mut pool_usage,
         );
+        #[cfg(windows)]
+        let mut raw_command_start_failure = false;
+        #[cfg(not(windows))]
+        let raw_command_start_failure = false;
         let mut output = match completion.output {
             Ok(output) => output,
             #[cfg(windows)]
@@ -2662,6 +2671,27 @@ fn run_build_prepared<'a>(
                         .to_owned(),
                 );
             }
+            #[cfg(windows)]
+            Err(error) if program_name() == "ninja" => {
+                use std::os::windows::process::ExitStatusExt as _;
+
+                raw_command_start_failure = true;
+                let owned_message;
+                let message = if error.kind() == io::ErrorKind::NotFound {
+                    "The system cannot find the file specified."
+                } else {
+                    owned_message = error.to_string();
+                    owned_message
+                        .rsplit_once(" (os error ")
+                        .and_then(|(text, code)| code.strip_suffix(')').map(|_| text))
+                        .unwrap_or(&owned_message)
+                };
+                Output {
+                    status: std::process::ExitStatus::from_raw(1),
+                    stdout: format!("CreateProcess failed: {message}\n").into_bytes(),
+                    stderr: Vec::new(),
+                }
+            }
             Err(error) => {
                 return Err(format!(
                     "starting command '{}': {error}",
@@ -2670,15 +2700,21 @@ fn run_build_prepared<'a>(
             }
         };
         #[cfg(unix)]
-        if output.status.code() == Some(130) {
+        if output.status.code() == Some(130) || {
+            use std::os::unix::process::ExitStatusExt as _;
+            matches!(
+                output.status.signal(),
+                Some(libc::SIGINT) | Some(libc::SIGTERM) | Some(libc::SIGHUP)
+            )
+        } {
             LAST_BUILD_EXIT_CODE.with(|code| code.set(130));
             terminate_active_process_groups();
             cleanup_interrupted_outputs();
             return Err("build stopped: interrupted by user.".to_owned());
         }
         unregister_active_cleanup(completion.edge);
-        let raw_command_output =
-            cfg!(windows) && evaluate_binding(manifest, edge, "deps") == "msvc";
+        let raw_command_output = cfg!(windows)
+            && (evaluate_binding(manifest, edge, "deps") == "msvc" || raw_command_start_failure);
         let dependency_result =
             extract_dependencies(manifest, edge, &mut output, options.keep_depfile);
         if status.tracks_prediction() {
@@ -5357,7 +5393,7 @@ fn execute_command(
     console: bool,
     jobserver: Option<&jobserver::Client>,
 ) -> io::Result<Output> {
-    let mut child = Command::new("sh");
+    let mut child = Command::new("/bin/sh");
     child.args(["-c", command]);
     finish_command(child, console, jobserver)
 }
