@@ -45,7 +45,7 @@ jobs:
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNINJA_PYTHON=python3
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             cargo test --all-targets
@@ -66,7 +66,7 @@ jobs:
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNINJA_PYTHON=python3
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             ulimit -n 4096
@@ -89,7 +89,7 @@ jobs:
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3.13
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNINJA_PYTHON=python3.13
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             ulimit -n 4096
@@ -110,7 +110,7 @@ jobs:
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNINJA_PYTHON=python3
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             ulimit -n 4096
@@ -131,7 +131,7 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
           git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-          cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
           cmake --build ninja-reference/build --parallel 2
       - name: Test
         shell: bash
@@ -150,7 +150,7 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
           git -C ninja-reference checkout $env:NINJA_REFERENCE_COMMIT
-          cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
           cmake --build ninja-reference/build --config Release --parallel 2
       - name: Test
         shell: pwsh
