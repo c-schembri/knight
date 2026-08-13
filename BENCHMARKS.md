@@ -238,6 +238,15 @@ That is a 25.2x Knight median lead for this status-heavy terminal workload.
 It is the first audited order-of-magnitude win, not yet evidence for the full
 project-wide 10x requirement.
 
+## MSVC dependency filtering
+
+Criterion now tracks Ninja-compatible `/showIncludes` parsing independently.
+A generated mixture of include lines, compiler warnings, and echoed source
+filenames measured 18.384 us for 100 lines, 194.88 us for 1,000 lines, and
+2.045 ms for 10,000 lines on Windows x64, sustaining roughly 155 MiB/s at the
+largest size. This benchmark protects the raw-output and dependency-extraction
+path while the full eight-case upstream `CLParser` corpus protects semantics.
+
 ## Compilation database
 
 `scripts/benchmark-compdb.ps1` requires newline-normalized, byte-identical

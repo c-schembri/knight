@@ -3940,6 +3940,11 @@ pub fn filter_msvc_output(
     prefix: &str,
     includes: &mut BTreeSet<String>,
 ) -> Result<Vec<u8>, String> {
+    let prefix = if prefix.is_empty() {
+        "Note: including file: "
+    } else {
+        prefix
+    };
     let output = String::from_utf8_lossy(output);
     let mut filtered = String::with_capacity(output.len());
     let mut saw_include = false;
@@ -5609,6 +5614,56 @@ mod tests {
         );
         assert_eq!(includes.len(), 1);
         assert!(includes.iter().next().unwrap().ends_with("header.h"));
+    }
+
+    #[test]
+    fn upstream_msvc_clparser_corpus() {
+        let mut includes = BTreeSet::new();
+        assert_eq!(filter_msvc_output(b"", "", &mut includes).unwrap(), b"");
+        assert_eq!(
+            filter_msvc_output(b"Sample compiler output", "", &mut includes).unwrap(),
+            b"Sample compiler output\n"
+        );
+
+        let duplicate_local = if cfg!(windows) {
+            "sub\\local.h"
+        } else {
+            "sub/local.h"
+        };
+        let compiler_output = format!(
+            concat!(
+                "foo.cc\r\n",
+                "cl: warning\r\n",
+                "Note: including file: foo.h\r\n",
+                "something something foo.cc\r\n",
+                "Note: including file: c:\\Program Files\\system.h\r\n",
+                "Note: including file: d:\\Microsoft Visual Studio\\sdk.h\r\n",
+                "Note: including file: sub/./local.h\r\n",
+                "Note: including file: {}\r\n",
+                "Note: including file: foo.h\r\n",
+            ),
+            duplicate_local
+        );
+        let filtered = filter_msvc_output(compiler_output.as_bytes(), "", &mut includes).unwrap();
+        assert_eq!(
+            String::from_utf8(filtered).unwrap(),
+            "cl: warning\nsomething something foo.cc\n"
+        );
+        assert_eq!(includes.len(), 2);
+        assert!(includes.iter().any(|include| include.ends_with("foo.h")));
+        assert!(
+            includes
+                .iter()
+                .any(|include| include.ends_with("sub/local.h"))
+        );
+
+        let custom = filter_msvc_output(
+            b"Non-default prefix: inc file:    custom.h\r\n",
+            "Non-default prefix: inc file:",
+            &mut BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(custom.is_empty());
     }
 
     #[test]

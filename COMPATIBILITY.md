@@ -261,6 +261,11 @@ This is an evidence ledger, not a claim of full compatibility.
   MSVC dependency filtering recognizes bare CR, LF, and CRLF boundaries,
   retains prefix-only lines, and emits Ninja's deliberately LF-only filtered
   output on Windows without changing ordinary command-output text mode.
+  All eight upstream `CLParser` cases are mapped directly, covering default
+  and custom prefixes, initial-space trimming, compiler input echoes, the
+  post-include echo boundary, system-header filtering, duplicate headers, and
+  canonicalized path duplicates. An empty configured prefix correctly falls
+  back to Ninja's English `/showIncludes` prefix.
 - Diagnostic identity follows the invocation name: the normal executable uses
   `knight:`, while a copy or link installed as `ninja` uses Ninja-compatible
   `ninja:`/`ninja explain:` prefixes. `-d explain` identifies the dirty input

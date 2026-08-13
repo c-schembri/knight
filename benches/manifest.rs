@@ -1,6 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use knight_build::build::filter_msvc_output;
 use knight_build::dyndep::parse_dyndep;
 use knight_build::parse_manifest;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 fn generated_manifest(edges: usize) -> String {
@@ -62,5 +64,43 @@ fn dyndep_parse_benchmark(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, parse_benchmark, dyndep_parse_benchmark);
+fn generated_msvc_output(lines: usize) -> Vec<u8> {
+    let mut output = String::with_capacity(lines * 48);
+    for index in 0..lines {
+        match index % 3 {
+            0 => output.push_str(&format!(
+                "Note: including file: include/header_{index}.h\r\n"
+            )),
+            1 => output.push_str(&format!("warning C{index}: useful compiler output\r\n")),
+            _ => output.push_str(&format!("source_{index}.cc\r\n")),
+        }
+    }
+    output.into_bytes()
+}
+
+fn msvc_filter_benchmark(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("msvc_filter");
+    for lines in [100usize, 1_000, 10_000] {
+        let output = generated_msvc_output(lines);
+        group.throughput(Throughput::Bytes(output.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(lines),
+            &output,
+            |bench, output| {
+                bench.iter(|| {
+                    let mut includes = BTreeSet::new();
+                    filter_msvc_output(output, "", &mut includes).unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    parse_benchmark,
+    dyndep_parse_benchmark,
+    msvc_filter_benchmark
+);
 criterion_main!(benches);
