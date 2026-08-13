@@ -467,6 +467,34 @@ fn ninja_and_knight_share_canonical_path_identity() {
 
 #[cfg(windows)]
 #[test]
+fn utf8_and_long_manifest_paths_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let mut directory = std::path::PathBuf::from("build-构建");
+    for index in 0..5 {
+        directory.push(format!("component-{index}-{}", "x".repeat(48)));
+    }
+    fs::create_dir_all(temp.path().join(&directory)).unwrap();
+    let manifest = directory.join("计划.ninja");
+    fs::write(temp.path().join(&manifest), "build unicode-target: phony\n").unwrap();
+    assert!(manifest.as_os_str().len() > 260);
+
+    let manifest = manifest.to_string_lossy().into_owned();
+    let arguments = ["-f", manifest.as_str(), "-t", "targets", "all"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert!(expected.status.success());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[cfg(windows)]
+#[test]
 fn inputless_phony_target_forces_rebuilds() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let mut executables = vec![knight];
@@ -1891,6 +1919,15 @@ fn tool_target_modes_and_rule_descriptions_match_ninja() {
                 "arguments={arguments:?}"
             );
         }
+    }
+
+    if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
+        let arguments = ["-t", "wincodepage"];
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        let actual = run(knight, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
     }
 }
 

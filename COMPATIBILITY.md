@@ -101,9 +101,12 @@ This is an evidence ledger, not a claim of full compatibility.
   The Python-backed `browse` tool is available on POSIX, matching Ninja's
   platform split, embedded server, query parsing, HTML rendering, HTTP
   behavior, and command-line help, while `msvc` and `wincodepage` are
-  advertised only on Windows. Unknown tools, target modes, targets, debug
-  settings, and warning
-  flags provide Ninja-compatible spelling suggestions.
+  advertised only on Windows. The Windows binary embeds Ninja's UTF-8 active-
+  code-page and long-path-aware application manifest; `wincodepage` reports
+  the actual process code page rather than a fixed label, with Unicode paths
+  beyond `MAX_PATH` covered differentially. Unknown tools, target modes,
+  targets, debug settings, and warning flags provide Ninja-compatible spelling
+  suggestions.
   `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
   `multi-inputs` short/long options, including bundled short flags and attached
   delimiters, have differential coverage. Missing arguments and attached
@@ -210,7 +213,7 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 100 differential tests; Linux-under-WSL passes 62 library,
+  library, 2 CLI, and 101 differential tests; Linux-under-WSL passes 62 library,
   2 CLI, and 73 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.

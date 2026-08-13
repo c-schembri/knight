@@ -2447,8 +2447,14 @@ fn tool_wincodepage(args: &[String]) -> Result<(), String> {
         println!("usage: ninja -t wincodepage");
         return Err(format!("{TOOL_EXIT_PREFIX}1"));
     }
-    // Rust manifests are decoded as UTF-8, matching modern Ninja's Windows manifest.
-    println!("Build file encoding: UTF-8");
+    use windows_sys::Win32::Globalization::{CP_UTF8, GetACP};
+    // SAFETY: GetACP takes no arguments and only reads the process ANSI code page.
+    let encoding = if unsafe { GetACP() } == CP_UTF8 {
+        "UTF-8"
+    } else {
+        "ANSI"
+    };
+    println!("Build file encoding: {encoding}");
     Ok(())
 }
 
