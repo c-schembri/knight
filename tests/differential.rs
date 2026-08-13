@@ -1833,14 +1833,9 @@ fn early_tools_do_not_require_a_manifest() {
         &["-w", "list"][..],
     ] {
         let actual = run(knight, temp.path(), arguments);
-        assert!(
-            actual.status.success(),
-            "stdout={} stderr={}",
-            String::from_utf8_lossy(&actual.stdout),
-            String::from_utf8_lossy(&actual.stderr)
-        );
         if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
             let expected = run(Path::new(&ninja), temp.path(), arguments);
+            assert_eq!(actual.status.code(), expected.status.code());
             assert_eq!(
                 String::from_utf8_lossy(&actual.stdout)
                     .lines()
@@ -1850,6 +1845,8 @@ fn early_tools_do_not_require_a_manifest() {
                     .collect::<Vec<_>>(),
                 "arguments={arguments:?}"
             );
+        } else if !matches!(arguments, &["-d", "list"] | &["-w", "list"]) {
+            assert!(actual.status.success(), "arguments={arguments:?}");
         }
     }
     assert!(run(knight, temp.path(), &["-t", "restat"]).status.success());
@@ -3674,6 +3671,24 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     )
     .unwrap();
 
+    for arguments in [
+        &["--help"][..],
+        &["--version"][..],
+        &["-d", "list"][..],
+        &["-w", "list"][..],
+        &["-t", "list"][..],
+    ] {
+        let expected = run(Path::new(&ninja), temp.path(), arguments);
+        let actual = run(&alias, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
+    }
+
     let arguments = ["-C", "project"];
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
@@ -4488,6 +4503,7 @@ fn build_log_versions_match_ninja_before_log_aware_work() {
         &["-t", "deps"][..],
         &["-t", "missingdeps", "out"][..],
         &["-t", "cleandead"][..],
+        &["-t", "recompact"][..],
     ] {
         for (contents, valid) in [
             ("invalid\n", false),

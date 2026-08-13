@@ -47,7 +47,7 @@ macro_rules! eprintln {
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const NINJA_COMPAT_VERSION: &str = "1.14.0";
+const NINJA_COMPAT_VERSION: &str = "1.14.0.git";
 const MISSING_DEPS_EXIT: &str = "\0missingdeps";
 const TOOL_EXIT_PREFIX: &str = "\0exit:";
 const FATAL_PREFIX: &str = "\0fatal:";
@@ -470,11 +470,12 @@ fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
                             "  keepdepfile  don't delete depfiles after they're read by ninja"
                         );
                         println!("  keeprsp      don't delete @response files on success");
+                        #[cfg(windows)]
                         println!(
                             "  nostatcache  don't batch stat() calls per directory and cache them"
                         );
                         println!("multiple modes can be enabled via -d FOO -d BAR");
-                        std::process::exit(0);
+                        std::process::exit(1);
                     }
                     "-d" => {
                         return Err(unknown_choice(
@@ -488,7 +489,7 @@ fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
                         println!(
                             "  phonycycle={{err,warn}}  phony build statement references itself"
                         );
-                        std::process::exit(0);
+                        std::process::exit(1);
                     }
                     "-w" if value == "phonycycle=err" => cli.options.phony_cycle_error = true,
                     "-w" if value == "phonycycle=warn" => cli.options.phony_cycle_error = false,
@@ -679,6 +680,38 @@ fn unknown_choice(kind: &str, value: &str, choices: &[&str]) -> String {
 
 fn print_help() {
     let program = program_name();
+    if program == "ninja" {
+        let jobs = BuildOptions::default().jobs;
+        eprintln!(
+            concat!(
+                "usage: ninja [options] [targets...]\n",
+                "\n",
+                "if targets are unspecified, builds the 'default' target (see manual).\n",
+                "\n",
+                "options:\n",
+                "  --version      print ninja version (\"{}\")\n",
+                "  -v, --verbose  show all command lines while building\n",
+                "  --quiet        don't show progress status, just command output\n",
+                "  --status FMT   progress status format using Ninja-style $vars\n",
+                "                 (e.g. --status '[$finished/$total] ')\n",
+                "\n",
+                "  -C DIR   change to DIR before doing anything else\n",
+                "  -f FILE  specify input build file [default=build.ninja]\n",
+                "\n",
+                "  -j N     run N jobs in parallel (0 means infinity) [default={} on this system]\n",
+                "  -k N     keep going until N jobs fail (0 means infinity) [default=1]\n",
+                "  -l N     do not start new jobs if the load average is greater than N\n",
+                "  -n       dry run (don't run commands but act like they succeeded)\n",
+                "\n",
+                "  -d MODE  enable debugging (use '-d list' to list modes)\n",
+                "  -t TOOL  run a subtool (use '-t list' to list subtools)\n",
+                "    terminates toplevel options; further flags are passed to the tool\n",
+                "  -w FLAG  adjust warnings (use '-w list' to list warnings)"
+            ),
+            NINJA_COMPAT_VERSION, jobs
+        );
+        return;
+    }
     eprintln!(
         "{program} {VERSION} - a fast Ninja-compatible build executor\n\
 usage: {program} [options] [targets...]\n\n\
@@ -1002,9 +1035,11 @@ fn load_deps_log(builddir: Option<&str>) -> Result<DepsLog, String> {
 fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
     let path = build_log_path(manifest);
     if let Some(contents) = read_optional_build_log(&path)? {
-        if !contents.is_empty() && !contents.starts_with("# ninja log v7\n") {
+        let version = build_log_version(&contents);
+        if !contents.is_empty() && version != 7 {
+            let age = if version > 7 { "new" } else { "old" };
             eprintln!(
-                "{}: warning: build log version is too old; starting over",
+                "{}: warning: build log version is too {age}; starting over",
                 program_name()
             );
             fs::remove_file(&path)

@@ -112,6 +112,14 @@ immediately. The ten-sample 50,000-edge row remains exploratory because Ninja
 makes larger sweeps expensive, but every measured sample preserves the same
 wide separation.
 
+After extending byte parity to Ninja's Windows CRLF text-mode output, a
+100-sample 10,000-edge rerun produced byte-identical 427,784-byte streams and
+measured Ninja at 335.206 ms median versus Knight at 35.080 ms (9.6x), with
+94.645 ms Knight P95 versus 546.267 ms for Ninja. The Windows stat cache now
+uses a successful directory enumeration as authoritative for absent entries,
+avoiding 10,000 redundant missing-file probes while preserving individual-stat
+fallback if enumeration itself fails.
+
 `scripts/benchmark-status-pty.sh` measures the smart-terminal path through a
 real Linux pseudo-terminal. Thirty alternating 1,000-edge samples, backed by a
 byte-for-byte PTY differential test covering normal, quiet, verbose, custom

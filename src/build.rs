@@ -399,13 +399,21 @@ impl<'a> StatCache<'a> {
                 }
                 continue;
             }
-            let entries = directory_mtimes(directory).unwrap_or_default();
+            let Some(entries) = directory_mtimes(directory) else {
+                for path in paths {
+                    mtimes.insert(path, checked_modified_ns(Path::new(path))?);
+                }
+                continue;
+            };
             for path in paths {
                 let path_ref = Path::new(path);
-                let mtime = path_ref
+                let entry_mtime = path_ref
                     .file_name()
-                    .and_then(|name| entries.get(name).copied());
-                let mtime = match mtime {
+                    .and_then(|name| entries.get(&directory_entry_key(name)).copied());
+                #[cfg(windows)]
+                let mtime = entry_mtime;
+                #[cfg(not(windows))]
+                let mtime = match entry_mtime {
                     Some(mtime) => Some(mtime),
                     None => checked_modified_ns(path_ref)?,
                 };
@@ -462,6 +470,16 @@ impl<'a> StatCache<'a> {
 }
 
 #[cfg(windows)]
+fn directory_entry_key(name: &std::ffi::OsStr) -> OsString {
+    name.to_string_lossy().to_lowercase().into()
+}
+
+#[cfg(not(windows))]
+fn directory_entry_key(name: &std::ffi::OsStr) -> OsString {
+    name.to_owned()
+}
+
+#[cfg(windows)]
 fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -514,7 +532,7 @@ fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
             let filetime = (u64::from(data.ftLastWriteTime.dwHighDateTime) << 32)
                 | u64::from(data.ftLastWriteTime.dwLowDateTime);
             entries.insert(
-                name,
+                directory_entry_key(&name),
                 filetime.saturating_sub(126_227_704_000_000_000) as u128,
             );
         }
@@ -535,7 +553,7 @@ fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
         if let Ok(metadata) = entry.metadata()
             && let Some(mtime) = metadata_modified(&metadata)
         {
-            entries.insert(entry.file_name(), mtime);
+            entries.insert(directory_entry_key(&entry.file_name()), mtime);
         }
     }
     Some(entries)
@@ -4278,15 +4296,25 @@ fn write_build_text(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
+        let inserted = bytes
+            .iter()
+            .enumerate()
+            .filter(|(index, byte)| **byte == b'\n' && (*index == 0 || bytes[*index - 1] != b'\r'))
+            .count();
+        if inserted == 0 {
+            return writer.write_all(bytes);
+        }
+        let mut translated = Vec::with_capacity(bytes.len() + inserted);
         let mut start = 0;
         for (index, byte) in bytes.iter().enumerate() {
             if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
-                writer.write_all(&bytes[start..index])?;
-                writer.write_all(BUILD_NEWLINE)?;
+                translated.extend_from_slice(&bytes[start..index]);
+                translated.extend_from_slice(BUILD_NEWLINE);
                 start = index + 1;
             }
         }
-        writer.write_all(&bytes[start..])
+        translated.extend_from_slice(&bytes[start..]);
+        writer.write_all(&translated)
     }
 }
 

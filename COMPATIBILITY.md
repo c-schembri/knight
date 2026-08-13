@@ -191,7 +191,9 @@ This is an evidence ledger, not a claim of full compatibility.
   dyndep explanation, fatal unknown-tool/numeric-option diagnostics, and
   stdout-routed build-stop summaries for drop-in output parity.
   Multiple failed commands distinguish Ninja's `subcommands failed` and
-  `cannot make progress due to previous errors` summaries.
+  `cannot make progress due to previous errors` summaries. Alias help,
+  version, debug/warning lists, and their intentionally nonzero list/help exit
+  statuses match Ninja byte-for-byte.
 
 ## Not yet complete
 
