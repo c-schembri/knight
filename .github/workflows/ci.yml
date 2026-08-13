@@ -59,7 +59,7 @@ jobs:
       - name: Test on OpenBSD
         uses: vmactions/openbsd-vm@e6c68b637a12e83519688d115d57d5b0b53923cd # v1
         with:
-          release: "7.7"
+          release: "7.8"
           usesh: true
           envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
           prepare: pkg_add rust git cmake python
