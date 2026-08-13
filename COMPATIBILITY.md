@@ -353,15 +353,17 @@ This is an evidence ledger, not a claim of full compatibility.
 ## Not yet complete
 
 - Exact semantics for every tool option.
-- Full behavioral and diagnostic-text parity across Ninja's complete test corpus.
-  Ninja's own POSIX `misc/output_test.py` now passes all 24 tests unchanged,
-  including smart-terminal progress, invocation identity, `compdb-targets`,
-  input ordering, absent-output scheduling, dyndep diagnostics, child exit
-  status 130, and signal-status cases. All 53 manifest-parser and 55 graph
-  cases are now explicitly mapped; the 121-case build suite remains open.
+- Behavior outside the pinned upstream executable test corpus, especially exact
+  semantics for every tool-option combination and platform-specific edge cases.
+  All 478 executable cases at pinned Ninja commit `b51a1e37` are now explicitly
+  mapped or pass unchanged, including all 53 manifest-parser, 55 graph, and 121
+  build cases. Ninja's own POSIX `misc/output_test.py` passes all 24 tests
+  unchanged, including smart-terminal progress, invocation identity,
+  `compdb-targets`, input ordering, absent-output scheduling, dyndep diagnostics,
+  child exit status 130, and signal-status cases.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
-  library, 6 CLI, and 143 differential tests; Linux-under-WSL passes 90 library,
-  5 CLI, and 118 differential tests. Release builds, clippy, a Windows-hosted
+  library, 7 CLI, and 152 differential tests; Linux-under-WSL passes 90 library,
+  6 CLI, and 127 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
@@ -379,6 +381,6 @@ This is an evidence ledger, not a claim of full compatibility.
   no-op sweep, but trails two 1,000-edge medians and is nowhere near the
   requested order of magnitude; see `BENCHMARKS.md`.
 
-Case-level closure is tracked in `UPSTREAM_TESTS.md`. Partial executable-suite
-rows in that ledger are parity blockers, even when the corresponding feature
-already has broad differential coverage.
+Case-level closure is tracked in `UPSTREAM_TESTS.md`. That pinned executable
+ledger is closed; the remaining parity audit covers behavior that is not
+enumerated by those upstream tests.

@@ -203,8 +203,17 @@ fn ninja_compat_build_error(error: &str) -> Option<String> {
     if error.starts_with("build stopped: cannot make progress due to previous errors") {
         return Some("build stopped: cannot make progress due to previous errors.".to_owned());
     }
-    if error.starts_with("build stopped: ") && error.contains(" subcommand(s) failed") {
-        return Some("build stopped: subcommand failed.".to_owned());
+    if let Some(failure_count) = error
+        .strip_prefix("build stopped: ")
+        .and_then(|rest| rest.split_once(" subcommand(s) failed"))
+        .and_then(|(count, _)| count.parse::<usize>().ok())
+    {
+        let subject = if failure_count == 1 {
+            "subcommand"
+        } else {
+            "subcommands"
+        };
+        return Some(format!("build stopped: {subject} failed."));
     }
     if let Some(output) = error.strip_prefix("multiple rules generate ") {
         return Some(format!("build stopped: multiple rules generate {output}."));
@@ -3106,8 +3115,21 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_short_option_clusters, json_escape, parse_failure_count, parse_load_average,
+        expand_short_option_clusters, json_escape, ninja_compat_build_error, parse_failure_count,
+        parse_load_average,
     };
+
+    #[test]
+    fn ninja_failure_summary_pluralization_matches_failure_count() {
+        assert_eq!(
+            ninja_compat_build_error("build stopped: 1 subcommand(s) failed\ndetail"),
+            Some("build stopped: subcommand failed.".to_owned())
+        );
+        assert_eq!(
+            ninja_compat_build_error("build stopped: 3 subcommand(s) failed\ndetail"),
+            Some("build stopped: subcommands failed.".to_owned())
+        );
+    }
 
     #[test]
     fn upstream_json_encoder_corpus() {

@@ -6647,6 +6647,36 @@ fn upstream_build_core_planning_corpus_matches_ninja() {
             &["in"][..],
         ),
         (
+            "double output indirect",
+            concat!(
+                "build a1 a2: cat in\n",
+                "build b1: cat a1\n",
+                "build b2: cat a2\n",
+                "build out: cat b1 b2\n",
+                "default out\n",
+            ),
+            &["in"][..],
+        ),
+        (
+            "multi output implicit input",
+            concat!(
+                "build in1 otherfile: cat in\n",
+                "build out: cat in | in1\n",
+                "default out\n",
+            ),
+            &["in"][..],
+        ),
+        (
+            "encounter ready twice",
+            concat!(
+                "build c: cat\n",
+                "build b: cat || c\n",
+                "build a: cat | b || c\n",
+                "default a\n",
+            ),
+            &[][..],
+        ),
+        (
             "order only",
             "build order: cat order.in\nbuild out: cat in || order\ndefault out\n",
             &["in", "order.in"][..],
@@ -6912,6 +6942,1517 @@ fn upstream_build_case_inventory_is_complete() {
     ];
     let unique = CASES.into_iter().collect::<std::collections::HashSet<_>>();
     assert_eq!(unique.len(), CASES.len());
+
+    const EVIDENCE: [(&str, &str); 121] = [
+        ("Basic", "upstream_build_core_planning_corpus_matches_ninja"),
+        (
+            "DoubleOutputDirect",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "DoubleOutputIndirect",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "DoubleDependent",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "PoolWithDepthOne",
+            "bounded_pools_reserve_ready_work_like_ninja",
+        ),
+        (
+            "ConsolePool",
+            "console_pool_overlaps_work_and_buffers_its_output_like_ninja",
+        ),
+        (
+            "PoolsWithDepthTwo",
+            "bounded_pools_reserve_ready_work_like_ninja",
+        ),
+        (
+            "PoolWithRedundantEdges",
+            "delayed_pool_work_keeps_its_reservation_before_new_dependents",
+        ),
+        (
+            "PoolWithFailingEdge",
+            "upstream_build_failure_limit_corpus_matches_ninja",
+        ),
+        (
+            "PriorityWithoutBuildLog",
+            "scheduler_prioritizes_the_longest_remaining_path_like_ninja",
+        ),
+        (
+            "NoWork",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "OneStep",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "OneStep2",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        ("TwoStep", "build::tests::builds_incrementally"),
+        (
+            "TwoOutputs",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "ImplicitOutput",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "MultiOutIn",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        ("Chain", "build::tests::builds_incrementally"),
+        (
+            "MissingInput",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "MissingTarget",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "MissingInputTarget",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "MakeDirs",
+            "build::tests::upstream_disk_interface_make_dirs_corpus",
+        ),
+        (
+            "DepFileMissing",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "DepFileOK",
+            "dependency_type_configuration_matches_ninjas_build_phases",
+        ),
+        ("DepFileParseError", "stale_depfile_failures_match_ninja"),
+        (
+            "EncounterReadyTwice",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "OrderOnlyDeps",
+            "dependency_type_configuration_matches_ninjas_build_phases",
+        ),
+        (
+            "RebuildOrderOnlyDeps",
+            "upstream_build_order_only_rebuild_corpus_matches_ninja",
+        ),
+        (
+            "DepFileCanonicalize",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        (
+            "Phony",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyNoWork",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonySelfReference",
+            "phony_self_reference_policy_matches_ninja_tools",
+        ),
+        (
+            "PhonyUseCase1",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyUseCase2",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyUseCase3",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyUseCase4",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyUseCase5",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        (
+            "PhonyUseCase6",
+            "upstream_build_phony_use_case_corpus_matches_ninja",
+        ),
+        ("Fail", "failed_command_status_and_exit_code_match_ninja"),
+        (
+            "SwallowFailures",
+            "upstream_build_failure_limit_corpus_matches_ninja",
+        ),
+        (
+            "SwallowFailuresLimit",
+            "upstream_build_failure_limit_corpus_matches_ninja",
+        ),
+        (
+            "SwallowFailuresPool",
+            "upstream_build_failure_limit_corpus_matches_ninja",
+        ),
+        (
+            "PoolEdgesReadyButNotWanted",
+            "initial_pool_frontier_includes_clean_phony_dependents",
+        ),
+        (
+            "ImplicitGeneratedOutOfDate",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "ImplicitGeneratedOutOfDate2",
+            "upstream_build_input_mtime_race_corpus_matches_ninja",
+        ),
+        (
+            "NotInLogButOnDisk",
+            "upstream_build_log_and_rsp_command_change_corpus_matches_ninja",
+        ),
+        (
+            "RebuildAfterFailure",
+            "upstream_build_log_rebuild_after_failure_and_inputless_corpus_matches_ninja",
+        ),
+        (
+            "RebuildWithNoInputs",
+            "upstream_build_log_rebuild_after_failure_and_inputless_corpus_matches_ninja",
+        ),
+        (
+            "RestatTest",
+            "unchanged_restat_output_becomes_clean_after_the_command_runs",
+        ),
+        (
+            "RestatMissingFile",
+            "missing_to_missing_restat_output_does_not_dirty_its_dependent",
+        ),
+        (
+            "RestatSingleDependentOutputDirty",
+            "multi_output_restat_only_cleans_dependents_of_unchanged_outputs",
+        ),
+        (
+            "RestatMissingInput",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "RestatInputChangesDueToRule",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "GeneratedPlainDepfileMtime",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "AllCommandsShown",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "WithDyndep",
+            "generated_dyndep_dry_run_lists_safe_work_once",
+        ),
+        (
+            "RspFileSuccess",
+            "upstream_build_response_file_lifecycle_matches_ninja",
+        ),
+        (
+            "RspFileFailure",
+            "upstream_build_response_file_lifecycle_matches_ninja",
+        ),
+        (
+            "RspFileCmdLineChange",
+            "upstream_build_log_and_rsp_command_change_corpus_matches_ninja",
+        ),
+        (
+            "InterruptCleanup",
+            "interrupt_terminates_the_spawned_process_tree",
+        ),
+        (
+            "StatFailureAbortsBuild",
+            "filesystem_stat_failures_abort_before_missing_input_diagnostics",
+        ),
+        (
+            "PhonyWithNoInputs",
+            "inputless_phony_target_forces_rebuilds",
+        ),
+        (
+            "DepsGccWithEmptyDepfileErrorsOut",
+            "dependency_extraction_failure_is_reported_as_a_buffered_subcommand_failure",
+        ),
+        (
+            "StatusFormatElapsed_e",
+            "build::tests::expands_all_ninja_status_placeholders",
+        ),
+        (
+            "StatusFormatElapsed_w",
+            "build::tests::expands_all_ninja_status_placeholders",
+        ),
+        (
+            "StatusFormatETA",
+            "build::tests::expands_all_ninja_status_placeholders",
+        ),
+        (
+            "StatusFormatTimeProgress",
+            "build::tests::expands_all_ninja_status_placeholders",
+        ),
+        (
+            "StatusFormatReplacePlaceholder",
+            "build::tests::expands_all_ninja_status_placeholders",
+        ),
+        (
+            "FailedDepsParse",
+            "dependency_extraction_failure_is_reported_as_a_buffered_subcommand_failure",
+        ),
+        (
+            "TwoOutputsDepFileMSVC",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "TwoOutputsDepFileGCCOneLine",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "TwoOutputsDepFileGCCMultiLineInput",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "TwoOutputsDepFileGCCMultiLineOutput",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "TwoOutputsDepFileGCCOnlyMainOutput",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "TwoOutputsDepFileGCCOnlySecondaryOutput",
+            "upstream_build_multi_output_dependency_log_corpus_matches_ninja",
+        ),
+        (
+            "Straightforward",
+            "ninja_and_knight_exchange_gcc_dependency_logs",
+        ),
+        (
+            "ObsoleteDeps",
+            "build::tests::accepts_older_outputs_and_first_output_records_from_deps_log",
+        ),
+        (
+            "DepsIgnoredInDryRun",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "TestInputMtimeRaceCondition",
+            "upstream_build_input_mtime_race_corpus_matches_ninja",
+        ),
+        (
+            "TestInputMtimeRaceConditionWithDepFile",
+            "upstream_build_input_mtime_race_corpus_matches_ninja",
+        ),
+        (
+            "RestatDepfileDependency",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "RestatDepfileDependencyDepsLog",
+            "upstream_build_restat_and_dry_run_corpus_matches_ninja",
+        ),
+        (
+            "DepFileOKDepsLog",
+            "ninja_and_knight_exchange_gcc_dependency_logs",
+        ),
+        (
+            "DiscoveredDepDuringBuildChanged",
+            "upstream_build_input_mtime_race_corpus_matches_ninja",
+        ),
+        (
+            "DepFileDepsLogCanonicalize",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        (
+            "RestatMissingDepfile",
+            "restat_does_not_hide_a_missing_downstream_depfile",
+        ),
+        (
+            "RestatMissingDepfileDepslog",
+            "restat_does_not_hide_a_missing_downstream_depfile",
+        ),
+        (
+            "WrongOutputInDepfileCausesRebuild",
+            "stale_depfile_failures_match_ninja",
+        ),
+        (
+            "Console",
+            "console_pool_inherits_all_terminal_descriptors_like_ninja",
+        ),
+        (
+            "DyndepMissingAndNoRule",
+            "missing_dyndep_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepReadyImplicitConnection",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "DyndepReadySyntaxError",
+            "dyndep_parser_and_lexer_corpus_matches_ninja_byte_for_byte",
+        ),
+        (
+            "DyndepReadyCircular",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "DyndepBuild",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepBuildSyntaxError",
+            "dyndep_parser_and_lexer_corpus_matches_ninja_byte_for_byte",
+        ),
+        (
+            "DyndepBuildUnrelatedOutput",
+            "dyndep_file_entry_ownership_diagnostics_match_ninja",
+        ),
+        (
+            "DyndepBuildDiscoverNewOutput",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepBuildDiscoverNewOutputWithMultipleRules1",
+            "dyndep_output_conflict_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepBuildDiscoverNewOutputWithMultipleRules2",
+            "dyndep_output_conflict_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepBuildDiscoverNewInput",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepBuildDiscoverNewInputWithValidation",
+            "dependency_log_validations_and_declared_dirty_short_circuit_match_ninja",
+        ),
+        (
+            "DyndepBuildDiscoverNewInputWithTransitiveValidation",
+            "build::tests::collects_transitive_validations_without_creating_false_cycles",
+        ),
+        (
+            "DyndepBuildDiscoverImplicitConnection",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepBuildDiscoverOutputAndDepfileInput",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepBuildDiscoverNowWantEdge",
+            "generated_dyndep_keeps_independent_requested_work_concurrent",
+        ),
+        (
+            "DyndepBuildDiscoverNowWantEdgeAndDependent",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepBuildDiscoverCircular",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "DyndepBuildDiscoverRestat",
+            "explain_reports_dyndep_loads_without_duplicate_output_reasons",
+        ),
+        (
+            "DyndepBuildDiscoverScheduledEdge",
+            "generated_dyndep_keeps_independent_requested_work_concurrent",
+        ),
+        (
+            "DyndepTwoLevelDirect",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepTwoLevelIndirect",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepTwoLevelDiscoveredReady",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepTwoLevelDiscoveredDirty",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepBuildMultiple",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "Validation",
+            "upstream_build_validation_corpus_matches_ninja",
+        ),
+        (
+            "ValidationDependsOnOutput",
+            "upstream_build_validation_corpus_matches_ninja",
+        ),
+        (
+            "ValidationThroughDepfile",
+            "dependency_log_validations_and_declared_dirty_short_circuit_match_ninja",
+        ),
+        (
+            "ValidationCircular",
+            "upstream_build_validation_corpus_matches_ninja",
+        ),
+        (
+            "ValidationWithCircularDependency",
+            "upstream_build_validation_corpus_matches_ninja",
+        ),
+        (
+            "ComplexTargetPreserved",
+            "upstream_build_core_planning_corpus_matches_ninja",
+        ),
+        (
+            "CycleWithOldDepfile",
+            "stale_depfile_cycle_is_ignored_when_declared_inputs_are_dirty",
+        ),
+    ];
+    assert_eq!(
+        EVIDENCE.map(|(case, _)| case),
+        CASES,
+        "the evidence map must stay aligned with the pinned upstream inventory"
+    );
+    assert!(EVIDENCE.iter().all(|(_, evidence)| !evidence.is_empty()));
+}
+
+#[test]
+fn upstream_build_multi_output_dependency_log_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let copy_command = "cmd /d /c copy /y in1 out1 >nul & copy /y in1 out2 >nul";
+    #[cfg(not(windows))]
+    let copy_command = "cp in1 out1; cp in1 out2";
+    let normalize_mtimes = |output: &[u8]| {
+        String::from_utf8_lossy(output)
+            .split('\n')
+            .map(|line| {
+                let mut line = line.to_owned();
+                if let Some(marker) = line.find("deps mtime ")
+                    && let Some(end) = line[marker..].find(" (")
+                {
+                    line.replace_range(marker + "deps mtime ".len()..marker + end, "<mtime>");
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    for (name, depfile) in [
+        ("one line", "out1 out2: in1 in2\n"),
+        ("line per input", "out1 out2: in1\nout1 out2: in2\n"),
+        ("line per output", "out1: in1 in2\nout2: in1 in2\n"),
+        ("main output only", "out1: in1 in2\n"),
+        ("secondary output only", "out2: in1 in2\n"),
+    ] {
+        let mut queries = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!(
+                    concat!(
+                        "rule cc\n",
+                        "  command = {copy_command}\n",
+                        "  deps = gcc\n",
+                        "  depfile = in.d\n",
+                        "build out1 out2: cc in1 in2\n",
+                        "default out1\n",
+                    ),
+                    copy_command = copy_command,
+                ),
+            )
+            .unwrap();
+            fs::write(temp.path().join("in1"), "one\n").unwrap();
+            fs::write(temp.path().join("in2"), "two\n").unwrap();
+            fs::write(temp.path().join("in.d"), depfile).unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            let build = run(executable, temp.path(), &[]);
+            assert!(
+                build.status.success(),
+                "case={name} implementation={implementation} stdout={} stderr={}",
+                String::from_utf8_lossy(&build.stdout),
+                String::from_utf8_lossy(&build.stderr),
+            );
+            queries.push(run(
+                executable,
+                temp.path(),
+                &["-t", "deps", "out1", "out2"],
+            ));
+        }
+        assert_eq!(
+            queries[1].status.code(),
+            queries[0].status.code(),
+            "case={name}"
+        );
+        assert_eq!(
+            normalize_mtimes(&queries[1].stdout),
+            normalize_mtimes(&queries[0].stdout),
+            "case={name}"
+        );
+        assert_eq!(queries[1].stderr, queries[0].stderr, "case={name}");
+    }
+
+    #[cfg(windows)]
+    let msvc_command = concat!(
+        "cmd /d /c echo using in1&",
+        "copy /y in1 out1 >nul&copy /y in1 out2 >nul"
+    );
+    #[cfg(not(windows))]
+    let msvc_command = "printf 'using in1\\n'; cp in1 out1; cp in1 out2";
+    let mut queries = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule cc\n",
+                    "  command = {msvc_command}\n",
+                    "  deps = msvc\n",
+                    "  msvc_deps_prefix = using \n",
+                    "build out1 out2: cc in1\n",
+                    "default out1\n",
+                ),
+                msvc_command = msvc_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in1"), "one\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let build = run(executable, temp.path(), &[]);
+        assert!(build.status.success(), "implementation={implementation}");
+        queries.push(run(
+            executable,
+            temp.path(),
+            &["-t", "deps", "out1", "out2"],
+        ));
+    }
+    assert_eq!(queries[1].status.code(), queries[0].status.code());
+    assert_eq!(
+        normalize_mtimes(&queries[1].stdout),
+        normalize_mtimes(&queries[0].stdout)
+    );
+    assert_eq!(queries[1].stderr, queries[0].stderr);
+}
+
+#[test]
+fn upstream_build_log_and_rsp_command_change_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let rsp_command = "cmd /d /c type $rspfile > $out";
+    #[cfg(not(windows))]
+    let rsp_command = "cat $rspfile > $out";
+
+    let mut sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        let write_manifest = |content: &str| {
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!(
+                    concat!(
+                        "rule rsp\n",
+                        "  command = {rsp_command}\n",
+                        "  rspfile = args.rsp\n",
+                        "  rspfile_content = {content}\n",
+                        "build out: rsp\n",
+                        "default out\n",
+                    ),
+                    rsp_command = rsp_command,
+                    content = content,
+                ),
+            )
+            .unwrap();
+        };
+        write_manifest("original content");
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let first = run(executable, temp.path(), &["-v"]);
+        let second = run(executable, temp.path(), &["-v"]);
+        write_manifest("changed content");
+        let third = run(executable, temp.path(), &["-v"]);
+        assert!(first.status.success() && second.status.success() && third.status.success());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("out")).unwrap(),
+            "changed content"
+        );
+        sequences.push([
+            (first.status.code(), first.stdout, first.stderr),
+            (second.status.code(), second.stdout, second.stderr),
+            (third.status.code(), third.stdout, third.stderr),
+        ]);
+    }
+    assert_eq!(sequences[1], sequences[0]);
+
+    #[cfg(windows)]
+    let write_command = "cmd /d /c echo built>$out";
+    #[cfg(not(windows))]
+    let write_command = "printf built > $out";
+    let mut results = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!("rule write\n  command = {write_command}\nbuild out: write in\ndefault out\n"),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(temp.path().join("out"), "unlogged output\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        results.push(run(executable, temp.path(), &["-v"]));
+    }
+    assert_eq!(results[1].status.code(), results[0].status.code());
+    assert_eq!(results[1].stdout, results[0].stdout);
+    assert_eq!(results[1].stderr, results[0].stderr);
+}
+
+#[test]
+fn upstream_build_failure_limit_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let fail_command = "cmd /d /c exit 1";
+    #[cfg(not(windows))]
+    let fail_command = "false";
+    let cases = [
+        (
+            "failure threshold",
+            "",
+            "build all: phony out1 out2 out3\ndefault all\n",
+            "3",
+        ),
+        (
+            "cannot progress",
+            "",
+            "build final: phony out1 out2 out3\ndefault final\n",
+            "11",
+        ),
+        (
+            "cannot progress in pool",
+            "pool failpool\n  depth = 1\n",
+            "build final: phony out1 out2 out3\ndefault final\n",
+            "11",
+        ),
+    ];
+
+    for (name, pool, tail, limit) in cases {
+        let mut outputs = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            let pool_binding = if pool.is_empty() {
+                ""
+            } else {
+                "  pool = failpool\n"
+            };
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!(
+                    concat!(
+                        "{pool}",
+                        "rule fail\n",
+                        "  command = {fail_command}\n",
+                        "{pool_binding}",
+                        "build out1: fail\n",
+                        "build out2: fail\n",
+                        "build out3: fail\n",
+                        "{tail}",
+                    ),
+                    pool = pool,
+                    fail_command = fail_command,
+                    pool_binding = pool_binding,
+                    tail = tail,
+                ),
+            )
+            .unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            outputs.push(run(executable, temp.path(), &["-j1", "-k", limit]));
+        }
+        assert_eq!(
+            outputs[1].status.code(),
+            outputs[0].status.code(),
+            "case={name}"
+        );
+        assert_eq!(outputs[1].stdout, outputs[0].stdout, "case={name}");
+        assert_eq!(outputs[1].stderr, outputs[0].stderr, "case={name}");
+    }
+}
+
+#[test]
+fn upstream_build_phony_use_case_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let touch_command = "cmd /d /c type nul > $out";
+    #[cfg(not(windows))]
+    let touch_command = "touch $out";
+
+    let mut sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule touch\n",
+                    "  command = {touch_command}\n",
+                    "build notreal: phony blank\n",
+                    "build phony1: phony notreal\n",
+                    "build phony2: phony\n",
+                    "build phony3: phony blank\n",
+                    "build phony4: phony notreal\n",
+                    "build phony5: phony\n",
+                    "build phony6: phony blank\n",
+                    "build test1: touch phony1\n",
+                    "build test2: touch phony2\n",
+                    "build test3: touch phony3\n",
+                    "build test4: touch phony4\n",
+                    "build test5: touch phony5\n",
+                    "build test6: touch phony6\n",
+                    "default test1 test2 test3 test4 test5 test6\n",
+                ),
+                touch_command = touch_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("blank"), "input\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+
+        let mut sequence = Vec::new();
+        sequence.push(run(executable, temp.path(), &["-j1", "-v"]));
+        for case in 1..=6 {
+            sequence.push(run(
+                executable,
+                temp.path(),
+                &["-j1", "-v", &format!("test{case}")],
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(temp.path().join("blank"), "changed\n").unwrap();
+        for case in 1..=6 {
+            sequence.push(run(
+                executable,
+                temp.path(),
+                &["-j1", "-v", &format!("test{case}")],
+            ));
+        }
+        assert!(
+            sequence.iter().all(|output| output.status.success()),
+            "implementation={implementation}"
+        );
+        sequences.push(sequence);
+    }
+
+    assert_eq!(sequences[1].len(), sequences[0].len());
+    for (index, (actual, expected)) in sequences[1].iter().zip(&sequences[0]).enumerate() {
+        assert_eq!(actual.status.code(), expected.status.code(), "run={index}");
+        assert_eq!(actual.stdout, expected.stdout, "run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "run={index}");
+    }
+}
+
+#[test]
+fn upstream_build_input_mtime_race_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+
+    for (name, dependency, depfile) in [
+        ("declared input", "in1", false),
+        ("discovered input", "header.h", true),
+    ] {
+        let mut sequences = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            #[cfg(windows)]
+            let (script_name, command, script) = (
+                "race.cmd",
+                "race.cmd",
+                format!(
+                    concat!(
+                        "@echo off\r\n",
+                        "echo built>out\r\n",
+                        "{depfile_line}",
+                        "if exist raced.flag exit /b 0\r\n",
+                        "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 100\"\r\n",
+                        "echo raced>{dependency}\r\n",
+                        "echo flag>raced.flag\r\n",
+                    ),
+                    depfile_line = if depfile {
+                        "echo out: header.h>out.d\r\n"
+                    } else {
+                        ""
+                    },
+                    dependency = dependency,
+                ),
+            );
+            #[cfg(not(windows))]
+            let (script_name, command, script) = (
+                "race.sh",
+                "sh race.sh",
+                format!(
+                    concat!(
+                        "#!/bin/sh\n",
+                        "printf built > out\n",
+                        "{depfile_line}",
+                        "test -e raced.flag && exit 0\n",
+                        "sleep 0.1\n",
+                        "printf raced > {dependency}\n",
+                        "printf flag > raced.flag\n",
+                    ),
+                    depfile_line = if depfile {
+                        "printf 'out: header.h\\n' > out.d\n"
+                    } else {
+                        ""
+                    },
+                    dependency = dependency,
+                ),
+            );
+            fs::write(temp.path().join(script_name), script).unwrap();
+            let dependency_binding = if depfile {
+                "  deps = gcc\n  depfile = out.d\n"
+            } else {
+                ""
+            };
+            let input = if depfile { "" } else { " in1" };
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!(
+                    "rule race\n  command = {command}\n{dependency_binding}build out: race{input}\ndefault out\n"
+                ),
+            )
+            .unwrap();
+            fs::write(temp.path().join(dependency), "initial\n").unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+
+            let mut sequence = vec![
+                run(executable, temp.path(), &["-v"]),
+                run(executable, temp.path(), &["-v"]),
+                run(executable, temp.path(), &["-v"]),
+            ];
+            if depfile {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                fs::write(temp.path().join(dependency), "external change\n").unwrap();
+                fs::remove_file(temp.path().join("raced.flag")).unwrap();
+                sequence.extend([
+                    run(executable, temp.path(), &["-v"]),
+                    run(executable, temp.path(), &["-v"]),
+                    run(executable, temp.path(), &["-v"]),
+                ]);
+            }
+            assert!(
+                sequence.iter().all(|output| output.status.success()),
+                "case={name} implementation={implementation}"
+            );
+            sequences.push(sequence);
+        }
+
+        assert_eq!(sequences[1].len(), sequences[0].len(), "case={name}");
+        for (index, (actual, expected)) in sequences[1].iter().zip(&sequences[0]).enumerate() {
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "case={name} run={index}"
+            );
+            assert_eq!(actual.stdout, expected.stdout, "case={name} run={index}");
+            assert_eq!(actual.stderr, expected.stderr, "case={name} run={index}");
+        }
+    }
+}
+
+#[test]
+fn upstream_build_order_only_rebuild_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let copy_command = "cmd /d /c copy /y $in $out >nul";
+    #[cfg(not(windows))]
+    let copy_command = "cp $in $out";
+
+    let mut sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule copy\n",
+                    "  command = {copy_command}\n",
+                    "build oo.h: copy oo.h.in\n",
+                    "build out: copy in || oo.h\n",
+                    "default out\n",
+                ),
+                copy_command = copy_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        fs::write(temp.path().join("oo.h.in"), "header\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+
+        let mut sequence = vec![
+            run(executable, temp.path(), &["-j1", "-v"]),
+            run(executable, temp.path(), &["-j1", "-v"]),
+        ];
+        fs::remove_file(temp.path().join("oo.h")).unwrap();
+        sequence.push(run(executable, temp.path(), &["-j1", "-v"]));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(temp.path().join("oo.h.in"), "changed header\n").unwrap();
+        sequence.push(run(executable, temp.path(), &["-j1", "-v"]));
+        assert!(
+            sequence.iter().all(|output| output.status.success()),
+            "implementation={implementation}"
+        );
+        sequences.push(sequence);
+    }
+
+    for (index, (actual, expected)) in sequences[1].iter().zip(&sequences[0]).enumerate() {
+        assert_eq!(actual.status.code(), expected.status.code(), "run={index}");
+        assert_eq!(actual.stdout, expected.stdout, "run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "run={index}");
+    }
+}
+
+#[test]
+fn upstream_build_log_rebuild_after_failure_and_inputless_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+
+    let mut failure_sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        #[cfg(windows)]
+        let (script_name, command, script) = (
+            "build.cmd",
+            "build.cmd",
+            concat!(
+                "@echo off\r\n",
+                "echo built>out\r\n",
+                "if exist fail.flag exit /b 1\r\n",
+            ),
+        );
+        #[cfg(not(windows))]
+        let (script_name, command, script) = (
+            "build.sh",
+            "sh build.sh",
+            concat!(
+                "#!/bin/sh\n",
+                "printf built > out\n",
+                "test ! -e fail.flag\n",
+            ),
+        );
+        fs::write(temp.path().join(script_name), script).unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!("rule build\n  command = {command}\nbuild out: build in\ndefault out\n"),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let first = run(executable, temp.path(), &["-v"]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(temp.path().join("in"), "changed\n").unwrap();
+        fs::write(temp.path().join("fail.flag"), "fail\n").unwrap();
+        let second = run(executable, temp.path(), &["-v"]);
+        fs::remove_file(temp.path().join("fail.flag")).unwrap();
+        let third = run(executable, temp.path(), &["-v"]);
+        assert!(first.status.success() && !second.status.success() && third.status.success());
+        failure_sequences.push([first, second, third]);
+    }
+    for (index, (actual, expected)) in failure_sequences[1]
+        .iter()
+        .zip(&failure_sequences[0])
+        .enumerate()
+    {
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "failure run={index}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "failure run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "failure run={index}");
+    }
+
+    #[cfg(windows)]
+    let write_command = "cmd /d /c echo built>$out";
+    #[cfg(not(windows))]
+    let write_command = "printf built > $out";
+    let mut inputless_sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule write\n",
+                    "  command = {write_command}\n",
+                    "build out1: write\n",
+                    "build out2: write in\n",
+                    "default out1 out2\n",
+                ),
+                write_command = write_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let first = run(executable, temp.path(), &["-j1", "-v"]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(temp.path().join("in"), "changed\n").unwrap();
+        let second = run(executable, temp.path(), &["-j1", "-v"]);
+        let third = run(executable, temp.path(), &["-j1", "-v"]);
+        assert!(first.status.success() && second.status.success() && third.status.success());
+        inputless_sequences.push([first, second, third]);
+    }
+    for (index, (actual, expected)) in inputless_sequences[1]
+        .iter()
+        .zip(&inputless_sequences[0])
+        .enumerate()
+    {
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "inputless run={index}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "inputless run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "inputless run={index}");
+    }
+}
+
+#[test]
+fn upstream_build_validation_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let write_command = "cmd /d /c echo built>$out";
+    #[cfg(not(windows))]
+    let write_command = "printf built > $out";
+
+    for (name, edges) in [
+        (
+            "independent validation",
+            "build out: write in |@ validate\nbuild validate: write in2\ndefault out\n",
+        ),
+        (
+            "validation depends on output",
+            "build out: write in |@ validate\nbuild validate: write in2 | out\ndefault out\n",
+        ),
+        (
+            "circular validations",
+            "build out: write in |@ out2\nbuild out2: write in2 |@ out\ndefault out\n",
+        ),
+    ] {
+        let mut sequences = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!("rule write\n  command = {write_command}\n{edges}"),
+            )
+            .unwrap();
+            fs::write(temp.path().join("in"), "input\n").unwrap();
+            fs::write(temp.path().join("in2"), "validation input\n").unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            let first = run(executable, temp.path(), &["-j1", "-v"]);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            fs::write(temp.path().join("in"), "changed input\n").unwrap();
+            let second = run(executable, temp.path(), &["-j1", "-v"]);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            fs::write(temp.path().join("in2"), "changed validation\n").unwrap();
+            let third = run(executable, temp.path(), &["-j1", "-v"]);
+            assert!(
+                first.status.success() && second.status.success() && third.status.success(),
+                "case={name} implementation={implementation}"
+            );
+            sequences.push([first, second, third]);
+        }
+        for (index, (actual, expected)) in sequences[1].iter().zip(&sequences[0]).enumerate() {
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "case={name} run={index}"
+            );
+            assert_eq!(actual.stdout, expected.stdout, "case={name} run={index}");
+            assert_eq!(actual.stderr, expected.stderr, "case={name} run={index}");
+        }
+    }
+
+    let mut cycle_results = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule write\n",
+                    "  command = {write_command}\n",
+                    "build out: write in |@ validate\n",
+                    "build validate: write validate_in | out\n",
+                    "build validate_in: write validate\n",
+                    "default out\n",
+                ),
+                write_command = write_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        cycle_results.push(run(executable, temp.path(), &[]));
+    }
+    assert_eq!(
+        cycle_results[1].status.code(),
+        cycle_results[0].status.code()
+    );
+    assert_eq!(cycle_results[1].stdout, cycle_results[0].stdout);
+    assert_eq!(cycle_results[1].stderr, cycle_results[0].stderr);
+}
+
+#[test]
+fn upstream_build_restat_and_dry_run_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let stable_command = "cmd /d /c echo stable>>runs.txt";
+    #[cfg(not(windows))]
+    let stable_command = "printf 'stable\\n' >> runs.txt";
+    #[cfg(windows)]
+    let consume_command = "cmd /d /c echo consume>>runs.txt & echo built>$out";
+    #[cfg(not(windows))]
+    let consume_command = "printf 'consume\\n' >> runs.txt; printf built > $out";
+
+    let mut missing_input_sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule stable\n",
+                    "  command = {stable_command}\n",
+                    "  depfile = $out.d\n",
+                    "  restat = 1\n",
+                    "rule consume\n",
+                    "  command = {consume_command}\n",
+                    "build out1: stable in\n",
+                    "build out2: consume out1\n",
+                    "default out2\n",
+                ),
+                stable_command = stable_command,
+                consume_command = consume_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("in"), "input\n").unwrap();
+        fs::write(
+            temp.path().join("out1.d"),
+            "out1: will.be.deleted restat.file\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("will.be.deleted"), "temporary\n").unwrap();
+        fs::write(temp.path().join("restat.file"), "stable\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let first = run(executable, temp.path(), &["-j1", "-v"]);
+        fs::remove_file(temp.path().join("will.be.deleted")).unwrap();
+        let second = run(executable, temp.path(), &["-j1", "-v"]);
+        assert!(
+            first.status.success() && second.status.success(),
+            "{implementation}"
+        );
+        missing_input_sequences.push([first, second]);
+    }
+    for (index, (actual, expected)) in missing_input_sequences[1]
+        .iter()
+        .zip(&missing_input_sequences[0])
+        .enumerate()
+    {
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "restat run={index}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "restat run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "restat run={index}");
+    }
+
+    #[cfg(windows)]
+    let depfile_command = "cmd /d /c echo built>$out & echo out$: inimp>out.d";
+    #[cfg(not(windows))]
+    let depfile_command = "printf built > $out; printf 'out: inimp\\n' > out.d";
+    let mut plain_depfile_sequences = Vec::new();
+    for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                concat!(
+                    "rule generate\n",
+                    "  command = {depfile_command}\n",
+                    "  depfile = out.d\n",
+                    "build out: generate\n",
+                    "default out\n",
+                ),
+                depfile_command = depfile_command,
+            ),
+        )
+        .unwrap();
+        fs::write(temp.path().join("inimp"), "implicit\n").unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        if implementation == "knight" {
+            install_ninja_alias(knight, &alias);
+        }
+        let executable = if implementation == "knight" {
+            alias.as_path()
+        } else {
+            executable
+        };
+        let first = run(executable, temp.path(), &["-v"]);
+        let second = run(executable, temp.path(), &["-v"]);
+        assert!(
+            first.status.success() && second.status.success(),
+            "{implementation}"
+        );
+        plain_depfile_sequences.push([first, second]);
+    }
+    for (index, (actual, expected)) in plain_depfile_sequences[1]
+        .iter()
+        .zip(&plain_depfile_sequences[0])
+        .enumerate()
+    {
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "depfile run={index}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "depfile run={index}");
+        assert_eq!(actual.stderr, expected.stderr, "depfile run={index}");
+    }
+
+    #[cfg(windows)]
+    let write_command = "cmd /d /c echo built>$out";
+    #[cfg(not(windows))]
+    let write_command = "printf built > $out";
+    for (name, bindings, edges) in [
+        (
+            "restat keeps all dry-run commands",
+            "  restat = 1\n",
+            "build out1: write in\nbuild out2: write out1\nbuild out3: write out2\ndefault out3\n",
+        ),
+        (
+            "deps do not block dry run",
+            "  deps = gcc\n  depfile = out.d\n",
+            "build out: write in\ndefault out\n",
+        ),
+    ] {
+        let mut outputs = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!("rule write\n  command = {write_command}\n{bindings}{edges}"),
+            )
+            .unwrap();
+            if name.starts_with("restat") {
+                for output in ["out1", "out2", "out3"] {
+                    fs::write(temp.path().join(output), "old\n").unwrap();
+                }
+            } else {
+                fs::write(temp.path().join("out"), "old\n").unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            fs::write(temp.path().join("in"), "new\n").unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            outputs.push(run(executable, temp.path(), &["-n", "-j1", "-v"]));
+        }
+        assert_eq!(outputs[1].status.code(), outputs[0].status.code(), "{name}");
+        assert_eq!(outputs[1].stdout, outputs[0].stdout, "{name}");
+        assert_eq!(outputs[1].stderr, outputs[0].stderr, "{name}");
+    }
 }
 
 #[test]

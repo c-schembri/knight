@@ -20,7 +20,7 @@ Status meanings:
 | Upstream suite | Cases | Status | Current evidence |
 | :--- | ---: | :--- | :--- |
 | `build_log_test` | 11 | Mapped | Round-trip, signatures, duplicates, truncation, versions, spaces, restat, long lines, multi-output records, and recompaction |
-| `build_test` | 121 | Partial | Explicit 121-case inventory plus core planning and response-file lifecycle differentials; detailed case-to-evidence closure remains open |
+| `build_test` | 121 | Mapped | Explicit 121-case evidence map covering planning, pools, incremental/log behavior, depfiles, response files, failures, phony edges, restat, mtime races, dyndeps, validations, interrupts, and diagnostics on Windows and WSL |
 | `clean_test` | 20 | Mapped | All/target/rule and dry-run modes, multi-output/generator/phony edges, dep/rsp files, dyndeps, failures, spaces, and live/dead build-log outputs |
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |
 | `depfile_parser_test` | 29 | Mapped | `depfile::tests::upstream_depfile_parser_corpus` |
@@ -65,8 +65,11 @@ this ledger tracks all 514 upstream test cases in the pinned source tree.
 
 Of those, 36 cases exercise implementation-specific C++ helpers or optional
 Python support modules rather than the Ninja executable. The executable-parity
-scope is therefore 478 cases: 357 are explicitly mapped or pass unchanged, and
-the remaining 121 are the Partial `build_test` suite above.
+scope is therefore 478 cases, and all 478 are now explicitly mapped or pass
+unchanged. No executable suite in this pinned upstream inventory remains
+Partial.
 
-The next parity work should turn **Partial** executable suites into **Mapped**
-or **Upstream pass** rows. New performance work does not close this ledger.
+This closes the pinned test-corpus ledger, not every possible command-line or
+platform behavior. The next parity work audits tool-option and platform
+surfaces that the upstream corpus does not enumerate. New performance work does
+not substitute for that audit.
