@@ -1,0 +1,37 @@
+[package]
+name = "knight-build"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, diagnostic-first drop-in replacement for Ninja"
+license = "Apache-2.0"
+repository = "https://github.com/c-schembri/knight"
+
+[[bin]]
+name = "knight"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+ctrlc = { version = "3.4", features = ["termination"] }
+jobserver = "0.1"
+os_pipe = "1.2"
+rapidhash = "4.1"
+strip-ansi-escapes = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[dev-dependencies]
+criterion = "0.7"
+serde_json = "1"
+tempfile = "3.20"
+
+[[bench]]
+name = "manifest"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = true

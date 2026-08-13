@@ -1,0 +1,182 @@
+# Ninja compatibility status
+
+This is an evidence ledger, not a claim of full compatibility.
+
+## Implemented
+
+- Core declarations: variables, rules, build edges, defaults, includes,
+  subninjas, pools (including zero-depth pools), and scoped variable/rule
+  shadowing. Declaration-order lookup and duplicate rule-binding replacement
+  match Ninja's parser behavior. Nested `include` and `subninja` paths resolve
+  from the build working directory, including when declared in another file.
+- Explicit and implicit outputs; explicit, implicit, order-only, validation,
+  and dynamic inputs.
+- Ninja `$` escapes, path escaping, line continuations, and variable expansion
+  for paths and rule bindings, including eager edge/global values and literal
+  escaped dollars. Ninja 1.14 dashed variable names and the version-gated `$^`
+  newline escape are supported. Special depfile, dyndep, and response-file path
+  bindings use Ninja's unescaped `$in`/`$out` expansion. Paths are canonicalized
+  to Ninja identity rules across manifests, depfiles, dyndeps, dependency logs,
+  tools, and CLI targets.
+- Edge-local bindings can participate in output, input, order-only, validation,
+  and implicit path expansion, matching Ninja's post-binding path evaluation.
+- Duplicate-output, invalid escape, malformed declaration, response-file pair,
+  unknown rule/pool, and dependency-cycle diagnostics.
+  Tab indentation is rejected with Ninja's spaces-only policy. An upstream-
+  derived differential corpus currently covers 18 accepted and more than 30
+  rejected parser cases. `ninja_required_version` follows Ninja's major/minor
+  compatibility comparison and older-major warning policy, including patch
+  suffixes and nonnumeric values. The `$^` newline escape is gated by those
+  parsed major/minor components rather than loose string parsing.
+- Incremental timestamp planning, `restat`, manifest regeneration/reload,
+  Make-style GCC depfiles (multiple rules/outputs and Ninja-compatible escapes),
+  MSVC `/showIncludes`, and Ninja v7 build-log command hashes.
+  Missing depfile-discovered inputs correctly dirty their consumer instead of
+  becoming fatal graph errors. Deps-log freshness and multi-output lookup use
+  Ninja's output-timestamp and first-output rules. Discovered dependencies are
+  loaded only after declared inputs, outputs, and command hashes establish that
+  an edge is otherwise clean, so stale dependency graphs cannot pull unrelated
+  generators or validations into an already-dirty rebuild. Build-log recorded
+  mtimes follow Ninja's command-start/output/restat rules, unchanged restat
+  outputs propagate clean state across later invocations, and `.ninja_lock` is
+  removed at the end of every build attempt. A successful command may
+  intentionally leave an output absent without blocking its dependents in the
+  current invocation; the missing path is checked and rebuilt again on the
+  next invocation, matching Ninja.
+- Ninja `.ninja_deps` v4 reading, writing, and recompaction. Differential tests
+  exercise Ninja-to-Knight and Knight-to-Ninja metadata exchange. Build and
+  dependency logs automatically recompact at Ninja's redundancy thresholds,
+  and reject malformed/incompatible data before appending. Build directories
+  are created in the same execution phases as Ninja, while metadata files are
+  opened lazily only when a record is written. Truncated dependency-log records
+  are rolled back to the last valid boundary, and partial build-log lines are
+  removed before appending. Recompact-only recovery discards incompatible logs
+  without silently recreating them and follows Ninja's distinct build/deps-log
+  exit behavior. Dependency-tool output and dependency-log recompaction
+  preserve Ninja's persisted node-ID ordering.
+- Dyndep v1 implicit inputs, implicit outputs, and `restat`, including dyndep
+  files generated during the same build and multi-level discovery where one
+  loaded dyndep reveals another. Preparation iterates to a fixed point while
+  preserving generated-file order. Independent requested work runs concurrently
+  with generated dyndep producers, while consumers that may gain new inputs are
+  held until the relevant file is loaded. Version suffixes, final-newline
+  requirements, and per-edge duplicate-statement detection follow Ninja.
+- Parallel command execution, longest-remaining-path scheduling with stable
+  declaration-order ties, exclusive/live console pools, default/custom pool
+  limits (including zero-depth meaning unlimited), and Ninja-compatible
+  ready-edge pool reservations, including multi-output notification order.
+  Response files, inherited
+  and child-forwarded GNU/Cargo jobservers,
+  load limiting,
+  `MAKEFLAGS=n`, `-j`, `-k`, `-l`, `-n`, `-v`, `--quiet`, `--status`, `-C`,
+  and `-f`. Both classic `NINJA_STATUS` placeholders and Ninja 1.14
+  `--status` variables are supported. Getopt-style short-option clusters and
+  attached option values are accepted, non-positive `-k` is unlimited, and
+  the default parallelism uses Ninja's processor-count heuristic. Status ETA
+  and predicted progress use Ninja's historical per-edge CPU-time model,
+  including its stale-history rejection heuristic.
+- Debug modes `explain`, `keepdepfile`, `keeprsp`, and `nostatcache`, plus the
+  `phonycycle` warning policy, including the legacy self-reference behavior
+  exposed by graph tools. `-d stats` reports manifest, metadata, closure,
+  scheduler, log, filesystem, and edge-evaluation timings.
+- Tools: `targets`, `commands`, `clean`, `query`, `compdb`, `compdb-targets`,
+  `rules`, `recompact`, `restat`, `deps`, `inputs`, `multi-inputs`, `graph`,
+  `cleandead`, `missingdeps`, `wincodepage`, and the deprecated `msvc` helper.
+  Ninja's hidden early `urtle` tool is also accepted without appearing in the
+  public tool list.
+  The Python-backed `browse` tool is available on POSIX, matching Ninja's
+  platform split, while `msvc` and `wincodepage` are advertised only on
+  Windows. Unknown tools, target modes, targets, debug settings, and warning
+  flags provide Ninja-compatible spelling suggestions.
+  `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
+  `multi-inputs` short/long options, including bundled short flags and attached
+  delimiters, have differential coverage. `inputs` uses a single collector
+  across all requested targets, matching Ninja's shared-input deduplication,
+  and sorts rendered shell-escaped paths rather than their raw spellings.
+  Cleaning loads dyndeps, honors
+  dry-run/verbose/quiet, and counts auxiliary depfiles and response files.
+  Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
+  phony-edge filtering behavior. Compilation databases use Ninja's exact
+  pretty-printed JSON shape, and `compdb-targets` rejects input-only nodes as
+  non-targets instead of silently returning an empty database. Edges used only
+  for validation are excluded, while an output used as both a validation and a
+  regular input remains present. `restat`
+  compacts logs, handles missing and selected outputs, and rewrites metadata
+  even under `-n` like Ninja.
+- A deterministic generated-DAG differential corpus combines multi-output and
+  phony edges with explicit, implicit, order-only, and validation inputs, plus
+  bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
+  fresh plus incremental real builds. Both materialized-source and
+  missing-source corpora match Ninja on 1,000 Windows seeds (66,000 tool-mode
+  comparisons and 4,000 real build phases) and 500 Linux seeds (33,000
+  tool-mode comparisons and 2,000 real build phases). The harness runs
+  independent reference/candidate processes concurrently while preserving
+  deterministic result order. This audit found and now covers exact
+  empty-compdb JSON, missing regular phony inputs, phony-specific missing
+  order-only behavior, dry-run no-work output, and Ninja's unlimited dry-run
+  ready-frontier/FIFO-completion simulation even when `-j1` is supplied.
+- CLI node lookup supports Ninja's `target^` first-dependent syntax, dependency
+  log reverse lookup, and build-directory fallback at the same execution
+  phases as Ninja. Existing filesystem paths not present in the graph are not
+  silently accepted as targets.
+- `graph` emits Ninja-shaped Graphviz output with implicit root selection,
+  direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
+  dotted order-only edges. IDs remain deterministic rather than pointer-based.
+- CMake configure, compiler detection, build, no-op rebuild, manifest
+  regeneration, and header-triggered rebuild on Windows.
+- Iterative dependency traversal verified on a 50,000-edge chain without call
+  stack growth.
+  A 100,000-edge commandless phony chain also completes in Knight; the Windows
+  Ninja reference crashes with status `0xC0000005` at 10,000 phony edges.
+- Inputless phony dependencies retain Ninja's always-dirty behavior.
+- Default root discovery reports rootless cyclic graphs instead of silently
+  treating them as no-work builds.
+- Windows console interrupts terminate Knight with status 2 and tear down its
+  full descendant process tree through a kill-on-close job object. Interrupted
+  edges remove outputs whose timestamps changed, and depfile-producing edges
+  remove every output plus the depfile, while untouched pre-existing outputs
+  are retained.
+- POSIX signals terminate Knight with Ninja's status 130 and tear down every active child
+  process group with the same interrupted-output cleanup. This path is
+  exercised by the Linux integration suite.
+- Non-console stdout and stderr share one capture pipe, preserving emitted
+  order. Raw bytes are retained, and ANSI escapes follow Ninja's terminal,
+  `TERM=dumb`, `NO_COLOR`, `CLICOLOR_FORCE`, and `FORCE_COLOR` precedence.
+  Failed-command headers and command lines precede buffered output and
+  dependency-extraction diagnostics. Smart terminals receive Ninja's
+  carriage-return start/finish refreshes, clear-to-end-of-line sequences, and
+  final newline framing. Quiet, verbose, custom-status, dry-run, and unterminated
+  command output modes have byte-for-byte PTY differential coverage.
+- Diagnostic identity follows the invocation name: the normal executable uses
+  `knight:`, while a copy or link installed as `ninja` uses Ninja-compatible
+  `ninja:`/`ninja explain:` prefixes. `-d explain` identifies the dirty input
+  that actually propagates through each edge, respects clean restat pruning,
+  and reports dyndep loads. Knight intentionally emits a missing-output reason
+  once rather than reproducing Ninja's known duplicate dyndep explanation.
+
+## Not yet complete
+
+- Exact semantics for every tool option.
+- Full lexical and diagnostic-text parity across Ninja's complete test corpus.
+  A staged run of Ninja's own POSIX `misc/output_test.py` currently passes 21
+  of 24 tests unchanged. The remaining three assertions require Ninja's known
+  duplicate dyndep explanation or discard Knight's more specific dynamic-
+  output and failed-command summaries. Smart-terminal progress, invocation
+  identity, `compdb-targets`, input ordering, absent-output scheduling, and
+  signal-status cases pass upstream unchanged.
+- Broader cross-platform runtime validation. The current Windows gates pass 63
+  library, 1 CLI, and 80 differential tests; Linux-under-WSL passes 62 library,
+  1 CLI, and 48 differential tests. Release builds, clippy, a Windows-hosted
+  Linux target check, and a CMake no-op rebuild also pass locally; macOS and
+  other Unix variants are not yet exercised in CI here.
+  Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
+  restat-builddir (1/1) Python integration suites also pass unchanged under
+  WSL. Its jobserver suite passes 4/5: FIFO inheritance, token efficiency,
+  MAKEFLAGS forwarding, and no-jobserver scheduling pass; the only mismatch is
+  that Knight supports the inherited POSIX pipe protocol rather than printing
+  Ninja's "not supported" warning. A native Rust regression verifies that the
+  pipe protocol enforces its token limit.
+- Performance superiority across every representative workload. Knight leads
+  the 10,000-edge median and all three P95 measurements in the latest warm
+  no-op sweep, but trails two 1,000-edge medians and is nowhere near the
+  requested order of magnitude; see `BENCHMARKS.md`.

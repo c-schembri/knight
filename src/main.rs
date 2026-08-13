@@ -1,0 +1,2102 @@
+#[cfg(windows)]
+use knight_build::build::filter_msvc_output;
+use knight_build::build::{render_binding, render_unescaped_binding, shell_escape_path};
+use knight_build::deps_log::{DepsLog, deps_log_path};
+#[cfg(windows)]
+use knight_build::ensure_process_tree_cleanup;
+use knight_build::{
+    BuildOptions, Edge, Manifest, apply_dyndep_files, canonicalize_path, install_interrupt_handler,
+    last_build_exit_code, load_manifest, manifest_with_existing_dyndeps, program_name,
+    resolve_target_path, run_build, spellcheck,
+};
+use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
+use rapidhash::{HashMapExt, HashSetExt};
+use std::collections::BTreeSet;
+use std::env;
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+use std::time::Instant;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const NINJA_COMPAT_VERSION: &str = "1.14.0";
+const MISSING_DEPS_EXIT: &str = "\0missingdeps";
+const TOOL_EXIT_PREFIX: &str = "\0exit:";
+const FATAL_PREFIX: &str = "\0fatal:";
+const TOOLS: &[(&str, &str)] = &[
+    ("browse", "browse dependency graph in a web browser"),
+    #[cfg(windows)]
+    ("msvc", "build helper for MSVC cl.exe (DEPRECATED)"),
+    ("clean", "clean built files"),
+    (
+        "commands",
+        "list all commands required to rebuild given targets",
+    ),
+    (
+        "inputs",
+        "list all inputs required to rebuild given targets",
+    ),
+    (
+        "multi-inputs",
+        "print one or more sets of inputs required to build targets",
+    ),
+    ("deps", "show dependencies stored in the deps log"),
+    (
+        "missingdeps",
+        "check deps log dependencies on generated files",
+    ),
+    ("graph", "output graphviz dot file for targets"),
+    ("query", "show inputs/outputs for a path"),
+    ("targets", "list targets by their rule or depth in the DAG"),
+    ("compdb", "dump JSON compilation database to stdout"),
+    (
+        "compdb-targets",
+        "dump JSON compilation database for a given list of targets to stdout",
+    ),
+    ("recompact", "recompacts ninja-internal data structures"),
+    ("restat", "restats all outputs in the build log"),
+    ("rules", "list all rules"),
+    (
+        "cleandead",
+        "clean built files that are no longer produced by the manifest",
+    ),
+    #[cfg(windows)]
+    ("wincodepage", "print the Windows code page used by ninja"),
+];
+const HIDDEN_TOOLS: &[&str] = &["urtle"];
+
+#[derive(Debug)]
+struct Cli {
+    directory: Option<PathBuf>,
+    manifest: PathBuf,
+    options: BuildOptions,
+    targets: Vec<String>,
+    tool: Option<(String, Vec<String>)>,
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error == MISSING_DEPS_EXIT => ExitCode::from(3),
+        Err(error) => {
+            if let Some(code) = error.strip_prefix(TOOL_EXIT_PREFIX) {
+                return ExitCode::from(code.parse::<u8>().unwrap_or(1));
+            }
+            if let Some(error) = error.strip_prefix(FATAL_PREFIX) {
+                eprintln!("{}: fatal: {error}", program_name());
+                return ExitCode::FAILURE;
+            }
+            let severity = if program_name() == "ninja"
+                && error.starts_with("unknown variable '")
+                && error.ends_with("' in --status format")
+            {
+                "fatal"
+            } else {
+                "error"
+            };
+            eprintln!("{}: {severity}: {error}", program_name());
+            ExitCode::from(last_build_exit_code().unwrap_or(1))
+        }
+    }
+}
+
+fn run() -> Result<(), String> {
+    install_interrupt_handler()?;
+    let mut cli = parse_cli(env::args().skip(1).collect())?;
+    if inherited_dry_run() {
+        cli.options.dry_run = true;
+    }
+    if cli.options.use_jobserver && !cli.options.dry_run {
+        // SAFETY: this runs before manifest or build-log files are opened, so
+        // inherited Unix jobserver descriptors cannot alias later resources.
+        let inherited = unsafe { jobserver::Client::from_env_ext(true) };
+        match inherited.client {
+            Ok(client) => cli.options.jobserver = Some(client),
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    jobserver::FromEnvErrorKind::NoEnvVar
+                        | jobserver::FromEnvErrorKind::NoJobserver
+                ) =>
+            {
+                eprintln!(
+                    "{}: warning: ignoring invalid jobserver: {error}",
+                    program_name()
+                );
+            }
+            Err(_) => {}
+        }
+    }
+    if let Some(directory) = &cli.directory {
+        env::set_current_dir(directory)
+            .map_err(|error| format!("entering directory '{}': {error}", directory.display()))?;
+        if !cli.options.quiet && cli.tool.is_none() {
+            println!(
+                "{}: Entering directory `{}'",
+                program_name(),
+                directory.display()
+            );
+        }
+    }
+    if let Some((tool, args)) = &cli.tool {
+        match tool.as_str() {
+            "list" => return tool_list(),
+            #[cfg(windows)]
+            "msvc" => return tool_msvc(args),
+            "restat" => return tool_restat(args, &cli.options),
+            "urtle" => return tool_urtle(),
+            #[cfg(windows)]
+            "wincodepage" => return tool_wincodepage(args),
+            _ if TOOLS.iter().all(|(name, _)| tool != name)
+                && !HIDDEN_TOOLS.contains(&tool.as_str()) =>
+            {
+                let suggestion = spellcheck(
+                    tool,
+                    TOOLS
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .chain(HIDDEN_TOOLS.iter().copied()),
+                );
+                return Err(suggestion.map_or_else(
+                    || format!("unknown tool '{tool}'"),
+                    |suggestion| format!("unknown tool '{tool}', did you mean '{suggestion}'?"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let manifest_start = Instant::now();
+    let mut manifest = load_manifest(&cli.manifest).map_err(|error| error.to_string())?;
+    print_manifest_warnings(&manifest);
+    filter_phony_self_references(&mut manifest, &cli.options);
+    if cli.options.stats {
+        eprintln!(
+            "{} stats: manifest parse/load {:>9.3} ms",
+            program_name(),
+            manifest_start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    if let Some((tool, args)) = &cli.tool {
+        if matches!(
+            tool.as_str(),
+            "deps" | "missingdeps" | "query" | "cleandead" | "recompact"
+        ) {
+            ensure_tool_build_directory(&manifest, cli.options.dry_run)?;
+        }
+        run_tool(&manifest, tool, args, &cli.options)
+    } else {
+        for _ in 0..100 {
+            let manifest_target = canonicalize_path(&cli.manifest.to_string_lossy());
+            if !manifest
+                .edges
+                .iter()
+                .any(|edge| edge.outputs().any(|output| output == manifest_target))
+            {
+                break;
+            }
+            let mut regeneration_options = cli.options.clone();
+            regeneration_options.quiet_no_work = true;
+            let outcome = run_build(
+                &manifest,
+                std::slice::from_ref(&manifest_target),
+                &regeneration_options,
+            )?;
+            if outcome.commands_run == 0 || cli.options.dry_run {
+                break;
+            }
+            let reload_start = Instant::now();
+            manifest = load_manifest(&cli.manifest).map_err(|error| error.to_string())?;
+            print_manifest_warnings(&manifest);
+            filter_phony_self_references(&mut manifest, &cli.options);
+            if cli.options.stats {
+                eprintln!(
+                    "{} stats: manifest reload     {:>9.3} ms",
+                    program_name(),
+                    reload_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        run_build(&manifest, &cli.targets, &cli.options).map(|_| ())
+    }
+}
+
+fn print_manifest_warnings(manifest: &Manifest) {
+    for warning in &manifest.warnings {
+        eprintln!("{}: warning: {warning}", program_name());
+    }
+}
+
+fn ensure_tool_build_directory(manifest: &Manifest, dry_run: bool) -> Result<(), String> {
+    if dry_run {
+        return Ok(());
+    }
+    let Some(builddir) = manifest
+        .variables
+        .get("builddir")
+        .filter(|builddir| !builddir.is_empty())
+    else {
+        return Ok(());
+    };
+    fs::create_dir_all(builddir)
+        .map_err(|error| format!("creating build directory '{builddir}': {error}"))
+}
+
+fn filter_phony_self_references(manifest: &mut Manifest, options: &BuildOptions) {
+    if options.phony_cycle_error {
+        return;
+    }
+    for edge in &mut manifest.edges {
+        if edge.rule != "phony"
+            || edge.explicit_outputs.len() != 1
+            || !edge.implicit_outputs.is_empty()
+            || !edge.implicit_inputs.is_empty()
+        {
+            continue;
+        }
+        let output = &edge.explicit_outputs[0];
+        let old_explicit = edge.explicit_inputs.len();
+        let old_order_only = edge.order_only_inputs.len();
+        edge.explicit_inputs.retain(|input| input != output);
+        edge.order_only_inputs.retain(|input| input != output);
+        let removed = edge.explicit_inputs.len() != old_explicit
+            || edge.order_only_inputs.len() != old_order_only;
+        if removed {
+            manifest.phony_self_references.push(output.clone());
+        }
+        if !options.quiet && removed {
+            eprintln!(
+                "{}: warning: phony target '{output}' names itself as an input; ignoring [-w phonycycle=warn]",
+                program_name()
+            );
+        }
+    }
+}
+
+fn inherited_dry_run() -> bool {
+    ["MAKEFLAGS", "MFLAGS"].iter().any(|name| {
+        env::var(name)
+            .ok()
+            .and_then(|flags| flags.split_ascii_whitespace().next().map(str::to_owned))
+            .is_some_and(|flags| !flags.starts_with('-') && flags.contains('n'))
+    })
+}
+
+fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
+    let args = expand_short_option_clusters(args);
+    let mut cli = Cli {
+        directory: None,
+        manifest: PathBuf::from("build.ninja"),
+        options: BuildOptions::default(),
+        targets: Vec::new(),
+        tool: None,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        match argument.as_str() {
+            "--version" => {
+                println!("{NINJA_COMPAT_VERSION}");
+                std::process::exit(0);
+            }
+            "--knight-version" => {
+                println!("{VERSION}");
+                std::process::exit(0);
+            }
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(1);
+            }
+            "-n" => cli.options.dry_run = true,
+            "-v" | "--verbose" => cli.options.verbose = true,
+            "--quiet" => cli.options.quiet = true,
+            "--" => {
+                cli.targets.extend(args[index + 1..].iter().cloned());
+                break;
+            }
+            "-C" | "-f" | "-j" | "-k" | "-l" | "-d" | "-t" | "-w" | "--status" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| format!("option '{argument}' requires an argument"))?;
+                match argument.as_str() {
+                    "-C" => cli.directory = Some(PathBuf::from(value)),
+                    "-f" => cli.manifest = PathBuf::from(value),
+                    "-j" => {
+                        let jobs = parse_count("-j", value, true)?;
+                        cli.options.jobs = if jobs == 0 { usize::MAX } else { jobs };
+                        cli.options.jobserver = None;
+                        cli.options.use_jobserver = false;
+                    }
+                    "-k" => cli.options.failures_allowed = parse_failure_count(value)?,
+                    "-l" => {
+                        let load = value
+                            .parse::<f64>()
+                            .map_err(|_| format!("invalid value for -l: '{value}'"))?;
+                        cli.options.max_load_average = load;
+                    }
+                    "-d" if value == "explain" => cli.options.explain = true,
+                    "-d" if value == "stats" => cli.options.stats = true,
+                    "-d" if value == "keepdepfile" => cli.options.keep_depfile = true,
+                    "-d" if value == "keeprsp" => cli.options.keep_rsp = true,
+                    "-d" if value == "nostatcache" => cli.options.use_stat_cache = false,
+                    "-d" if value == "list" => {
+                        println!("debugging modes:");
+                        println!("  stats        print operation counts/timing info");
+                        println!("  explain      explain what caused a command to execute");
+                        println!(
+                            "  keepdepfile  don't delete depfiles after they're read by ninja"
+                        );
+                        println!("  keeprsp      don't delete @response files on success");
+                        println!(
+                            "  nostatcache  don't batch stat() calls per directory and cache them"
+                        );
+                        println!("multiple modes can be enabled via -d FOO -d BAR");
+                        std::process::exit(0);
+                    }
+                    "-d" => {
+                        return Err(unknown_choice(
+                            "debug setting",
+                            value,
+                            &["stats", "explain", "keepdepfile", "keeprsp", "nostatcache"],
+                        ));
+                    }
+                    "-w" if value == "list" => {
+                        println!("warning flags:");
+                        println!(
+                            "  phonycycle={{err,warn}}  phony build statement references itself"
+                        );
+                        std::process::exit(0);
+                    }
+                    "-w" if value == "phonycycle=err" => cli.options.phony_cycle_error = true,
+                    "-w" if value == "phonycycle=warn" => cli.options.phony_cycle_error = false,
+                    "-w" if matches!(
+                        value.as_str(),
+                        "dupbuild=err" | "dupbuild=warn" | "depfilemulti=err" | "depfilemulti=warn"
+                    ) =>
+                    {
+                        let name = value.split_once('=').unwrap().0;
+                        eprintln!("{}: warning: deprecated warning '{name}'", program_name());
+                    }
+                    "-w" => {
+                        return Err(unknown_choice(
+                            "warning flag",
+                            value,
+                            &["phonycycle=err", "phonycycle=warn"],
+                        ));
+                    }
+                    "--status" => {
+                        cli.options.status_format = value.clone();
+                        cli.options.status_format_explicit = true;
+                    }
+                    "-t" => {
+                        cli.tool = Some((value.clone(), args[index + 1..].to_vec()));
+                        break;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ if argument.starts_with("-j") && argument.len() > 2 => {
+                let jobs = parse_count("-j", &argument[2..], true)?;
+                cli.options.jobs = if jobs == 0 { usize::MAX } else { jobs };
+                cli.options.jobserver = None;
+                cli.options.use_jobserver = false;
+            }
+            _ if argument.starts_with("-k") && argument.len() > 2 => {
+                cli.options.failures_allowed = parse_failure_count(&argument[2..])?;
+            }
+            _ if argument.starts_with("-l") && argument.len() > 2 => {
+                let load = argument[2..]
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid value for -l: '{}'", &argument[2..]))?;
+                cli.options.max_load_average = load;
+            }
+            _ if argument.starts_with("--status=") => {
+                cli.options.status_format = argument[9..].to_owned();
+                cli.options.status_format_explicit = true;
+            }
+            _ if argument.starts_with('-') => return Err(format!("unknown option '{argument}'")),
+            _ => cli.targets.push(argument.clone()),
+        }
+        index += 1;
+    }
+    Ok(cli)
+}
+
+fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    let mut parse_options = true;
+    for argument in args {
+        if !parse_options || argument == "-" || !argument.starts_with('-') {
+            expanded.push(argument);
+            continue;
+        }
+        if argument == "--" {
+            parse_options = false;
+            expanded.push(argument);
+            continue;
+        }
+        if argument.starts_with("--") || argument.len() == 2 {
+            expanded.push(argument);
+            continue;
+        }
+
+        let cluster = &argument[1..];
+        let mut characters = cluster.char_indices().peekable();
+        while let Some((_, option)) = characters.next() {
+            expanded.push(format!("-{option}"));
+            if matches!(option, 'C' | 'f' | 'j' | 'k' | 'l' | 'd' | 't' | 'w') {
+                if let Some((offset, _)) = characters.peek().copied() {
+                    expanded.push(cluster[offset..].to_owned());
+                }
+                break;
+            }
+        }
+    }
+    expanded
+}
+
+fn parse_count(option: &str, value: &str, allow_zero: bool) -> Result<usize, String> {
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid value for {option}: '{value}'"))?;
+    if count == 0 && !allow_zero {
+        return Err(format!("{option} must be greater than zero"));
+    }
+    Ok(count)
+}
+
+fn parse_failure_count(value: &str) -> Result<usize, String> {
+    let count = value
+        .parse::<i128>()
+        .map_err(|_| format!("invalid value for -k: '{value}'"))?;
+    if count <= 0 {
+        Ok(0)
+    } else {
+        usize::try_from(count).map_err(|_| format!("invalid value for -k: '{value}'"))
+    }
+}
+
+fn unknown_choice(kind: &str, value: &str, choices: &[&str]) -> String {
+    spellcheck(value, choices.iter().copied()).map_or_else(
+        || format!("unknown {kind} '{value}'"),
+        |suggestion| format!("unknown {kind} '{value}', did you mean '{suggestion}'?"),
+    )
+}
+
+fn print_help() {
+    let program = program_name();
+    eprintln!(
+        "{program} {VERSION} - a fast Ninja-compatible build executor\n\
+usage: {program} [options] [targets...]\n\n\
+options:\n\
+  -C DIR             change to DIR before doing anything else\n\
+  -f FILE            use FILE as the manifest [default: build.ninja]\n\
+  -j N               run N jobs in parallel (0 means unlimited)\n\
+  -k N               keep going until N jobs fail (0 means unlimited)\n\
+  -l N               do not start jobs when system load exceeds N\n\
+  -n                 dry run\n\
+  -v                 show full command lines\n\
+  --quiet            suppress progress output\n\
+  --status FORMAT    customize progress status\n\
+  -d MODE            enable a debug mode (use '-d list' to list modes)\n\
+  -t TOOL [ARGS...]  run a subtool (use '-t list' to list tools)\n\
+  --version          print the supported Ninja compatibility version\n\
+  --knight-version   print Knight's package version"
+    );
+}
+
+fn run_tool(
+    manifest: &Manifest,
+    tool: &str,
+    args: &[String],
+    options: &BuildOptions,
+) -> Result<(), String> {
+    match tool {
+        "browse" => tool_browse(&manifest.root, args),
+        "targets" => tool_targets(manifest, args),
+        "commands" => tool_commands(manifest, args),
+        "clean" => tool_clean(manifest, args, options),
+        "query" => tool_query(manifest, args),
+        "compdb" => tool_compdb(manifest, args),
+        "rules" => tool_rules(manifest, args),
+        "recompact" => tool_recompact(manifest),
+        "deps" => tool_deps(manifest, args),
+        "inputs" => tool_inputs(manifest, args, false),
+        "multi-inputs" => tool_inputs(manifest, args, true),
+        "graph" => tool_graph(manifest, args),
+        "compdb-targets" => tool_compdb_targets(manifest, args),
+        "cleandead" => tool_cleandead(manifest, options),
+        "missingdeps" => tool_missingdeps(manifest, args),
+        _ => Err(format!("unknown tool '{tool}'")),
+    }
+}
+
+fn tool_list() -> Result<(), String> {
+    println!("ninja subtools:");
+    for (name, description) in TOOLS {
+        println!("{name:>11}  {description}");
+    }
+    Ok(())
+}
+
+fn tool_urtle() -> Result<(), String> {
+    const RLE: &str = concat!(
+        " 13 ,3;2!2;\n8 ,;<11!;\n5 `'<10!(2`'2!\n11 ,6;, `\\. `\\9 .,c13$ec,.\n6 ",
+        ",2;11!>; `. ,;!2> .e8$2\".2 \"?7$e.\n <:<8!'` 2.3,.2` ,3!' ;,(?7\";2!2'<",
+        "; `?6$PF ,;,\n2 `'4!8;<!3'`2 3! ;,`'2`2'3!;4!`2.`!;2 3,2 .<!2'`).\n5 3`5",
+        "'2`9 `!2 `4!><3;5! J2$b,`!>;2!:2!`,d?b`!>\n26 `'-;,(<9!> $F3 )3.:!.2 d\"",
+        "2 ) !>\n30 7`2'<3!- \"=-='5 .2 `2-=\",!>\n25 .ze9$er2 .,cd16$bc.'\n22 .e",
+        "14$,26$.\n21 z45$c .\n20 J50$c\n20 14$P\"`?34$b\n20 14$ dbc `2\"?22$?7$c",
+        "\n20 ?18$c.6 4\"8?4\" c8$P\n9 .2,.8 \"20$c.3 ._14 J9$\n .2,2c9$bec,.2 `?",
+        "21$c.3`4%,3%,3 c8$P\"\n22$c2 2\"?21$bc2,.2` .2,c7$P2\",cb\n23$b bc,.2\"2",
+        "?14$2F2\"5?2\",J5$P\" ,zd3$\n24$ ?$3?%3 `2\"2?12$bcucd3$P3\"2 2=7$\n23$P",
+        "\" ,3;<5!>2;,. `4\"6?2\"2 ,9;, `\"?2$\n",
+    );
+
+    let mut count = 0usize;
+    let mut output = String::new();
+    for character in RLE.chars() {
+        if let Some(digit) = character.to_digit(10) {
+            count = count * 10 + digit as usize;
+        } else {
+            for _ in 0..count.max(1) {
+                output.push(character);
+            }
+            count = 0;
+        }
+    }
+    print!("{output}");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn tool_browse(manifest: &Path, args: &[String]) -> Result<(), String> {
+    const SCRIPT: &str = include_str!("browse.py");
+    let executable = env::current_exe().map_err(|error| format!("locating knight: {error}"))?;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg("--ninja-command")
+        .arg(executable)
+        .arg("-f")
+        .arg(manifest)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("python3 is required for the browse tool: {error}"))?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(SCRIPT.as_bytes())
+        .map_err(|error| format!("starting browse tool: {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("waiting for browse tool: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{TOOL_EXIT_PREFIX}{}",
+            status.code().unwrap_or(1).clamp(1, 255)
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn tool_browse(_manifest: &Path, _args: &[String]) -> Result<(), String> {
+    Err("browse tool not supported on this platform".to_owned())
+}
+
+#[cfg(windows)]
+fn print_msvc_usage() {
+    println!("usage: ninja -t msvc [options] -- cl.exe /showIncludes /otherArgs");
+    println!("options:");
+    println!("  -e ENVFILE load environment block from ENVFILE as environment");
+    println!("  -o FILE    write output dependency information to FILE.d");
+    println!("  -p STRING  localized prefix of msvc's /showIncludes output");
+}
+
+#[cfg(windows)]
+fn tool_msvc(args: &[String]) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let mut envfile = None;
+    let mut object = None;
+    let mut prefix = "Note: including file: ".to_owned();
+    let mut index = 0;
+    while index < args.len() && args[index] != "--" {
+        match args[index].as_str() {
+            "-h" | "--help" => {
+                print_msvc_usage();
+                return Ok(());
+            }
+            "-e" | "-o" | "-p" => {
+                let option = args[index].clone();
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| format!("msvc: {option} requires an argument"))?
+                    .clone();
+                match option.as_str() {
+                    "-e" => envfile = Some(value),
+                    "-o" => object = Some(value),
+                    "-p" => prefix = value,
+                    _ => unreachable!(),
+                }
+            }
+            option => return Err(format!("msvc: unknown option '{option}'")),
+        }
+        index += 1;
+    }
+    if args.get(index).map(String::as_str) != Some("--") || index + 1 >= args.len() {
+        return Err("expected command line to end with \" -- command args\"".to_owned());
+    }
+    let command_line = &args[index + 1..];
+    let mut command = Command::new(&command_line[0]);
+    command.args(&command_line[1..]);
+    if let Some(envfile) = envfile {
+        let bytes =
+            fs::read(&envfile).map_err(|error| format!("couldn't open {envfile}: {error}"))?;
+        command.env_clear();
+        for entry in decode_environment_block(&bytes) {
+            let Some((name, value)) = entry.split_once('=') else {
+                continue;
+            };
+            if !name.is_empty() {
+                command.env(name, value);
+            }
+        }
+    }
+    ensure_process_tree_cleanup()?;
+    let output = command
+        .output()
+        .map_err(|error| format!("running '{}': {error}", command_line.join(" ")))?;
+    let mut includes = BTreeSet::new();
+    let stdout = filter_msvc_output(&output.stdout, &prefix, &mut includes)?;
+    io::stdout()
+        .write_all(&stdout)
+        .map_err(|error| format!("writing compiler output: {error}"))?;
+    io::stderr()
+        .write_all(&output.stderr)
+        .map_err(|error| format!("writing compiler error output: {error}"))?;
+
+    if let Some(object) = object {
+        let depfile = format!("{object}.d");
+        let mut contents = format!("{object}: ");
+        for include in includes {
+            contents.push_str(&include.replace(' ', "\\ "));
+            contents.push('\n');
+        }
+        if let Err(error) = fs::write(&depfile, contents) {
+            let _ = fs::remove_file(&object);
+            let _ = fs::remove_file(&depfile);
+            return Err(format!("writing {depfile}: {error}"));
+        }
+    }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{TOOL_EXIT_PREFIX}{}",
+            output.status.code().unwrap_or(1).clamp(1, 255)
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn decode_environment_block(bytes: &[u8]) -> Vec<String> {
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        let words = bytes[2..]
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&words)
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        String::from_utf8_lossy(bytes)
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+fn build_log_path(manifest: &Manifest) -> PathBuf {
+    manifest
+        .variables
+        .get("builddir")
+        .filter(|builddir| !builddir.is_empty())
+        .map_or_else(
+            || PathBuf::from(".ninja_log"),
+            |builddir| Path::new(builddir).join(".ninja_log"),
+        )
+}
+
+fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
+    let path = build_log_path(manifest);
+    if let Ok(contents) = fs::read_to_string(&path) {
+        if !contents.is_empty() && !contents.starts_with("# ninja log v7\n") {
+            eprintln!(
+                "{}: warning: build log version is too old; starting over",
+                program_name()
+            );
+            fs::remove_file(&path)
+                .map_err(|error| format!("removing '{}': {error}", path.display()))?;
+        } else {
+            let live = output_index(manifest);
+            let mut latest = HashMap::<String, String>::new();
+            for line in contents.lines().skip(1) {
+                let Some(output) = line.split('\t').nth(3) else {
+                    continue;
+                };
+                if live.contains_key(output) || Path::new(output).exists() {
+                    latest.insert(output.to_owned(), line.to_owned());
+                }
+            }
+            let mut outputs = latest.keys().cloned().collect::<Vec<_>>();
+            outputs.sort();
+            let mut compacted = String::from("# ninja log v7\n");
+            for output in outputs {
+                compacted.push_str(&latest[&output]);
+                compacted.push('\n');
+            }
+            fs::write(&path, compacted)
+                .map_err(|error| format!("writing '{}': {error}", path.display()))?;
+        }
+    }
+    let deps_path = deps_log_path(manifest.variables.get("builddir").map(String::as_str));
+    if !deps_path.exists() {
+        return Ok(());
+    }
+    let mut deps = DepsLog::load(deps_path);
+    if !deps.path_exists() {
+        eprintln!(
+            "{}: warning: bad deps log signature or version; starting over",
+            program_name()
+        );
+        return Err("failed recompaction: No such file or directory".to_owned());
+    }
+    deps.recompact()
+        .map_err(|error| format!("recompacting dependency log: {error}"))
+}
+
+fn tool_deps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let log = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let selected = if targets.is_empty() {
+        let live = manifest
+            .edges
+            .iter()
+            .filter(|edge| !render_binding(manifest, edge, "deps").is_empty())
+            .flat_map(Edge::outputs)
+            .collect::<HashSet<_>>();
+        log.outputs_in_node_order()
+            .filter(|output| live.contains(output))
+            .map(str::to_owned)
+            .collect()
+    } else {
+        targets
+            .iter()
+            .map(|target| resolve_target_path(manifest, target, Some(&log), true))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for output in selected {
+        let Some(entry) = log.get(&output) else {
+            println!("{output}: deps not found");
+            continue;
+        };
+        let status = fs::metadata(&output)
+            .ok()
+            .map(|metadata| log_mtime(&metadata) <= entry.mtime as u128)
+            .is_some_and(|valid| valid);
+        println!(
+            "{output}: #deps {}, deps mtime {} ({})",
+            entry.inputs.len(),
+            entry.mtime,
+            if status { "VALID" } else { "STALE" }
+        );
+        for input in &entry.inputs {
+            println!("    {input}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
+    let mut builddir = None;
+    let mut targets = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if let Some(value) = argument.strip_prefix("--builddir=") {
+            builddir = Some(value.to_owned());
+        } else if argument == "--builddir" {
+            index += 1;
+            builddir = Some(
+                args.get(index)
+                    .ok_or_else(|| "restat: --builddir requires a directory".to_owned())?
+                    .clone(),
+            );
+        } else if argument == "-h" || argument == "--help" {
+            println!("usage: ninja -t restat [--builddir=DIR] [outputs]");
+            return Err(format!("{TOOL_EXIT_PREFIX}1"));
+        } else if argument.starts_with('-') {
+            return Err(format!("restat: unknown option '{argument}'"));
+        } else {
+            targets.push(argument.clone());
+        }
+        index += 1;
+    }
+    let path = builddir.map_or_else(
+        || PathBuf::from(".ninja_log"),
+        |builddir| Path::new(&builddir).join(".ninja_log"),
+    );
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let selected = targets.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut latest = HashMap::<String, (u32, u32, u64, u64)>::new();
+    for line in contents.lines().skip(1) {
+        let mut fields = line.split('\t');
+        let Some(start) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(end) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(mtime) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(output) = fields.next() else {
+            continue;
+        };
+        let Some(hash) = fields
+            .next()
+            .and_then(|value| u64::from_str_radix(value, 16).ok())
+        else {
+            continue;
+        };
+        latest.insert(output.to_owned(), (start, end, mtime, hash));
+    }
+    for (output, entry) in &mut latest {
+        if selected.is_empty() || selected.contains(output.as_str()) {
+            entry.2 = match fs::metadata(output) {
+                Ok(metadata) => log_mtime(&metadata).min(u128::from(u64::MAX)) as u64,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(error) => return Err(format!("stating '{output}': {error}")),
+            };
+        }
+    }
+    let mut result = String::from("# ninja log v7\n");
+    for (output, (start, end, mtime, hash)) in latest {
+        result.push_str(&format!("{start}\t{end}\t{mtime}\t{output}\t{hash:x}\n"));
+    }
+    fs::write(&path, result).map_err(|error| format!("writing '{}': {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn log_mtime(metadata: &fs::Metadata) -> u128 {
+    use std::os::windows::fs::MetadataExt;
+    metadata
+        .last_write_time()
+        .saturating_sub(126_227_704_000_000_000) as u128
+}
+
+#[cfg(not(windows))]
+fn log_mtime(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("all") => {
+            for edge in &manifest.edges {
+                for output in edge.outputs() {
+                    println!("{output}: {}", edge.rule);
+                }
+            }
+            Ok(())
+        }
+        Some("rule") => {
+            if let Some(rule) = args.get(1) {
+                let mut outputs = BTreeSet::new();
+                for edge in &manifest.edges {
+                    if edge.rule == *rule {
+                        outputs.extend(edge.outputs());
+                    }
+                }
+                for output in outputs {
+                    println!("{output}");
+                }
+            } else {
+                let produced = output_index(manifest);
+                for edge in &manifest.edges {
+                    for input in edge.inputs() {
+                        if !produced.contains_key(input) {
+                            println!("{input}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some("depth") | None => {
+            let depth = args
+                .get(1)
+                .map(|value| value.parse::<i32>().unwrap_or(0))
+                .unwrap_or(1);
+            let outputs = output_index(manifest);
+            let consumed = manifest
+                .edges
+                .iter()
+                .flat_map(Edge::inputs)
+                .collect::<HashSet<_>>();
+            let roots = manifest
+                .edges
+                .iter()
+                .flat_map(Edge::outputs)
+                .filter(|output| !consumed.contains(output))
+                .collect::<Vec<_>>();
+            if !manifest.edges.is_empty() && roots.is_empty() {
+                return Err("could not determine root nodes of build graph".to_owned());
+            }
+            for root in roots {
+                print_target_tree(root, depth, 0, manifest, &outputs);
+            }
+            Ok(())
+        }
+        Some(mode) => Err(unknown_choice(
+            "target tool mode",
+            mode,
+            &["rule", "depth", "all"],
+        )),
+    }
+}
+
+fn print_target_tree(
+    target: &str,
+    depth: i32,
+    indent: usize,
+    manifest: &Manifest,
+    outputs: &HashMap<&str, usize>,
+) {
+    print!("{}{}", "  ".repeat(indent), target);
+    let Some(edge_id) = outputs.get(target) else {
+        println!();
+        return;
+    };
+    let edge = &manifest.edges[*edge_id];
+    println!(": {}", edge.rule);
+    if depth > 1 || depth <= 0 {
+        for input in edge.inputs() {
+            print_target_tree(input, depth - 1, indent + 1, manifest, outputs);
+        }
+    }
+}
+
+fn tool_commands(manifest: &Manifest, args: &[String]) -> Result<(), String> {
+    let mut single = false;
+    let mut targets = Vec::new();
+    let mut parse_options = true;
+    for argument in args {
+        if parse_options && argument == "--" {
+            parse_options = false;
+        } else if parse_options && argument.starts_with('-') && argument.len() > 1 {
+            for option in argument[1..].chars() {
+                match option {
+                    's' => single = true,
+                    'h' => return tool_commands_usage(),
+                    _ => return tool_commands_usage(),
+                }
+            }
+        } else {
+            targets.push(argument.clone());
+        }
+    }
+    let targets = if targets.is_empty() {
+        default_targets(manifest)?
+    } else {
+        targets
+    };
+    let selected = selected_edges(manifest, &targets)?;
+    let selected = if single {
+        let deps = DepsLog::load(deps_log_path(
+            manifest.variables.get("builddir").map(String::as_str),
+        ));
+        let wanted = targets
+            .iter()
+            .map(|target| resolve_target_path(manifest, target, Some(&deps), false))
+            .collect::<Result<HashSet<_>, _>>()?;
+        selected
+            .into_iter()
+            .filter(|id| {
+                manifest.edges[*id]
+                    .outputs()
+                    .any(|out| wanted.contains(out))
+            })
+            .collect()
+    } else {
+        selected
+    };
+    for id in selected {
+        let edge = &manifest.edges[id];
+        if edge.rule != "phony" {
+            println!("{}", render_binding(manifest, edge, "command"));
+        }
+    }
+    Ok(())
+}
+
+fn tool_commands_usage() -> Result<(), String> {
+    println!(
+        "usage: ninja -t commands [options] [targets]\n\noptions:\n  -s     only print the final command to build [target], not the whole chain"
+    );
+    Err(format!("{TOOL_EXIT_PREFIX}1"))
+}
+
+fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> Result<(), String> {
+    let expanded = manifest_with_existing_dyndeps(manifest)?;
+    let manifest = expanded.as_ref().unwrap_or(manifest);
+    let mut include_generators = false;
+    let mut rules_mode = false;
+    let mut operands = Vec::new();
+    let mut parse_options = true;
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+        } else if parse_options && arg.starts_with('-') && arg.len() > 1 {
+            for option in arg[1..].chars() {
+                match option {
+                    'g' => include_generators = true,
+                    'r' => rules_mode = true,
+                    'h' => return tool_clean_usage(),
+                    _ => return tool_clean_usage(),
+                }
+            }
+        } else {
+            operands.push(arg.clone());
+        }
+    }
+    if rules_mode && operands.is_empty() {
+        return Err("expected a rule to clean".to_owned());
+    }
+    let clean_all = operands.is_empty();
+    let selected = if rules_mode {
+        for rule in &operands {
+            if rule != "phony"
+                && !manifest
+                    .all_rules()
+                    .any(|candidate| candidate.name == *rule)
+            {
+                return Err(format!("unknown rule '{rule}'"));
+            }
+        }
+        manifest
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| operands.contains(&edge.rule))
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    } else if clean_all {
+        (0..manifest.edges.len()).collect::<Vec<_>>()
+    } else {
+        selected_edges(manifest, &operands)?
+    };
+    if options.verbose && !options.quiet {
+        println!("Cleaning...");
+        if rules_mode {
+            for rule in &operands {
+                println!("Rule {rule}");
+            }
+        } else if !clean_all {
+            for target in &operands {
+                println!("Target {}", canonicalize_path(target));
+            }
+        }
+    }
+    let mut removed = 0;
+    let mut attempted = HashSet::<String>::new();
+    for id in selected {
+        let edge = &manifest.edges[id];
+        if edge.rule == "phony"
+            || (clean_all
+                && !include_generators
+                && truthy(&render_binding(manifest, edge, "generator")))
+        {
+            continue;
+        }
+        for output in edge.outputs() {
+            removed += clean_path(output, options, &mut attempted)?;
+        }
+        let rspfile = render_unescaped_binding(manifest, edge, "rspfile");
+        if !rspfile.is_empty() {
+            removed += clean_path(&rspfile, options, &mut attempted)?;
+        }
+        let depfile = render_unescaped_binding(manifest, edge, "depfile");
+        if !depfile.is_empty() {
+            removed += clean_path(&depfile, options, &mut attempted)?;
+        }
+    }
+    if !options.quiet {
+        if options.verbose {
+            println!("{removed} files.");
+        } else {
+            println!("Cleaning... {removed} files.");
+        }
+    }
+    Ok(())
+}
+
+fn tool_clean_usage() -> Result<(), String> {
+    println!(concat!(
+        "usage: ninja -t clean [options] [targets]\n\n",
+        "options:\n",
+        "  -g     also clean files marked as ninja generator output\n",
+        "  -r     interpret targets as a list of rules to clean instead"
+    ));
+    Err(format!("{TOOL_EXIT_PREFIX}1"))
+}
+
+fn clean_path(
+    path: &str,
+    options: &BuildOptions,
+    attempted: &mut HashSet<String>,
+) -> Result<usize, String> {
+    if !attempted.insert(path.to_owned()) {
+        return Ok(0);
+    }
+    if options.dry_run {
+        if !Path::new(path).exists() {
+            return Ok(0);
+        }
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(format!("removing '{path}': {error}")),
+        }
+    }
+    if options.verbose && !options.quiet {
+        println!("Remove {path}");
+    }
+    Ok(1)
+}
+
+fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("expected a target to query".to_owned());
+    }
+    let mut manifest = manifest.clone();
+    let deps = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let mut loaded_dyndeps = HashSet::new();
+    for target in args {
+        let target = resolve_target_path(&manifest, target, Some(&deps), true)?;
+        let outputs = output_index(&manifest);
+        if let Some(edge_id) = outputs.get(target.as_str()).copied() {
+            let dyndep = render_unescaped_binding(&manifest, &manifest.edges[edge_id], "dyndep");
+            if !dyndep.is_empty() && loaded_dyndeps.insert(dyndep.clone()) {
+                let before = manifest.clone();
+                if let Err(error) = apply_dyndep_files(&mut manifest, &[dyndep]) {
+                    eprintln!("{}: warning: {error}", program_name());
+                    manifest = before;
+                }
+            }
+        }
+        let outputs = output_index(&manifest);
+        let mut reverse = HashMap::<&str, Vec<&str>>::new();
+        let mut validation_for = HashMap::<&str, Vec<&str>>::new();
+        for edge in &manifest.edges {
+            for input in edge.inputs() {
+                for output in edge.outputs() {
+                    reverse.entry(input).or_default().push(output);
+                }
+            }
+            for validation in &edge.validations {
+                validation_for
+                    .entry(validation)
+                    .or_default()
+                    .extend(edge.outputs());
+            }
+        }
+        for output in &manifest.phony_self_references {
+            reverse
+                .entry(output.as_str())
+                .or_default()
+                .push(output.as_str());
+        }
+        println!("{target}:");
+        if let Some(id) = outputs.get(target.as_str()) {
+            let edge = &manifest.edges[*id];
+            println!("  input: {}", edge.rule);
+            for input in &edge.explicit_inputs {
+                println!("    {input}");
+            }
+            for input in &edge.implicit_inputs {
+                println!("    | {input}");
+            }
+            for input in &edge.order_only_inputs {
+                println!("    || {input}");
+            }
+            if !edge.validations.is_empty() {
+                println!("  validations:");
+                for validation in &edge.validations {
+                    println!("    {validation}");
+                }
+            }
+        }
+        println!("  outputs:");
+        for output in reverse.get(target.as_str()).into_iter().flatten() {
+            println!("    {output}");
+        }
+        if let Some(outputs) = validation_for.get(target.as_str()) {
+            println!("  validation for:");
+            for output in outputs {
+                println!("    {output}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<(), String> {
+    let mut targets = Vec::new();
+    let mut delimiter = "\t".to_owned();
+    let mut terminator = "\n";
+    let mut dependency_order = false;
+    let mut shell_escape = true;
+    let mut index = 0;
+    let mut parse_options = true;
+    while index < args.len() {
+        let argument = &args[index];
+        if parse_options && argument == "--" {
+            parse_options = false;
+        } else if parse_options && argument.starts_with("--") {
+            match argument.as_str() {
+                "--help" => return tool_inputs_usage(grouped),
+                "--print0" => terminator = "\0",
+                "--no-shell-escape" if !grouped => shell_escape = false,
+                "--dependency-order" if !grouped => dependency_order = true,
+                "--delimiter" if grouped => {
+                    index += 1;
+                    delimiter = args
+                        .get(index)
+                        .ok_or_else(|| "multi-inputs: --delimiter requires a value".to_owned())?
+                        .clone();
+                }
+                option if grouped && option.starts_with("--delimiter=") => {
+                    delimiter = option[12..].to_owned();
+                }
+                _ => return tool_inputs_usage(grouped),
+            }
+        } else if parse_options && argument.starts_with('-') && argument.len() > 1 {
+            let options = &argument[1..];
+            let mut characters = options.char_indices().peekable();
+            while let Some((_, option)) = characters.next() {
+                match option {
+                    '0' => terminator = "\0",
+                    'E' if !grouped => shell_escape = false,
+                    'd' if !grouped => dependency_order = true,
+                    'd' => {
+                        if let Some((offset, _)) = characters.peek().copied() {
+                            delimiter = options[offset..].to_owned();
+                        } else {
+                            index += 1;
+                            delimiter = args
+                                .get(index)
+                                .ok_or_else(|| "multi-inputs: -d requires a delimiter".to_owned())?
+                                .clone();
+                        }
+                        break;
+                    }
+                    'h' => return tool_inputs_usage(grouped),
+                    _ => return tool_inputs_usage(grouped),
+                }
+            }
+        } else {
+            targets.push(argument.clone());
+        }
+        index += 1;
+    }
+    if targets.is_empty() {
+        targets = default_targets(manifest)?;
+    }
+    let outputs = output_index(manifest);
+    let deps = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let targets = targets
+        .into_iter()
+        .map(|target| resolve_target_path(manifest, &target, Some(&deps), false))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !grouped {
+        let mut seen_paths = HashSet::new();
+        let mut seen_edges = HashSet::new();
+        let mut inputs = Vec::new();
+        for target in &targets {
+            if let Some(edge) = outputs.get(target.as_str()) {
+                collect_inputs(
+                    *edge,
+                    manifest,
+                    &outputs,
+                    &mut seen_edges,
+                    &mut seen_paths,
+                    &mut inputs,
+                );
+            }
+        }
+        let mut inputs = inputs
+            .into_iter()
+            .map(|input| {
+                if shell_escape {
+                    quote_tool_path(input)
+                } else {
+                    input.to_owned()
+                }
+            })
+            .collect::<Vec<_>>();
+        if !dependency_order {
+            // Ninja sorts the rendered output, so a leading shell quote
+            // participates in the default alphabetical ordering.
+            inputs.sort_unstable();
+        }
+        let stdout = io::stdout();
+        let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+        for input in inputs {
+            write!(stdout, "{input}{terminator}")
+                .map_err(|error| format!("writing inputs output: {error}"))?;
+        }
+        stdout
+            .flush()
+            .map_err(|error| format!("writing inputs output: {error}"))?;
+        return Ok(());
+    }
+
+    let stdout = io::stdout();
+    let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+    for target in targets {
+        let Some(edge) = outputs.get(target.as_str()) else {
+            continue;
+        };
+        let mut seen_paths = HashSet::new();
+        let mut seen_edges = HashSet::new();
+        let mut inputs = Vec::new();
+        collect_inputs(
+            *edge,
+            manifest,
+            &outputs,
+            &mut seen_edges,
+            &mut seen_paths,
+            &mut inputs,
+        );
+        for input in inputs {
+            write!(stdout, "{target}{delimiter}{input}{terminator}")
+                .map_err(|error| format!("writing multi-inputs output: {error}"))?;
+        }
+    }
+    stdout
+        .flush()
+        .map_err(|error| format!("writing multi-inputs output: {error}"))?;
+    Ok(())
+}
+
+fn tool_inputs_usage(grouped: bool) -> Result<(), String> {
+    print_inputs_usage(grouped);
+    Err(format!("{TOOL_EXIT_PREFIX}1"))
+}
+
+fn print_inputs_usage(grouped: bool) {
+    if grouped {
+        println!(concat!(
+            "Usage '-t multi-inputs [options] [targets]\n\n",
+            "Print one or more sets of inputs required to build targets, sorted in dependency order.\n",
+            "The tool works like inputs tool but with addition of the target for each line.\n",
+            "The output will be a series of lines with the following elements:\n",
+            "<target> <delimiter> <input> <terminator>\n",
+            "Note that a given input may appear for several targets if it is used by more than one targets.\n",
+            "Options:\n",
+            "  -h, --help                   Print this message.\n",
+            "  -d  --delimiter=DELIM        Use DELIM instead of TAB for field delimiter.\n",
+            "  -0, --print0                 Use \\0, instead of \\n as a line terminator."
+        ));
+    } else {
+        println!(concat!(
+            "Usage '-t inputs [options] [targets]\n\n",
+            "List all inputs used for a set of targets, sorted in dependency order.\n",
+            "Note that by default, results are shell escaped, and sorted alphabetically,\n",
+            "and never include validation target paths.\n\n",
+            "Options:\n",
+            "  -h, --help          Print this message.\n",
+            "  -0, --print0            Use \\0, instead of \\n as a line terminator.\n",
+            "  -E, --no-shell-escape   Do not shell escape the result.\n",
+            "  -d, --dependency-order  Sort results by dependency order."
+        ));
+    }
+}
+
+fn quote_tool_path(path: &str) -> String {
+    shell_escape_path(path)
+}
+
+fn collect_inputs<'a>(
+    edge_id: usize,
+    manifest: &'a Manifest,
+    outputs: &HashMap<&'a str, usize>,
+    seen_edges: &mut HashSet<usize>,
+    seen_paths: &mut HashSet<&'a str>,
+    result: &mut Vec<&'a str>,
+) {
+    if !seen_edges.insert(edge_id) {
+        return;
+    }
+    for input in manifest.edges[edge_id].inputs() {
+        if let Some(producer) = outputs.get(input) {
+            collect_inputs(*producer, manifest, outputs, seen_edges, seen_paths, result);
+            if manifest.edges[*producer].rule == "phony" {
+                continue;
+            }
+        }
+        if seen_paths.insert(input) {
+            result.push(input);
+        }
+    }
+}
+
+fn tool_graph(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let expanded = manifest_with_existing_dyndeps(manifest)?;
+    let manifest = expanded.as_ref().unwrap_or(manifest);
+    let outputs = output_index(manifest);
+    let deps = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let targets = if targets.is_empty() {
+        default_targets(manifest)?
+    } else {
+        targets.to_vec()
+    };
+    let mut seen_nodes = HashSet::new();
+    let mut seen_edges = HashSet::new();
+    let mut lines = Vec::new();
+    for target in targets {
+        let target = resolve_target_path(manifest, &target, Some(&deps), false)?;
+        graph_node(
+            &target,
+            manifest,
+            &outputs,
+            &mut seen_nodes,
+            &mut seen_edges,
+            &mut lines,
+        );
+    }
+    println!("digraph ninja {{");
+    println!("rankdir=\"LR\"");
+    println!("node [fontsize=10, shape=box, height=0.25]");
+    println!("edge [fontsize=10]");
+    for line in lines {
+        println!("{line}");
+    }
+    println!("}}");
+    Ok(())
+}
+
+fn graph_node<'a>(
+    node: &str,
+    manifest: &'a Manifest,
+    outputs: &HashMap<&'a str, usize>,
+    seen_nodes: &mut HashSet<String>,
+    seen_edges: &mut HashSet<usize>,
+    lines: &mut Vec<String>,
+) {
+    if !seen_nodes.insert(node.to_owned()) {
+        return;
+    }
+    lines.push(format!(
+        "\"{}\" [label=\"{}\"]",
+        json_escape(node),
+        json_escape(&node.replace('\\', "/"))
+    ));
+    let Some(&edge_id) = outputs.get(node) else {
+        return;
+    };
+    if !seen_edges.insert(edge_id) {
+        return;
+    }
+    let edge = &manifest.edges[edge_id];
+    let inputs = edge.inputs().collect::<Vec<_>>();
+    let edge_outputs = edge.outputs().collect::<Vec<_>>();
+    if inputs.len() == 1 && edge_outputs.len() == 1 {
+        lines.push(format!(
+            "\"{}\" -> \"{}\" [label=\" {}\"]",
+            json_escape(inputs[0]),
+            json_escape(edge_outputs[0]),
+            json_escape(&edge.rule)
+        ));
+    } else {
+        let rule_id = format!("rule_{edge_id}");
+        lines.push(format!(
+            "\"{rule_id}\" [label=\"{}\", shape=ellipse]",
+            json_escape(&edge.rule)
+        ));
+        for output in &edge_outputs {
+            lines.push(format!("\"{rule_id}\" -> \"{}\"", json_escape(output)));
+        }
+        for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
+            lines.push(format!(
+                "\"{}\" -> \"{rule_id}\" [arrowhead=none]",
+                json_escape(input)
+            ));
+        }
+        for input in &edge.order_only_inputs {
+            lines.push(format!(
+                "\"{}\" -> \"{rule_id}\" [arrowhead=none style=dotted]",
+                json_escape(input)
+            ));
+        }
+    }
+    for input in inputs {
+        graph_node(input, manifest, outputs, seen_nodes, seen_edges, lines);
+    }
+}
+
+fn tool_compdb(manifest: &Manifest, rules: &[String]) -> Result<(), String> {
+    let (expand_rsp, rules) = parse_compdb_args(rules, false)?;
+    let (validation_outputs, regular_inputs) = compdb_validation_usage(manifest);
+    let mut edges = Vec::new();
+    for edge in &manifest.edges {
+        if edge.inputs().next().is_none()
+            || is_validation_only_edge(edge, &validation_outputs, &regular_inputs)
+        {
+            continue;
+        }
+        if rules.is_empty() {
+            edges.push(edge);
+        } else {
+            edges.extend(
+                rules
+                    .iter()
+                    .filter(|rule| **rule == edge.rule)
+                    .map(|_| edge),
+            );
+        }
+    }
+    emit_compdb(manifest, edges, expand_rsp)
+}
+
+fn tool_compdb_targets(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let (expand_rsp, targets) = parse_compdb_args(targets, true)?;
+    if targets.is_empty() {
+        eprintln!(
+            "{}: error: compdb-targets expects the name of at least one target",
+            program_name()
+        );
+        print_compdb_usage(true);
+        return Err(format!("{TOOL_EXIT_PREFIX}1"));
+    }
+    let outputs = output_index(manifest);
+    let deps = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    for target in &targets {
+        let resolved = resolve_target_path(manifest, target, Some(&deps), false)
+            .map_err(|error| format!("{FATAL_PREFIX}{error}"))?;
+        if !outputs.contains_key(resolved.as_str()) {
+            return Err(format!(
+                "{FATAL_PREFIX}'{target}' is not a target (i.e. it is not an output of any `build` statement)"
+            ));
+        }
+    }
+    let (validation_outputs, regular_inputs) = compdb_validation_usage(manifest);
+    let edges = selected_edges(manifest, &targets)?
+        .into_iter()
+        .map(|edge| &manifest.edges[edge])
+        .filter(|edge| {
+            edge.rule != "phony"
+                && edge.inputs().next().is_some()
+                && !is_validation_only_edge(edge, &validation_outputs, &regular_inputs)
+        })
+        .collect::<Vec<_>>();
+    emit_compdb(manifest, edges, expand_rsp)
+}
+
+fn is_validation_only_edge(
+    edge: &Edge,
+    validation_outputs: &HashSet<&str>,
+    regular_inputs: &HashSet<&str>,
+) -> bool {
+    edge.outputs().next().is_some()
+        && edge
+            .outputs()
+            .all(|output| validation_outputs.contains(output) && !regular_inputs.contains(output))
+}
+
+fn compdb_validation_usage(manifest: &Manifest) -> (HashSet<&str>, HashSet<&str>) {
+    let validation_outputs = manifest
+        .edges
+        .iter()
+        .flat_map(|edge| edge.validations.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let regular_inputs = if validation_outputs.is_empty() {
+        HashSet::new()
+    } else {
+        manifest
+            .edges
+            .iter()
+            .flat_map(Edge::inputs)
+            .collect::<HashSet<_>>()
+    };
+    (validation_outputs, regular_inputs)
+}
+
+fn parse_compdb_args(args: &[String], for_targets: bool) -> Result<(bool, Vec<String>), String> {
+    let mut expand_rsp = false;
+    let mut operands = Vec::new();
+    let mut parse_options = true;
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+        } else if parse_options && arg.starts_with('-') && arg.len() > 1 {
+            for option in arg[1..].chars() {
+                match option {
+                    'x' => expand_rsp = true,
+                    'h' => {
+                        print_compdb_usage(for_targets);
+                        return Err(format!("{TOOL_EXIT_PREFIX}1"));
+                    }
+                    _ => {
+                        print_compdb_usage(for_targets);
+                        return Err(format!("{TOOL_EXIT_PREFIX}1"));
+                    }
+                }
+            }
+        } else {
+            operands.push(arg.clone());
+        }
+    }
+    Ok((expand_rsp, operands))
+}
+
+fn print_compdb_usage(for_targets: bool) {
+    if for_targets {
+        println!(concat!(
+            "usage: ninja -t compdb [-hx] target [targets]\n\n",
+            "options:\n",
+            "  -h     display this help message\n",
+            "  -x     expand @rspfile style response file invocations"
+        ));
+    } else {
+        println!(concat!(
+            "usage: ninja -t compdb [options] [rules]\n\n",
+            "options:\n",
+            "  -x     expand @rspfile style response file invocations"
+        ));
+    }
+}
+
+fn emit_compdb(
+    manifest: &Manifest,
+    edges: Vec<&knight_build::Edge>,
+    expand_rsp: bool,
+) -> Result<(), String> {
+    let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let stdout = io::stdout();
+    let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+    writeln!(stdout, "[").map_err(|error| format!("writing compilation database: {error}"))?;
+    let mut first = true;
+    for edge in edges {
+        let command = compdb_command(manifest, edge, expand_rsp);
+        let output = edge.outputs().next().unwrap_or("");
+        for file in edge.inputs() {
+            if !first {
+                writeln!(stdout, ",")
+                    .map_err(|error| format!("writing compilation database: {error}"))?;
+            }
+            first = false;
+            write!(
+                stdout,
+                concat!(
+                    "  {{\n",
+                    "    \"directory\": \"{}\",\n",
+                    "    \"command\": \"{}\",\n",
+                    "    \"file\": \"{}\",\n",
+                    "    \"output\": \"{}\"\n",
+                    "  }}"
+                ),
+                json_escape(&cwd.to_string_lossy()),
+                json_escape(&command),
+                json_escape(file),
+                json_escape(output)
+            )
+            .map_err(|error| format!("writing compilation database: {error}"))?;
+        }
+    }
+    if first {
+        writeln!(stdout, "]")
+    } else {
+        writeln!(stdout, "\n]")
+    }
+    .and_then(|()| stdout.flush())
+    .map_err(|error| format!("writing compilation database: {error}"))
+}
+
+fn compdb_command(manifest: &Manifest, edge: &Edge, expand_rsp: bool) -> String {
+    let mut command = render_binding(manifest, edge, "command");
+    if !expand_rsp {
+        return command;
+    }
+    let rspfile = render_unescaped_binding(manifest, edge, "rspfile");
+    if rspfile.is_empty() {
+        return command;
+    }
+    let Some(index) = command.find(&rspfile) else {
+        return command;
+    };
+    let content = render_binding(manifest, edge, "rspfile_content").replace('\n', " ");
+    if index > 0 && command.as_bytes()[index - 1] == b'@' {
+        command.replace_range(index - 1..index + rspfile.len(), &content);
+    } else if index >= 3 && &command[index - 3..index] == "-f " {
+        command.replace_range(index - 3..index + rspfile.len(), &content);
+    } else if index >= 14 && &command[index - 14..index] == "--option-file=" {
+        command.replace_range(index - 14..index + rspfile.len(), &content);
+    }
+    command
+}
+
+fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), String> {
+    let expanded = manifest_with_existing_dyndeps(manifest)?;
+    let manifest = expanded.as_ref().unwrap_or(manifest);
+    let live = manifest
+        .edges
+        .iter()
+        .flat_map(|edge| edge.outputs())
+        .collect::<HashSet<_>>();
+    let path = build_log_path(manifest);
+    let Ok(contents) = fs::read_to_string(path) else {
+        if !options.quiet {
+            println!("Cleaning... 0 files.");
+        }
+        return Ok(());
+    };
+    if options.verbose && !options.quiet {
+        println!("Cleaning...");
+    }
+    let mut removed = 0;
+    let mut attempted = HashSet::<String>::new();
+    for line in contents.lines().skip(1) {
+        let Some(output) = line.split('\t').nth(3) else {
+            continue;
+        };
+        if !live.contains(output) {
+            removed += clean_path(output, options, &mut attempted)?;
+        }
+    }
+    if !options.quiet {
+        if options.verbose {
+            println!("{removed} files.");
+        } else {
+            println!("Cleaning... {removed} files.");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn tool_wincodepage(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        println!("usage: ninja -t wincodepage");
+        return Err(format!("{TOOL_EXIT_PREFIX}1"));
+    }
+    // Rust manifests are decoded as UTF-8, matching modern Ninja's Windows manifest.
+    println!("Build file encoding: UTF-8");
+    Ok(())
+}
+
+fn tool_rules(manifest: &Manifest, args: &[String]) -> Result<(), String> {
+    let mut descriptions = false;
+    let mut parse_options = true;
+    for argument in args {
+        if parse_options && argument == "--" {
+            parse_options = false;
+        } else if parse_options && argument.starts_with('-') && argument.len() > 1 {
+            for option in argument[1..].chars() {
+                match option {
+                    'd' => descriptions = true,
+                    'h' => return tool_rules_usage(),
+                    _ => return tool_rules_usage(),
+                }
+            }
+        }
+    }
+    let mut rules = HashMap::new();
+    for rule in manifest.all_rules() {
+        rules.entry(rule.name.as_str()).or_insert(rule);
+    }
+    let mut names = rules.keys().copied().collect::<Vec<_>>();
+    names.push("phony");
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        print!("{name}");
+        if descriptions
+            && let Some(description) = rules
+                .get(name)
+                .and_then(|rule| rule.bindings.get("description"))
+        {
+            print!(": {}", canonical_eval_string(description));
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn tool_rules_usage() -> Result<(), String> {
+    println!(
+        "usage: ninja -t rules [options]\n\noptions:\n  -d     also print the description of the rule\n  -h     print this message"
+    );
+    Err(format!("{TOOL_EXIT_PREFIX}1"))
+}
+
+fn canonical_eval_string(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '$' {
+            result.push(character);
+            continue;
+        }
+        result.push('$');
+        let Some(next) = characters.peek().copied() else {
+            continue;
+        };
+        if next == '{' || matches!(next, '$' | ' ' | ':' | '\n' | '\r') {
+            result.push(characters.next().unwrap());
+            continue;
+        }
+        let mut name = String::new();
+        while characters
+            .peek()
+            .is_some_and(|next| next.is_ascii_alphanumeric() || matches!(*next, '_' | '.' | '-'))
+        {
+            name.push(characters.next().unwrap());
+        }
+        if name.is_empty() {
+            result.push(characters.next().unwrap());
+        } else {
+            result.push('{');
+            result.push_str(&name);
+            result.push('}');
+        }
+    }
+    result
+}
+
+fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let selected = selected_edges(manifest, targets)?;
+    let outputs = output_index(manifest);
+    let log = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let mut missing_nodes = HashSet::new();
+    let mut generated_inputs = HashSet::new();
+    let mut generator_rules = HashSet::new();
+    let mut missing_rule_paths = HashSet::new();
+
+    for edge_id in &selected {
+        let edge = &manifest.edges[*edge_id];
+        let mut discovered = HashSet::new();
+        for output in edge.outputs() {
+            if let Some(entry) = log.get(output) {
+                discovered.extend(entry.inputs.iter().map(String::as_str));
+            }
+        }
+        if discovered.contains("build.ninja") {
+            continue;
+        }
+        for input in discovered {
+            let Some(producer) = outputs.get(input).copied() else {
+                continue;
+            };
+            if dependency_path_exists(producer, *edge_id, manifest, &outputs, &mut HashSet::new()) {
+                continue;
+            }
+            println!(
+                "Missing dep: {} uses {} (generated by {})",
+                edge.outputs().next().unwrap_or(""),
+                input,
+                manifest.edges[producer].rule
+            );
+            missing_nodes.insert(*edge_id);
+            generated_inputs.insert(input);
+            generator_rules.insert(manifest.edges[producer].rule.as_str());
+            missing_rule_paths.insert((*edge_id, manifest.edges[producer].rule.as_str()));
+        }
+    }
+
+    println!("Processed {} nodes.", selected.len());
+    if missing_nodes.is_empty() {
+        println!("No missing dependencies on generated files found.");
+        return Ok(());
+    }
+    println!(
+        "Error: There are {} missing dependency paths.",
+        missing_rule_paths.len()
+    );
+    println!(
+        "{} targets had depfile dependencies on {} distinct generated inputs (from {} rules)  without a non-depfile dep path to the generator.",
+        missing_nodes.len(),
+        generated_inputs.len(),
+        generator_rules.len()
+    );
+    println!(
+        "There might be build flakiness if any of the targets listed above are built alone, or not late enough, in a clean output directory."
+    );
+    Err(MISSING_DEPS_EXIT.to_owned())
+}
+
+fn dependency_path_exists(
+    producer: usize,
+    consumer: usize,
+    manifest: &Manifest,
+    outputs: &HashMap<&str, usize>,
+    seen: &mut HashSet<usize>,
+) -> bool {
+    if !seen.insert(consumer) {
+        return false;
+    }
+    manifest.edges[consumer].inputs().any(|input| {
+        outputs.get(input).is_some_and(|parent| {
+            *parent == producer
+                || dependency_path_exists(producer, *parent, manifest, outputs, seen)
+        })
+    })
+}
+
+fn selected_edges(manifest: &Manifest, targets: &[String]) -> Result<Vec<usize>, String> {
+    if targets.is_empty() {
+        return Ok((0..manifest.edges.len()).collect());
+    }
+    let outputs = output_index(manifest);
+    let deps = DepsLog::load(deps_log_path(
+        manifest.variables.get("builddir").map(String::as_str),
+    ));
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    fn visit(
+        id: usize,
+        manifest: &Manifest,
+        outputs: &HashMap<&str, usize>,
+        seen: &mut HashSet<usize>,
+        result: &mut Vec<usize>,
+    ) {
+        if !seen.insert(id) {
+            return;
+        }
+        for input in manifest.edges[id].inputs() {
+            if let Some(producer) = outputs.get(input) {
+                visit(*producer, manifest, outputs, seen, result);
+            }
+        }
+        result.push(id);
+    }
+    for target in targets {
+        let target = resolve_target_path(manifest, target, Some(&deps), false)?;
+        if let Some(id) = outputs.get(target.as_str()) {
+            visit(*id, manifest, &outputs, &mut seen, &mut result);
+        }
+    }
+    Ok(result)
+}
+
+fn default_targets(manifest: &Manifest) -> Result<Vec<String>, String> {
+    if !manifest.defaults.is_empty() {
+        return Ok(manifest.defaults.clone());
+    }
+    let consumed = manifest
+        .edges
+        .iter()
+        .flat_map(Edge::inputs)
+        .collect::<HashSet<_>>();
+    let roots = manifest
+        .edges
+        .iter()
+        .flat_map(Edge::outputs)
+        .filter(|output| !consumed.contains(output))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !manifest.edges.is_empty() && roots.is_empty() {
+        Err("could not determine root nodes of build graph".to_owned())
+    } else {
+        Ok(roots)
+    }
+}
+
+fn output_index(manifest: &Manifest) -> HashMap<&str, usize> {
+    let mut outputs = HashMap::new();
+    for (id, edge) in manifest.edges.iter().enumerate() {
+        for output in edge.outputs() {
+            outputs.insert(output, id);
+        }
+    }
+    outputs
+}
+
+fn truthy(value: &str) -> bool {
+    !value.is_empty() && value != "0"
+}
+
+fn json_escape(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c < ' ' => result.push_str(&format!("\\u{:04x}", c as u32)),
+            c => result.push(c),
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_short_option_clusters;
+
+    #[test]
+    fn expands_getopt_style_short_option_clusters() {
+        let expanded = expand_short_option_clusters(
+            ["-nvj4", "-Cbuild", "-dkeepdepfile", "--", "-target"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        assert_eq!(
+            expanded,
+            [
+                "-n",
+                "-v",
+                "-j",
+                "4",
+                "-C",
+                "build",
+                "-d",
+                "keepdepfile",
+                "--",
+                "-target",
+            ]
+        );
+    }
+}

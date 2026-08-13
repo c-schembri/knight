@@ -1,0 +1,4 @@
+rule write
+  command = cmd /c echo hello>$out
+build out.txt: write
+default out.txt

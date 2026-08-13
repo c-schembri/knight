@@ -1,0 +1,7 @@
+/target/
+/.ninja_log
+/.ninja_deps
+/.ninja_lock
+*.rsp
+__pycache__/
+*.py[cod]
