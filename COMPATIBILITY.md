@@ -43,6 +43,9 @@ This is an evidence ledger, not a claim of full compatibility.
   intentionally leave an output absent without blocking its dependents in the
   current invocation; the missing path is checked and rebuilt again on the
   next invocation, matching Ninja.
+  Manifest regeneration honors clean `restat` results without reloading and
+  stops after Ninja's exact 100 successful self-rebuild attempts with the same
+  cycle-limit diagnostic.
 - Ninja `.ninja_deps` v4 reading, writing, and recompaction. Differential tests
   exercise Ninja-to-Knight and Knight-to-Ninja metadata exchange. Build and
   dependency logs automatically recompact at Ninja's redundancy thresholds,
@@ -96,8 +99,10 @@ This is an evidence ledger, not a claim of full compatibility.
   Ninja's hidden early `urtle` tool is also accepted without appearing in the
   public tool list.
   The Python-backed `browse` tool is available on POSIX, matching Ninja's
-  platform split, while `msvc` and `wincodepage` are advertised only on
-  Windows. Unknown tools, target modes, targets, debug settings, and warning
+  platform split, embedded server, query parsing, HTML rendering, HTTP
+  behavior, and command-line help, while `msvc` and `wincodepage` are
+  advertised only on Windows. Unknown tools, target modes, targets, debug
+  settings, and warning
   flags provide Ninja-compatible spelling suggestions.
   `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
   `multi-inputs` short/long options, including bundled short flags and attached
@@ -205,8 +210,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 98 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 70 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 100 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 73 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

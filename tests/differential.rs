@@ -90,6 +90,80 @@ fn canonical_manifest_path_still_regenerates_and_reloads() {
     );
 }
 
+#[test]
+fn manifest_regeneration_stops_at_ninjas_cycle_limit() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let command = if cfg!(windows) {
+        "cmd /d /c copy /b /y template.ninja build.ninja >nul"
+    } else {
+        "cp template.ninja build.ninja"
+    };
+    let manifest = format!(
+        "rule regen\n  command = {command}\n  generator = 1\nbuild build.ninja: regen force\nbuild force: phony\nbuild all: phony\ndefault all\n"
+    );
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("template.ninja"), &manifest).unwrap();
+        fs::write(temp.path().join("build.ninja"), &manifest).unwrap();
+        let output = run(executable, temp.path(), &["--quiet"]);
+        assert_eq!(output.status.code(), Some(1), "{}", executable.display());
+        assert!(output.stdout.is_empty(), "{}", executable.display());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("manifest 'build.ninja' still dirty after 100 tries"),
+            "{}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn clean_restat_manifest_does_not_trigger_reload_cycles() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let (regen, build) = if cfg!(windows) {
+        (
+            "cmd /d /c echo regen>>regen.txt",
+            "cmd /d /c echo built>$out",
+        )
+    } else {
+        ("printf 'regen\\n' >> regen.txt", "printf built > $out")
+    };
+    let manifest = format!(
+        "rule regen\n  command = {regen}\n  generator = 1\n  restat = 1\nrule make\n  command = {build}\nbuild build.ninja: regen force\nbuild force: phony\nbuild out: make\ndefault out\n"
+    );
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), &manifest).unwrap();
+        let output = run(executable, temp.path(), &[]);
+        assert!(
+            output.status.success(),
+            "{}: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(temp.path().join("out").exists(), "{}", executable.display());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("regen.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "{}",
+            executable.display()
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn failed_command_status_and_exit_code_match_ninja() {
@@ -3116,6 +3190,24 @@ fn manifest_tool_help_matches_ninja() {
         );
         assert_eq!(actual.stderr, expected.stderr, "tool={tool}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn browse_help_matches_ninjas_embedded_tool() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("build.ninja"), "build all: phony\n").unwrap();
+    let arguments = ["-t", "browse", "--help"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
 }
 
 #[test]

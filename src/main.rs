@@ -291,15 +291,22 @@ fn run() -> Result<(), String> {
         }
         run_tool(&manifest, tool, args, &cli.options)
     } else {
+        let mut regeneration_count = 0;
         for _ in 0..100 {
             let manifest_target = canonicalize_path(&cli.manifest.to_string_lossy());
-            if !manifest
+            let Some(manifest_edge) = manifest
                 .edges
                 .iter()
-                .any(|edge| edge.outputs().any(|output| output == manifest_target))
-            {
+                .find(|edge| edge.outputs().any(|output| output == manifest_target))
+            else {
                 break;
-            }
+            };
+            let restat = truthy(&render_binding(&manifest, manifest_edge, "restat"));
+            let prior_mtime = restat.then(|| {
+                fs::metadata(&cli.manifest)
+                    .ok()
+                    .map(|metadata| log_mtime(&metadata))
+            });
             let mut regeneration_options = cli.options.clone();
             regeneration_options.quiet_no_work = true;
             let outcome = run_build(
@@ -310,6 +317,15 @@ fn run() -> Result<(), String> {
             if outcome.commands_run == 0 || cli.options.dry_run {
                 break;
             }
+            if prior_mtime.is_some_and(|prior| {
+                prior
+                    == fs::metadata(&cli.manifest)
+                        .ok()
+                        .map(|metadata| log_mtime(&metadata))
+            }) {
+                break;
+            }
+            regeneration_count += 1;
             let reload_start = Instant::now();
             manifest = load_manifest(&cli.manifest).map_err(|error| error.to_string())?;
             print_manifest_warnings(&manifest);
@@ -321,6 +337,12 @@ fn run() -> Result<(), String> {
                     reload_start.elapsed().as_secs_f64() * 1000.0
                 );
             }
+        }
+        if regeneration_count == 100 {
+            return Err(format!(
+                "manifest '{}' still dirty after 100 tries, perhaps system time is not set",
+                cli.manifest.display()
+            ));
         }
         run_build(&manifest, &cli.targets, &cli.options).map(|_| ())
     }
