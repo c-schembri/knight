@@ -1148,7 +1148,7 @@ fn subprocess_parent_signal_statuses_match_ninja() {
             "build out: signal\n",
             "default out\n",
         );
-        fs::write(expected_dir.path().join("build.ninja"), &manifest).unwrap();
+        fs::write(expected_dir.path().join("build.ninja"), manifest).unwrap();
         fs::write(actual_dir.path().join("build.ninja"), manifest).unwrap();
         let run_signaled = |executable: &Path, directory: &Path| {
             let child = Command::new(executable)
