@@ -153,6 +153,11 @@ deep manifest clone on the final build and skipping redundant fixed-point work
 when discovered inputs have no producers substantially reduced the initial
 gap. This single-large-file shape remains an explicit optimization target.
 
+Adding graph-aware parser-phase validation for exact diagnostic precedence did
+not regress the optimized paths. A subsequent 100-sample sweep measured the
+single-file case at 36.861 ms for Knight versus 23.322 ms for Ninja, and the
+1,000-ready-file case at 36.783 ms for Knight versus 47.903 ms for Ninja.
+
 ## Inputs tool
 
 `scripts/benchmark-inputs.ps1` validates byte-equivalent `-t inputs all`

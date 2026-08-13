@@ -3546,7 +3546,7 @@ fn edge_bindings_can_name_edge_paths_like_ninja() {
 }
 
 #[test]
-fn dyndep_parser_rejection_corpus_matches_ninja_byte_for_byte() {
+fn dyndep_parser_and_lexer_corpus_matches_ninja_byte_for_byte() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
         return;
@@ -3630,6 +3630,31 @@ fn dyndep_parser_rejection_corpus_matches_ninja_byte_for_byte() {
             "second binding",
             "ninja_dyndep_version = 1\nbuild out: dyndep\n  restat = 1\n  restat = 1\n",
         ),
+        (
+            "continued version",
+            "ninja_dyndep_version = 1$\n .0\nbuild out: dyndep\n",
+        ),
+        (
+            "version continued through build line",
+            "ninja_dyndep_version = 1$\nbuild out: dyndep\n",
+        ),
+        (
+            "unsupported newline escape",
+            "ninja_dyndep_version = 1\nbuild out$^x: dyndep\n",
+        ),
+        (
+            "escaped output colon",
+            "ninja_dyndep_version = 1\nbuild out$: dyndep\n",
+        ),
+        (
+            "bad braced escape",
+            "ninja_dyndep_version = 1\nbuild out${bad: dyndep\n",
+        ),
+        (
+            "continued build path",
+            "ninja_dyndep_version = 1\nbuild $\n out: dyndep\n",
+        ),
+        ("comment at EOF", "ninja_dyndep_version = 1\n# comment"),
     ];
     for (name, dyndep) in cases {
         fs::write(temp.path().join("deps.dd"), dyndep).unwrap();

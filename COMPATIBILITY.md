@@ -101,7 +101,12 @@ This is an evidence ledger, not a claim of full compatibility.
   distinctions, bindings, and positioned diagnostics. The `ninja` alias
   matches the rejection corpus byte-for-byte, while native Knight retains
   richer line-and-column diagnostics. As in Ninja, every nonempty `restat`
-  value, including `0`, enables restat behavior.
+  value, including `0`, enables restat behavior. Additional lexer-derived
+  differentials cover continued version values, continuations that consume a
+  following build line, forbidden `$^`, escaped colons, malformed braced
+  escapes, continued build paths, and comments at EOF. Graph lookup now occurs
+  at Ninja's parser phase, preserving diagnostic precedence over errors later
+  in the same statement.
 - Parallel command execution, longest-remaining-path scheduling with stable
   declaration-order ties, depth-one/live console pools with buffered output
   from concurrent ordinary work, default/custom pool

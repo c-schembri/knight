@@ -1,5 +1,7 @@
 use crate::manifest::expand;
 use crate::program_name;
+use rapidhash::HashSetExt;
+use rapidhash::fast::RapidHashSet as HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -131,14 +133,29 @@ pub fn parse_dyndep(source: &str, path: &Path) -> Result<Vec<DyndepRecord>, Stri
         .map_err(|diagnostic| diagnostic.render())
 }
 
-struct Parser<'a> {
-    source: &'a str,
+pub(crate) fn parse_dyndep_with_resolver(
+    source: &str,
+    path: &Path,
+    resolver: &OutputResolver<'_>,
+) -> Result<Vec<DyndepRecord>, String> {
+    Parser::with_resolver(source, path, resolver)
+        .parse()
+        .map_err(|diagnostic| diagnostic.render())
+}
+
+type OutputResolver<'a> = dyn Fn(&str) -> Option<usize> + Sync + 'a;
+
+struct Parser<'source, 'resolver> {
+    source: &'source str,
     path: Arc<PathBuf>,
-    bytes: &'a [u8],
+    bytes: &'source [u8],
     line_starts: Vec<usize>,
     position: usize,
+    last_token: usize,
     have_version: bool,
     records: Vec<DyndepRecord>,
+    resolver: Option<&'resolver OutputResolver<'resolver>>,
+    seen_edges: HashSet<usize>,
 }
 
 struct ParsedPath {
@@ -146,8 +163,26 @@ struct ParsedPath {
     delimiter: usize,
 }
 
-impl<'a> Parser<'a> {
-    fn new(source: &'a str, path: &'a Path) -> Self {
+impl<'source> Parser<'source, 'static> {
+    fn new(source: &'source str, path: &Path) -> Self {
+        Self::with_optional_resolver(source, path, None)
+    }
+}
+
+impl<'source, 'resolver> Parser<'source, 'resolver> {
+    fn with_resolver(
+        source: &'source str,
+        path: &Path,
+        resolver: &'resolver OutputResolver<'resolver>,
+    ) -> Self {
+        Self::with_optional_resolver(source, path, Some(resolver))
+    }
+
+    fn with_optional_resolver(
+        source: &'source str,
+        path: &Path,
+        resolver: Option<&'resolver OutputResolver<'resolver>>,
+    ) -> Self {
         let mut line_starts = Vec::with_capacity(source.len() / 40 + 1);
         line_starts.push(0);
         line_starts.extend(
@@ -163,8 +198,11 @@ impl<'a> Parser<'a> {
             bytes: source.as_bytes(),
             line_starts,
             position: 0,
+            last_token: 0,
             have_version: false,
             records: Vec::new(),
+            resolver,
+            seen_edges: HashSet::new(),
         }
     }
 
@@ -182,7 +220,7 @@ impl<'a> Parser<'a> {
                 b'\r' if self.bytes.get(self.position + 1) == Some(&b'\n') => {
                     self.position += 2;
                 }
-                b'#' => self.consume_comment(),
+                b'#' => self.consume_comment()?,
                 b' ' => return Err(self.error(self.position, "unexpected indent")),
                 b'\t' => {
                     return Err(self.error(self.position, "tabs are not allowed, use spaces"));
@@ -217,7 +255,7 @@ impl<'a> Parser<'a> {
         if name != "ninja_dyndep_version" {
             return Err(self.error(end, "expected 'ninja_dyndep_version = ...'"));
         }
-        let value = unescape(value);
+        let value = unescape(&value);
         let (major, minor) = parse_version_components(&value);
         if major != 1 || minor != 0 {
             return Err(self.error(end, format!("unsupported 'ninja_dyndep_version = {value}'")));
@@ -235,6 +273,20 @@ impl<'a> Parser<'a> {
             return Err(self.error(output.delimiter, "empty path"));
         }
         let origin = self.location(output.delimiter);
+        if let Some(resolver) = self.resolver {
+            let Some(edge_id) = resolver(&output_value) else {
+                return Err(self.error(
+                    output.delimiter,
+                    format!("no build statement exists for '{output_value}'"),
+                ));
+            };
+            if !self.seen_edges.insert(edge_id) {
+                return Err(self.error(
+                    output.delimiter,
+                    format!("multiple statements for '{output_value}'"),
+                ));
+            }
+        }
 
         let explicit_output = self.read_path()?;
         if !explicit_output.value.is_empty() {
@@ -299,7 +351,7 @@ impl<'a> Parser<'a> {
             if key != "restat" {
                 return Err(self.error(end, "binding is not 'restat'"));
             }
-            self.records[record_id].restat = !unescape(value).is_empty();
+            self.records[record_id].restat = !unescape(&value).is_empty();
         }
         Ok(())
     }
@@ -315,18 +367,21 @@ impl<'a> Parser<'a> {
                 b' ' => {
                     self.position += 1;
                     self.eat_spaces();
+                    self.last_token = start;
                     return Ok(ParsedPath {
                         value: raw,
                         delimiter: start,
                     });
                 }
                 b'\t' | b'\n' | b':' | b'|' | b'#' => {
+                    self.last_token = start;
                     return Ok(ParsedPath {
                         value: raw,
                         delimiter: start,
                     });
                 }
                 b'\r' if self.bytes.get(self.position + 1) == Some(&b'\n') => {
+                    self.last_token = start;
                     return Ok(ParsedPath {
                         value: raw,
                         delimiter: start,
@@ -364,7 +419,13 @@ impl<'a> Parser<'a> {
                 self.position += 2;
                 self.eat_spaces();
             }
-            b'$' | b' ' | b':' | b'^' => {
+            b'^' => {
+                return Err(self.error(
+                    self.last_token,
+                    "using $^ escape requires specifying 'ninja_required_version' with version greater or equal 1.14",
+                ));
+            }
+            b'$' | b' ' | b':' => {
                 raw.push('$');
                 raw.push(next as char);
                 self.position += 1;
@@ -396,28 +457,99 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn read_variable_value(&mut self) -> Result<(&'a str, usize), DyndepDiagnostic> {
-        let start = self.position;
-        while self.position < self.bytes.len() {
+    fn read_variable_value(&mut self) -> Result<(String, usize), DyndepDiagnostic> {
+        let mut value = String::new();
+        let mut segment_start = self.position;
+        loop {
+            if self.position == self.bytes.len() {
+                return Err(self.error(self.position, "unexpected EOF"));
+            }
             match self.bytes[self.position] {
                 b'\n' => {
                     let end = self.position;
+                    value.push_str(&self.source[segment_start..end]);
                     self.position += 1;
-                    return Ok((&self.source[start..end], end));
+                    self.last_token = end;
+                    return Ok((value, end));
                 }
                 b'\r' if self.bytes.get(self.position + 1) == Some(&b'\n') => {
                     let end = self.position;
+                    value.push_str(&self.source[segment_start..end]);
                     self.position += 2;
-                    return Ok((&self.source[start..end], end));
+                    self.last_token = end;
+                    return Ok((value, end));
                 }
                 b'\r' => return Err(self.error(self.position, "lexing error")),
+                b'$' => {
+                    let escape = self.position;
+                    self.position += 1;
+                    let Some(&next) = self.bytes.get(self.position) else {
+                        return Err(
+                            self.error(escape, "bad $-escape (literal $ must be written as $$)")
+                        );
+                    };
+                    match next {
+                        b'\n' => {
+                            value.push_str(&self.source[segment_start..escape]);
+                            self.position += 1;
+                            self.eat_spaces();
+                            segment_start = self.position;
+                        }
+                        b'\r' if self.bytes.get(self.position + 1) == Some(&b'\n') => {
+                            value.push_str(&self.source[segment_start..escape]);
+                            self.position += 2;
+                            self.eat_spaces();
+                            segment_start = self.position;
+                        }
+                        b'^' => {
+                            return Err(self.error(
+                                self.last_token,
+                                "using $^ escape requires specifying 'ninja_required_version' with version greater or equal 1.14",
+                            ));
+                        }
+                        b'$' | b' ' | b':' => self.position += 1,
+                        b'{' => {
+                            self.position += 1;
+                            let name_start = self.position;
+                            while self
+                                .bytes
+                                .get(self.position)
+                                .is_some_and(|byte| is_variable_ident(*byte))
+                            {
+                                self.position += 1;
+                            }
+                            if self.position == name_start
+                                || self.bytes.get(self.position) != Some(&b'}')
+                            {
+                                return Err(self.error(
+                                    escape,
+                                    "bad $-escape (literal $ must be written as $$)",
+                                ));
+                            }
+                            self.position += 1;
+                        }
+                        byte if is_variable_ident(byte) => {
+                            self.position += 1;
+                            while self
+                                .bytes
+                                .get(self.position)
+                                .is_some_and(|byte| is_variable_ident(*byte))
+                            {
+                                self.position += 1;
+                            }
+                        }
+                        _ => {
+                            return Err(self
+                                .error(escape, "bad $-escape (literal $ must be written as $$)"));
+                        }
+                    }
+                }
                 _ => self.position += 1,
             }
         }
-        Err(self.error(self.position, "unexpected EOF"))
     }
 
-    fn read_ident(&mut self) -> Option<(usize, &'a str)> {
+    fn read_ident(&mut self) -> Option<(usize, &'source str)> {
         let start = self.position;
         while self
             .bytes
@@ -431,11 +563,13 @@ impl<'a> Parser<'a> {
         }
         let identifier = &self.source[start..self.position];
         self.eat_spaces();
+        self.last_token = start;
         Some((start, identifier))
     }
 
     fn expect_byte(&mut self, expected: u8, name: &str) -> Result<(), DyndepDiagnostic> {
         if self.bytes.get(self.position) == Some(&expected) {
+            self.last_token = self.position;
             self.position += 1;
             self.eat_spaces();
             return Ok(());
@@ -451,15 +585,16 @@ impl<'a> Parser<'a> {
 
     fn expect_newline(&mut self) -> Result<(), DyndepDiagnostic> {
         if self.bytes.get(self.position) == Some(&b'#') {
-            self.consume_comment();
-            return Ok(());
+            return self.consume_comment();
         }
         match self.bytes.get(self.position) {
             Some(b'\n') => {
+                self.last_token = self.position;
                 self.position += 1;
                 Ok(())
             }
             Some(b'\r') if self.bytes.get(self.position + 1) == Some(&b'\n') => {
+                self.last_token = self.position;
                 self.position += 2;
                 Ok(())
             }
@@ -476,18 +611,22 @@ impl<'a> Parser<'a> {
         {
             return false;
         }
+        self.last_token = self.position;
         self.position += 1;
         self.eat_spaces();
         true
     }
 
-    fn consume_comment(&mut self) {
+    fn consume_comment(&mut self) -> Result<(), DyndepDiagnostic> {
+        let start = self.position;
         while self.position < self.bytes.len() && self.bytes[self.position] != b'\n' {
             self.position += 1;
         }
-        if self.position < self.bytes.len() {
-            self.position += 1;
+        if self.position == self.bytes.len() {
+            return Err(self.error(start, "lexing error"));
         }
+        self.position += 1;
+        Ok(())
     }
 
     fn eat_spaces(&mut self) {
@@ -533,6 +672,10 @@ impl<'a> Parser<'a> {
 
 fn is_ident(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+}
+
+fn is_variable_ident(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
 }
 
 fn parse_version_components(version: &str) -> (i32, i32) {

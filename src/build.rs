@@ -1,6 +1,6 @@
 use crate::depfile::parse_depfile;
 use crate::deps_log::{DepsLog, deps_log_path};
-use crate::dyndep::{DyndepRecord, parse_dyndep};
+use crate::dyndep::{DyndepRecord, parse_dyndep_with_resolver};
 use crate::manifest::{
     Edge, Manifest, canonicalize_owned_path, canonicalize_path, unknown_target_message,
 };
@@ -1504,7 +1504,11 @@ fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result
             bound_edges.entry(dyndep).or_default().push(edge_id);
         }
     }
-    let parsed_files = load_dyndep_records(files);
+    let resolve_output = |output: &str| {
+        let output = canonicalize_path(output);
+        outputs.get(output.as_str()).copied()
+    };
+    let parsed_files = load_dyndep_records(files, &resolve_output);
     let mut discovered_input_ranges = Vec::new();
     for (file, records) in files.iter().zip(parsed_files) {
         let canonical_file = canonicalize_owned_path(file.clone());
@@ -1588,22 +1592,28 @@ fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result
     }))
 }
 
-fn load_dyndep_records(files: &[String]) -> Vec<Result<Vec<DyndepRecord>, String>> {
+fn load_dyndep_records(
+    files: &[String],
+    resolver: &(dyn Fn(&str) -> Option<usize> + Sync),
+) -> Vec<Result<Vec<DyndepRecord>, String>> {
     if files.len() < 16 {
-        return files.iter().map(|file| load_dyndep_record(file)).collect();
+        return files
+            .iter()
+            .map(|file| load_dyndep_record(file, resolver))
+            .collect();
     }
     let middle = files.len().div_ceil(2);
     thread::scope(|scope| {
         let first = scope.spawn(|| {
             files[..middle]
                 .iter()
-                .map(|file| load_dyndep_record(file))
+                .map(|file| load_dyndep_record(file, resolver))
                 .collect::<Vec<_>>()
         });
         let second = scope.spawn(|| {
             files[middle..]
                 .iter()
-                .map(|file| load_dyndep_record(file))
+                .map(|file| load_dyndep_record(file, resolver))
                 .collect::<Vec<_>>()
         });
         let mut records = first.join().expect("dyndep loader worker panicked");
@@ -1612,9 +1622,12 @@ fn load_dyndep_records(files: &[String]) -> Vec<Result<Vec<DyndepRecord>, String
     })
 }
 
-fn load_dyndep_record(file: &str) -> Result<Vec<DyndepRecord>, String> {
+fn load_dyndep_record(
+    file: &str,
+    resolver: &(dyn Fn(&str) -> Option<usize> + Sync),
+) -> Result<Vec<DyndepRecord>, String> {
     let source = load_dyndep_source(file)?;
-    parse_dyndep(&source, Path::new(file))
+    parse_dyndep_with_resolver(&source, Path::new(file), resolver)
 }
 
 #[cfg(windows)]
