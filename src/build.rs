@@ -1693,6 +1693,7 @@ fn run_build_prepared<'a>(
     let mut finished = vec![false; manifest.edges.len()];
     let mut failed_prerequisite = vec![false; manifest.edges.len()];
     let mut ran = vec![false; manifest.edges.len()];
+    let mut restat_cleaned_outputs = HashSet::new();
     let mut running = 0usize;
     let mut implicit_job_slot = options.jobserver.is_some();
     let mut job_slots = HashMap::<usize, JobSlot>::new();
@@ -1952,6 +1953,7 @@ fn run_build_prepared<'a>(
                     stat_cache: &mut stat_cache,
                     discovered: &discovered,
                     ran: &ran,
+                    restat_cleaned_outputs: &restat_cleaned_outputs,
                 },
                 &mut command_buffer,
             )?;
@@ -2303,6 +2305,17 @@ fn run_build_prepared<'a>(
                     .iter()
                     .zip(&current_output_mtimes)
                     .any(|(before, after)| before == after);
+            if restat {
+                for ((output, before), after) in edge
+                    .outputs()
+                    .zip(&completion.prior_output_mtimes)
+                    .zip(&current_output_mtimes)
+                {
+                    if before == after {
+                        restat_cleaned_outputs.insert(output);
+                    }
+                }
+            }
             let mut record_mtime = completion.start_mtime;
             if completion.start_mtime == 0 || restat || generator {
                 record_mtime = current_output_mtimes
@@ -2345,7 +2358,7 @@ fn run_build_prepared<'a>(
             if let Some(inputs) = dependency_result.unwrap() {
                 discovered.record(completion.edge, edge, inputs)?;
             }
-            ran[completion.edge] = !restat_cleaned;
+            ran[completion.edge] = true;
             outcome.commands_run += 1;
             outcome.ran_edges.push(completion.edge);
         } else {
@@ -2475,6 +2488,7 @@ fn initially_dirty_edges(
     let mut dirty = vec![false; manifest.edges.len()];
     let mut stat_cache = stat_cache.clone();
     let mut command_buffer = String::new();
+    let restat_cleaned_outputs = HashSet::new();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
         if edge.rule == "phony" {
@@ -2503,6 +2517,7 @@ fn initially_dirty_edges(
                 stat_cache: &mut stat_cache,
                 discovered,
                 ran: &dirty,
+                restat_cleaned_outputs: &restat_cleaned_outputs,
             },
             &mut command_buffer,
         )
@@ -3535,6 +3550,7 @@ struct EvaluationContext<'manifest, 'borrow> {
     stat_cache: &'borrow mut StatCache<'manifest>,
     discovered: &'borrow DiscoveredDeps,
     ran: &'borrow [bool],
+    restat_cleaned_outputs: &'borrow HashSet<&'manifest str>,
 }
 
 fn evaluate_edge(
@@ -3583,9 +3599,9 @@ fn evaluate_edge(
     for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
         let mtime = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
         newest_input = newest_input.max(mtime);
-        let producer_is_dirty = output_map
-            .get(input.as_str())
-            .is_some_and(|producer| context.ran[*producer]);
+        let producer_is_dirty = output_map.get(input.as_str()).is_some_and(|producer| {
+            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input.as_str())
+        });
         if producer_is_dirty || mtime == u128::MAX {
             dirty = true;
             reason = format!("{input} is dirty");
@@ -3604,9 +3620,9 @@ fn evaluate_edge(
         }
         let mtime = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
         newest_input = newest_input.max(mtime);
-        let producer_is_dirty = output_map
-            .get(input.as_str())
-            .is_some_and(|producer| context.ran[*producer]);
+        let producer_is_dirty = output_map.get(input.as_str()).is_some_and(|producer| {
+            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input.as_str())
+        });
         if producer_is_dirty || mtime == u128::MAX {
             dirty = true;
             reason = format!("{input} is dirty");

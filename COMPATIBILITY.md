@@ -43,6 +43,11 @@ This is an evidence ledger, not a claim of full compatibility.
   intentionally leave an output absent without blocking its dependents in the
   current invocation; the missing path is checked and rebuilt again on the
   next invocation, matching Ninja.
+  Multi-output `restat` propagation is tracked per output, so an unchanged
+  secondary output cancels only its own dependents while dependents of another
+  output that changed still run. Dependency-log discovery also preserves
+  validation closure ordering, while an edge already dirty from declared
+  inputs skips stale discovered validations like Ninja.
   Manifest regeneration honors clean `restat` results without reloading and
   stops after Ninja's exact 100 successful self-rebuild attempts with the same
   cycle-limit diagnostic.
@@ -213,8 +218,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 101 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 73 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 102 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 75 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

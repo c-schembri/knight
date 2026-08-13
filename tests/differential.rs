@@ -164,6 +164,128 @@ fn clean_restat_manifest_does_not_trigger_reload_cycles() {
     }
 }
 
+#[test]
+fn dependency_log_validations_and_declared_dirty_short_circuit_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let (copy, compile) = if cfg!(windows) {
+        (
+            "cmd /d /c type $in > $out",
+            "cmd /d /c \"type $in > $out && echo out2: out>out2.d\"",
+        )
+    } else {
+        (
+            "cat $in > $out",
+            "cat $in > $out && printf 'out2: out\\n' > out2.d",
+        )
+    };
+    let manifest = format!(
+        "rule copy\n  command = {copy}\n\
+         rule compile\n  command = {compile}\n\
+         build out: copy in |@ validate\n\
+         build validate: copy in2 | out\n\
+         build out2: compile in3\n  deps = gcc\n  depfile = out2.d\n\
+         default out2\n"
+    );
+
+    let mut observed = Vec::new();
+    for executable in [ninja, knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), &manifest).unwrap();
+        for (path, contents) in [("in", "in"), ("in2", "in2"), ("in3", "in3")] {
+            fs::write(temp.path().join(path), contents).unwrap();
+        }
+
+        let first = run(executable, temp.path(), &["-j1"]);
+        assert!(
+            first.status.success(),
+            "{} phase 1: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&first.stdout),
+            String::from_utf8_lossy(&first.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(temp.path().join("in2"), "changed").unwrap();
+        fs::write(temp.path().join("in"), "changed").unwrap();
+        let discovered_dirty = run(executable, temp.path(), &["-j1"]);
+        assert!(
+            discovered_dirty.status.success(),
+            "{} phase 2: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&discovered_dirty.stdout),
+            String::from_utf8_lossy(&discovered_dirty.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(temp.path().join("in2"), "changed again").unwrap();
+        fs::write(temp.path().join("in3"), "changed").unwrap();
+        let declared_dirty = run(executable, temp.path(), &["-j1"]);
+        assert!(
+            declared_dirty.status.success(),
+            "{} phase 3: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&declared_dirty.stdout),
+            String::from_utf8_lossy(&declared_dirty.stderr)
+        );
+        observed.push([first.stdout, discovered_dirty.stdout, declared_dirty.stdout]);
+    }
+
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[cfg(unix)]
+#[test]
+fn multi_output_restat_only_cleans_dependents_of_unchanged_outputs() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let manifest = concat!(
+        "rule generate\n",
+        "  command = if [ ! -e out1 ]; then printf first > out1; touch -d @1 out1; printf keep > out2; else printf second > out1; touch -d @2 out1; fi\n",
+        "  restat = 1\n",
+        "rule copy\n",
+        "  command = cat $in > $out\n",
+        "build out1 out2: generate source\n",
+        "build final1: copy out1\n",
+        "build final2: copy out2\n",
+        "default final1 final2\n",
+    );
+
+    let mut observed = Vec::new();
+    for executable in [ninja, knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        fs::write(temp.path().join("source"), "first").unwrap();
+        let first = run(executable, temp.path(), &["-j1"]);
+        assert!(
+            first.status.success(),
+            "{} phase 1: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&first.stdout),
+            String::from_utf8_lossy(&first.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(temp.path().join("source"), "second").unwrap();
+        let second = run(executable, temp.path(), &["-j1"]);
+        assert!(
+            second.status.success(),
+            "{} phase 2: stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&second.stdout),
+            String::from_utf8_lossy(&second.stderr)
+        );
+        observed.push(second.stdout);
+    }
+
+    assert_eq!(observed[1], observed[0]);
+}
+
 #[cfg(windows)]
 #[test]
 fn failed_command_status_and_exit_code_match_ninja() {
