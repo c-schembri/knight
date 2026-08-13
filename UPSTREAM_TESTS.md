@@ -30,7 +30,7 @@ Status meanings:
 | `edit_distance_test` | 4 | Mapped | `manifest::tests::upstream_edit_distance_corpus` |
 | `elide_middle_test` | 3 | Mapped | `build::tests::upstream_elide_middle_corpus` |
 | `explanations_test` | 3 | Implementation-specific | C++ explanation-storage wrapper; observable `-d explain` behavior has separate differentials |
-| `graph_test` | 55 | Partial | Generated DAG corpus plus graph/query/target traversal differentials |
+| `graph_test` | 55 | Mapped | Explicit 55-case evidence map covering dirty propagation, implicit outputs, collectors, escaping, depfiles/cycles, dyndeps, validations, phony mtimes, and scheduling priority on Windows and WSL |
 | `includes_normalize_test` | 6 | Mapped | Simple, relative, case, drive, overlong-input, exact-`MAX_PATH`, and relative-to-absolute overflow cases; native Knight retains long-path support |
 | `jobserver_test` | 7 | Mapped | `main::tests::upstream_jobserver_makeflags_parser_corpus` and native-mode corpus |
 | `json_test` | 4 | Mapped | `main::tests::upstream_json_encoder_corpus` |
@@ -65,8 +65,8 @@ this ledger tracks all 514 upstream test cases in the pinned source tree.
 
 Of those, 36 cases exercise implementation-specific C++ helpers or optional
 Python support modules rather than the Ninja executable. The executable-parity
-scope is therefore 478 cases: 302 are explicitly mapped or pass unchanged, and
-the remaining 176 are the two Partial C++ suites above.
+scope is therefore 478 cases: 357 are explicitly mapped or pass unchanged, and
+the remaining 121 are the Partial `build_test` suite above.
 
 The next parity work should turn **Partial** executable suites into **Mapped**
 or **Upstream pass** rows. New performance work does not close this ledger.

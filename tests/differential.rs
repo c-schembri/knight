@@ -6139,6 +6139,477 @@ fn graph_tool_uses_ninja_graphviz_shape_and_implicit_defaults() {
 }
 
 #[test]
+fn upstream_graph_dirty_state_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let cases = [
+        (
+            "missing implicit input",
+            "build out: cat in | implicit\n",
+            &["in", "out"][..],
+            &[][..],
+        ),
+        (
+            "modified implicit input",
+            "build out: cat in | implicit\n",
+            &["in", "out"][..],
+            &["implicit"][..],
+        ),
+        (
+            "missing implicit output",
+            "build out | out.imp: cat in\n",
+            &["in", "out"][..],
+            &[][..],
+        ),
+        (
+            "outdated implicit output",
+            "build out | out.imp: cat in\n",
+            &["out.imp"][..],
+            &["in", "out"][..],
+        ),
+        (
+            "missing implicit-only output",
+            "build | out.imp: cat in\n",
+            &["in"][..],
+            &[][..],
+        ),
+        (
+            "outdated implicit-only output",
+            "build | out.imp: cat in\n",
+            &["out.imp"][..],
+            &["in"][..],
+        ),
+    ];
+
+    for (name, edge, older, newer) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!("rule cat\n  command = echo cat $in $out\n{edge}"),
+        )
+        .unwrap();
+        for path in older {
+            fs::write(temp.path().join(path), "older\n").unwrap();
+        }
+        if !newer.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for path in newer {
+            fs::write(temp.path().join(path), "newer\n").unwrap();
+        }
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        install_ninja_alias(knight, &alias);
+        let target = if edge.contains("build |") {
+            "out.imp"
+        } else {
+            "out"
+        };
+        let expected = run(ninja, temp.path(), &["-n", "-v", target]);
+        let actual = run(&alias, temp.path(), &["-n", "-v", target]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+}
+
+#[test]
+fn upstream_graph_depfile_path_and_removal_cases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let manifest = concat!(
+        "rule catdep\n",
+        "  depfile = $out.d\n",
+        "  command = echo cat $in $out\n",
+        "build ./out.o: catdep ./foo.cc\n",
+    );
+
+    for (name, depfile, newer) in [
+        ("canonical declared path", "out.o: bar/../foo.cc\n", None),
+        (
+            "canonical discovered path",
+            "out.o: ./foo/../implicit.h\n",
+            Some("implicit.h"),
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        fs::write(temp.path().join("foo.cc"), "source\n").unwrap();
+        fs::write(temp.path().join("out.o.d"), depfile).unwrap();
+        fs::write(temp.path().join("out.o"), "output\n").unwrap();
+        if let Some(newer) = newer {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(temp.path().join(newer), "newer\n").unwrap();
+        }
+        let expected = run(ninja, temp.path(), &["-n", "-v", "out.o"]);
+        let actual = run(knight, temp.path(), &["-n", "-v", "out.o"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+    fs::write(temp.path().join("foo.cc"), "source\n").unwrap();
+    fs::write(temp.path().join("foo.h"), "header\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(temp.path().join("out.o.d"), "out.o: foo.h\n").unwrap();
+    fs::write(temp.path().join("out.o"), "output\n").unwrap();
+    for (name, remove_depfile) in [("present", false), ("removed", true)] {
+        if remove_depfile {
+            fs::remove_file(temp.path().join("out.o.d")).unwrap();
+        }
+        let expected = run(ninja, temp.path(), &["-n", "-v", "out.o"]);
+        let actual = run(knight, temp.path(), &["-n", "-v", "out.o"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+}
+
+#[test]
+fn upstream_graph_collectors_and_path_escaping_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule cat\n  command = cat $in > $out\n",
+            "build out1: cat in1\n",
+            "build mid1: cat in1\n",
+            "build out2: cat mid1\n",
+            "build out3 out4: cat mid1\n",
+            "build all: phony out1 out2 out3\n",
+            "build out$ 1: cat in1 in2 in$ with$ space | implicit || order_only\n",
+            "build a$ b: cat no'space with$ space$$ no\"space2\n",
+        ),
+    )
+    .unwrap();
+
+    for arguments in [
+        &["-t", "inputs", "out1"][..],
+        &["-t", "inputs", "out2"][..],
+        &["-t", "inputs", "all"][..],
+        &["-t", "inputs", "out 1"][..],
+        &["-t", "commands", "out2"][..],
+        &["-t", "commands", "all"][..],
+        &["-t", "commands", "a b"][..],
+    ] {
+        let expected = run(ninja, temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
+    }
+}
+
+#[test]
+fn upstream_graph_binding_and_dependency_type_cases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    for (name, manifest) in [
+        (
+            "rule variable scope",
+            "rule r\n  depfile = x\n  command = depfile is $depfile\nbuild out: r in\n",
+        ),
+        (
+            "depfile override",
+            "rule r\n  depfile = x\n  command = depfile is $depfile\nbuild out: r in\n  depfile = y\n",
+        ),
+        (
+            "nested phony",
+            "build n1: phony\nbuild n2: phony n1\ndefault n2\n",
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        install_ninja_alias(knight, &alias);
+        for arguments in [&["-t", "commands"][..], &["-n", "-v"][..]] {
+            let expected = run(ninja, temp.path(), arguments);
+            let actual = run(&alias, temp.path(), arguments);
+            assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+            assert_eq!(actual.stdout, expected.stdout, "case={name}");
+            assert_eq!(actual.stderr, expected.stderr, "case={name}");
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule cat\n  command = echo cat $in $out\n",
+            "rule catdep\n  depfile = $out.d\n  command = echo catdep $in $out\n",
+            "build implicit.h: cat data\n",
+            "build out.o: catdep foo.cc || implicit.h\n",
+        ),
+    )
+    .unwrap();
+    for path in ["implicit.h", "foo.cc", "out.o"] {
+        fs::write(temp.path().join(path), "older\n").unwrap();
+    }
+    fs::write(temp.path().join("out.o.d"), "out.o: implicit.h\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(temp.path().join("data"), "newer\n").unwrap();
+    let expected = run(ninja, temp.path(), &["-n", "-v", "out.o"]);
+    let actual = run(knight, temp.path(), &["-n", "-v", "out.o"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
+fn upstream_graph_case_inventory_is_complete() {
+    let cases = [
+        (
+            "MissingImplicit",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "ModifiedImplicit",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "FunkyMakefilePath",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        (
+            "ExplicitImplicit",
+            "upstream_graph_binding_and_dependency_type_cases_match_ninja",
+        ),
+        (
+            "ImplicitOutputParse",
+            "upstream_manifest_parser_semantic_corpus",
+        ),
+        (
+            "ImplicitOutputMissing",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "ImplicitOutputOutOfDate",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "ImplicitOutputOnlyParse",
+            "upstream_manifest_parser_semantic_corpus",
+        ),
+        (
+            "ImplicitOutputOnlyMissing",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "ImplicitOutputOnlyOutOfDate",
+            "upstream_graph_dirty_state_corpus_matches_ninja",
+        ),
+        (
+            "PathWithCurrentDirectory",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        ("RootNodes", "upstream_default_node_selection_matches_ninja"),
+        (
+            "InputsCollector",
+            "upstream_graph_collectors_and_path_escaping_match_ninja",
+        ),
+        (
+            "InputsCollectorWithEscapes",
+            "upstream_graph_collectors_and_path_escaping_match_ninja",
+        ),
+        (
+            "CommandCollector",
+            "upstream_graph_collectors_and_path_escaping_match_ninja",
+        ),
+        (
+            "VarInOutPathEscaping",
+            "upstream_graph_collectors_and_path_escaping_match_ninja",
+        ),
+        (
+            "DepfileWithCanonicalizablePath",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        (
+            "DepfileRemoved",
+            "upstream_graph_depfile_path_and_removal_cases_match_ninja",
+        ),
+        (
+            "RuleVariablesInScope",
+            "upstream_graph_binding_and_dependency_type_cases_match_ninja",
+        ),
+        (
+            "DepfileOverride",
+            "upstream_graph_binding_and_dependency_type_cases_match_ninja",
+        ),
+        (
+            "DepfileOverrideParent",
+            "upstream_graph_binding_and_dependency_type_cases_match_ninja",
+        ),
+        (
+            "NestedPhonyPrintsDone",
+            "upstream_graph_binding_and_dependency_type_cases_match_ninja",
+        ),
+        (
+            "PhonySelfReferenceError",
+            "phony_self_reference_policy_matches_ninja_tools",
+        ),
+        ("DependencyCycle", "rootless_graph_error_matches_ninja"),
+        (
+            "CycleInEdgesButNotInNodes1",
+            "multi_output_edges_retain_real_self_cycles_like_ninja",
+        ),
+        (
+            "CycleInEdgesButNotInNodes2",
+            "multi_output_edges_retain_real_self_cycles_like_ninja",
+        ),
+        (
+            "CycleInEdgesButNotInNodes3",
+            "multi_output_edges_retain_real_self_cycles_like_ninja",
+        ),
+        (
+            "CycleInEdgesButNotInNodes4",
+            "multi_output_edges_retain_real_self_cycles_like_ninja",
+        ),
+        (
+            "CycleWithLengthZeroFromDepfile",
+            "stale_depfile_cycle_is_ignored_when_declared_inputs_are_dirty",
+        ),
+        (
+            "ManifestInputDirtyNoDepfileLoad",
+            "manifest_dirty_edges_do_not_load_stale_discovered_dependencies",
+        ),
+        (
+            "CycleWithLengthOneFromDepfile",
+            "stale_depfile_failures_match_ninja",
+        ),
+        (
+            "CycleWithLengthOneFromDepfileOneHopAway",
+            "stale_depfile_failures_match_ninja",
+        ),
+        (
+            "Decanonicalize",
+            "command_path_separator_spelling_matches_ninja",
+        ),
+        (
+            "DyndepLoadTrivial",
+            "dyndep_parser_and_lexer_corpus_matches_ninja_byte_for_byte",
+        ),
+        (
+            "DyndepLoadImplicit",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepLoadMissingFile",
+            "missing_dyndep_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepLoadMissingEntry",
+            "dyndep_file_entry_ownership_diagnostics_match_ninja",
+        ),
+        (
+            "DyndepLoadExtraEntry",
+            "dyndep_file_entry_ownership_diagnostics_match_ninja",
+        ),
+        (
+            "DyndepLoadOutputWithMultipleRules1",
+            "dyndep_output_conflict_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepLoadOutputWithMultipleRules2",
+            "dyndep_output_conflict_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepLoadMultiple",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepFileMissing",
+            "missing_dyndep_diagnostic_matches_ninja",
+        ),
+        (
+            "DyndepFileError",
+            "graph_loads_only_reachable_dyndeps_and_warns_without_failing",
+        ),
+        (
+            "DyndepImplicitInputNewer",
+            "generated_dyndep_keeps_independent_requested_work_concurrent",
+        ),
+        (
+            "DyndepOutputIsDependentInput",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "DyndepOutputIsDependentInputFromDepfile",
+            "dependency_log_validations_and_declared_dirty_short_circuit_match_ninja",
+        ),
+        (
+            "DyndepFileReady",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "DyndepFileNotClean",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepFileNotReady",
+            "knight_builds_generated_dyndeps_before_dynamic_inputs",
+        ),
+        (
+            "DyndepFileSecondNotReady",
+            "two_level_dyndep_discovery_reaches_a_fixed_point",
+        ),
+        (
+            "DyndepFileCircular",
+            "ready_dyndep_outputs_are_loaded_before_missing_input_validation",
+        ),
+        (
+            "Validation",
+            "status_total_excludes_clean_targets_with_dirty_validations",
+        ),
+        (
+            "PhonyDepsMtimes",
+            "phony_mtime_ignores_order_only_and_validation_inputs",
+        ),
+        (
+            "EdgeQueuePriority",
+            "scheduler_prioritizes_the_longest_remaining_path_like_ninja",
+        ),
+        (
+            "PhonyOutputWithValidation",
+            "status_total_excludes_clean_targets_with_dirty_validations",
+        ),
+    ];
+    assert_eq!(cases.len(), 55);
+    let names = cases
+        .iter()
+        .map(|case| case.0)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(names.len(), cases.len());
+    assert!(cases.iter().all(|case| !case.1.is_empty()));
+}
+
+#[test]
 fn graph_loads_only_reachable_dyndeps_and_warns_without_failing() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");

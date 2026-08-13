@@ -357,11 +357,11 @@ This is an evidence ledger, not a claim of full compatibility.
   Ninja's own POSIX `misc/output_test.py` now passes all 24 tests unchanged,
   including smart-terminal progress, invocation identity, `compdb-targets`,
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
-  status 130, and signal-status cases. All 53 manifest-parser cases are now
-  explicitly mapped; the graph and build suites remain open.
+  status 130, and signal-status cases. All 53 manifest-parser and 55 graph
+  cases are now explicitly mapped; the 121-case build suite remains open.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
-  library, 6 CLI, and 135 differential tests; Linux-under-WSL passes 90 library,
-  5 CLI, and 110 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 140 differential tests; Linux-under-WSL passes 90 library,
+  5 CLI, and 115 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
