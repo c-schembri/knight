@@ -2161,6 +2161,7 @@ fn run_build_prepared<'a>(
         } else {
             ready.len()
         };
+        let mut launch_capacity = run_capacity(running, options);
         let mut ready_examined = 0usize;
         while ready_examined < ready_count {
             if !newly_ready.is_empty()
@@ -2357,7 +2358,7 @@ fn run_build_prepared<'a>(
                 made_progress = true;
                 continue;
             }
-            if stop_starting || !can_run_more(running, options) {
+            if stop_starting || launch_capacity == 0 {
                 ready.push((critical_path[edge_id], Reverse(edge_id)));
                 continue;
             }
@@ -2477,6 +2478,8 @@ fn run_build_prepared<'a>(
                 });
             });
             running += 1;
+            launch_capacity = launch_capacity.saturating_sub(1);
+            launch_capacity = launch_capacity.min(run_capacity(running, options));
             made_progress = true;
         }
 
@@ -4399,14 +4402,32 @@ fn critical_path_weights(
     weights
 }
 
-fn can_run_more(running: usize, options: &BuildOptions) -> bool {
-    if options.jobserver.is_none() && running >= options.jobs.max(1) {
-        return false;
+fn run_capacity(running: usize, options: &BuildOptions) -> usize {
+    let load = if options.max_load_average > 0.0 {
+        system_load_average()
+    } else {
+        -0.0
+    };
+    run_capacity_at_load(running, options, load)
+}
+
+fn run_capacity_at_load(running: usize, options: &BuildOptions, load: f64) -> usize {
+    let mut capacity = if options.jobserver.is_some() {
+        usize::MAX
+    } else {
+        options.jobs.max(1).saturating_sub(running)
+    };
+    // This deliberately uses a positive comparison instead of `<= 0`: like
+    // Ninja, a NaN parsed by strtod disables load limiting.
+    if options.max_load_average > 0.0 {
+        let load_capacity = (options.max_load_average - load) as i64;
+        capacity = capacity.min(load_capacity.max(0) as usize);
     }
-    if options.max_load_average <= 0.0 {
-        return true;
+    if capacity == 0 && running == 0 {
+        1
+    } else {
+        capacity
     }
-    options.max_load_average - system_load_average() >= 1.0 || running == 0
 }
 
 #[derive(Debug)]
@@ -4895,6 +4916,20 @@ mod tests {
         assert_eq!(guess_parallelism(1), 2);
         assert_eq!(guess_parallelism(2), 3);
         assert_eq!(guess_parallelism(8), 10);
+    }
+
+    #[test]
+    fn load_limit_produces_ninjas_launch_capacity() {
+        let mut options = BuildOptions {
+            jobs: 10,
+            max_load_average: 5.5,
+            ..BuildOptions::default()
+        };
+        assert_eq!(run_capacity_at_load(2, &options, 2.1), 3);
+        assert_eq!(run_capacity_at_load(2, &options, 5.0), 0);
+        assert_eq!(run_capacity_at_load(0, &options, 9.0), 1);
+        options.max_load_average = f64::NAN;
+        assert_eq!(run_capacity_at_load(2, &options, 100.0), 8);
     }
 
     #[test]

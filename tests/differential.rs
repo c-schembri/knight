@@ -815,6 +815,52 @@ fn delayed_pool_work_keeps_its_reservation_before_new_dependents() {
 }
 
 #[test]
+fn nan_load_limit_does_not_throttle_parallelism_like_ninja() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let command = if cfg!(windows) {
+        concat!(
+            "powershell -NoProfile -Command \"Set-Content '${out}.started' ready; ",
+            "$$seen=$$false; for ($$i=0; $$i -lt 100; $$i++) { ",
+            "if (Test-Path '${other}.started') { $$seen=$$true; break }; ",
+            "Start-Sleep -Milliseconds 20 }; if (-not $$seen) { exit 9 }; ",
+            "Set-Content '$out' built\"",
+        )
+    } else {
+        concat!(
+            "touch ${out}.started; i=0; ",
+            "while test ! -f ${other}.started && test $$i -lt 100; ",
+            "do sleep .02; i=$$((i+1)); done; ",
+            "test -f ${other}.started && touch $out",
+        )
+    };
+    let manifest = format!(
+        "rule sync\n  command = {command}\n\
+         build a: sync\n  other = b\n\
+         build b: sync\n  other = a\n\
+         default a b\n"
+    );
+
+    for executable in std::env::var_os("KNIGHT_NINJA")
+        .iter()
+        .map(Path::new)
+        .chain(std::iter::once(knight))
+    {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), &manifest).unwrap();
+        let output = run(executable, temp.path(), &["-j2", "-l", "nan", "--quiet"]);
+        assert!(
+            output.status.success(),
+            "executable={} stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(temp.path().join("a").exists());
+        assert!(temp.path().join("b").exists());
+    }
+}
+
+#[test]
 fn initial_pool_frontier_includes_clean_phony_dependents() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let arguments = ["-n", "-j1"];
