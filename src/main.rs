@@ -1036,7 +1036,7 @@ fn tool_msvc(args: &[String]) -> Result<(), String> {
         let mut contents = format!("{object}: ");
         for include in includes {
             contents.push_str(&include.replace(' ', "\\ "));
-            contents.push('\n');
+            contents.push_str("\r\n");
         }
         if let Err(error) = fs::write(&depfile, contents) {
             let _ = fs::remove_file(&object);

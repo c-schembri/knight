@@ -2477,8 +2477,41 @@ fn deprecated_msvc_helper_filters_output_and_writes_depfile() {
     );
     assert_eq!(
         fs::read_to_string(actual_dir.path().join("obj.d")).unwrap(),
-        "obj: header.h\n"
+        "obj: header.h\r\n"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn msvc_helper_normalizes_include_paths_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let absolute = temp
+        .path()
+        .join("Sub")
+        .join("Header.h")
+        .to_string_lossy()
+        .to_uppercase();
+    for include in [
+        r"a\..\b".to_owned(),
+        r"a\.\b".to_owned(),
+        absolute,
+        r"P:\vs08\..\wee\stuff.h".to_owned(),
+    ] {
+        let command = format!("echo Note: including file: {include}");
+        let arguments = ["-t", "msvc", "-o", "obj", "--", "cmd", "/d", "/c", &command];
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        let expected_depfile = fs::read(temp.path().join("obj.d")).unwrap();
+        fs::remove_file(temp.path().join("obj.d")).unwrap();
+        let actual = run(knight, temp.path(), &arguments);
+        let actual_depfile = fs::read(temp.path().join("obj.d")).unwrap();
+        assert_eq!(actual.status.code(), expected.status.code(), "{include}");
+        assert_eq!(actual_depfile, expected_depfile, "{include}");
+    }
 }
 
 #[cfg(windows)]

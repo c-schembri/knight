@@ -97,6 +97,36 @@ fn msvc_filter_benchmark(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn msvc_absolute_filter_benchmark(criterion: &mut Criterion) {
+    let root = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_uppercase();
+    let mut group = criterion.benchmark_group("msvc_filter_absolute");
+    for lines in [100usize, 1_000, 10_000] {
+        let mut output = String::with_capacity(lines * 80);
+        for index in 0..lines {
+            output.push_str(&format!(
+                "Note: including file: {root}/include/header_{index}.h\r\n"
+            ));
+        }
+        let output = output.into_bytes();
+        group.throughput(Throughput::Bytes(output.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(lines),
+            &output,
+            |bench, output| {
+                bench.iter(|| {
+                    let mut includes = BTreeSet::new();
+                    filter_msvc_output(output, "", &mut includes).unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 fn elide_middle_benchmark(criterion: &mut Criterion) {
     let inputs = [
         "01234567890123456789",
@@ -119,6 +149,7 @@ criterion_group!(
     parse_benchmark,
     dyndep_parse_benchmark,
     msvc_filter_benchmark,
+    msvc_absolute_filter_benchmark,
     elide_middle_benchmark
 );
 criterion_main!(benches);

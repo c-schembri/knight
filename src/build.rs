@@ -3948,6 +3948,7 @@ pub fn filter_msvc_output(
     let output = String::from_utf8_lossy(output);
     let mut filtered = String::with_capacity(output.len());
     let mut saw_include = false;
+    let normalizer = MsvcIncludeNormalizer::new(".")?;
     let mut start = 0;
     while start < output.len() {
         let end = output[start..]
@@ -3961,7 +3962,7 @@ pub fn filter_msvc_output(
             .filter(|include| !include.is_empty());
         if let Some(include) = include {
             saw_include = true;
-            if let Some(normalized) = normalize_msvc_include(include)? {
+            if let Some(normalized) = normalize_msvc_include(include, &normalizer)? {
                 includes.insert(normalized);
             }
         } else if saw_include || !is_compiler_input_echo(line) {
@@ -3986,27 +3987,113 @@ fn is_compiler_input_echo(line: &str) -> bool {
         .any(|extension| lower.ends_with(extension))
 }
 
-fn normalize_msvc_include(include: &str) -> Result<Option<String>, String> {
+fn normalize_msvc_include(
+    include: &str,
+    normalizer: &MsvcIncludeNormalizer,
+) -> Result<Option<String>, String> {
     let lower = include.to_ascii_lowercase();
     if lower.contains("program files") || lower.contains("microsoft visual studio") {
         return Ok(None);
     }
-    let path = Path::new(include);
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| format!("resolving include '{include}': {error}"))?
-            .join(path)
-    };
-    let current = std::env::current_dir()
-        .map_err(|error| format!("resolving include '{include}': {error}"))?;
-    let display = absolute
-        .strip_prefix(&current)
-        .unwrap_or(&absolute)
-        .to_string_lossy()
-        .replace('\\', "/");
-    Ok(Some(canonicalize_owned_path(display)))
+    normalizer.normalize(include).map(Some)
+}
+
+#[cfg(windows)]
+struct MsvcIncludeNormalizer {
+    current: String,
+    relative_is_current: bool,
+    relative_parts: Vec<String>,
+    relative_root: Option<String>,
+}
+
+#[cfg(windows)]
+impl MsvcIncludeNormalizer {
+    fn new(relative_to: &str) -> Result<Self, String> {
+        let current = std::env::current_dir()
+            .map_err(|error| format!("resolving include path: {error}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let current = canonicalize_owned_path(current);
+        let relative = Self::absolute(relative_to, &current);
+        Ok(Self {
+            current,
+            relative_is_current: canonicalize_path(relative_to) == ".",
+            relative_root: windows_root_key(&relative),
+            relative_parts: relative.split('/').map(str::to_owned).collect(),
+        })
+    }
+
+    fn absolute(path: &str, current: &str) -> String {
+        let path = canonicalize_path(path);
+        if Path::new(&path).is_absolute() {
+            path
+        } else {
+            canonicalize_path(&format!("{current}/{path}"))
+        }
+    }
+
+    fn normalize(&self, input: &str) -> Result<String, String> {
+        let partially_fixed = canonicalize_path(input);
+        if self.relative_is_current
+            && !Path::new(&partially_fixed).is_absolute()
+            && partially_fixed.as_bytes().get(1) != Some(&b':')
+        {
+            return Ok(partially_fixed);
+        }
+        let input_absolute = Self::absolute(&partially_fixed, &self.current);
+        if windows_root_key(&input_absolute) != self.relative_root {
+            return Ok(partially_fixed);
+        }
+
+        let input_parts = input_absolute.split('/').collect::<Vec<_>>();
+        let common = input_parts
+            .iter()
+            .zip(&self.relative_parts)
+            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+            .count();
+        let mut result = vec![".."; self.relative_parts.len() - common];
+        result.extend_from_slice(&input_parts[common..]);
+        Ok(if result.is_empty() {
+            ".".to_owned()
+        } else {
+            result.join("/")
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_root_key(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        return Some(path[..2].to_ascii_lowercase());
+    }
+    let mut components = path.strip_prefix("//")?.split('/');
+    let server = components.next()?;
+    let share = components.next()?;
+    Some(format!(
+        "//{}/{}",
+        server.to_ascii_lowercase(),
+        share.to_ascii_lowercase()
+    ))
+}
+
+#[cfg(all(windows, test))]
+fn normalize_windows_include_from(input: &str, relative_to: &str) -> Result<String, String> {
+    MsvcIncludeNormalizer::new(relative_to)?.normalize(input)
+}
+
+#[cfg(not(windows))]
+struct MsvcIncludeNormalizer;
+
+#[cfg(not(windows))]
+impl MsvcIncludeNormalizer {
+    fn new(_relative_to: &str) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn normalize(&self, input: &str) -> Result<String, String> {
+        Ok(canonicalize_owned_path(input.to_owned()))
+    }
 }
 
 struct EvaluatedEdge {
@@ -5882,7 +5969,12 @@ mod tests {
         .unwrap();
         assert_eq!(String::from_utf8(filtered).unwrap(), "warning: hello\n");
         assert_eq!(includes.len(), 1);
-        assert!(includes.iter().next().unwrap().ends_with("include/local.h"));
+        let expected = if cfg!(windows) {
+            "include/local.h"
+        } else {
+            r"include\local.h"
+        };
+        assert!(includes.iter().next().unwrap().ends_with(expected));
     }
 
     #[test]
@@ -5950,6 +6042,76 @@ mod tests {
         )
         .unwrap();
         assert!(custom.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upstream_includes_normalize_path_corpus() {
+        for (input, expected) in [
+            (r"a\..\b", "b"),
+            (r"a\../b", "b"),
+            (r"a\.\b", "a/b"),
+            (r"a\./b", "a/b"),
+            (r"Abc\..\BdEf", "BdEf"),
+            (r"A\.\B", "A/B"),
+        ] {
+            assert_eq!(
+                normalize_windows_include_from(input, ".").unwrap(),
+                expected,
+                "input={input}"
+            );
+        }
+
+        let current = std::env::current_dir().unwrap();
+        let current_name = current.file_name().unwrap().to_string_lossy();
+        let absolute_a = current.join("a").to_string_lossy().into_owned();
+        assert_eq!(
+            normalize_windows_include_from(&absolute_a, ".").unwrap(),
+            "a"
+        );
+        assert_eq!(
+            normalize_windows_include_from("a", "../b").unwrap(),
+            format!("../{current_name}/a")
+        );
+        assert_eq!(
+            normalize_windows_include_from("a/b", "../c").unwrap(),
+            format!("../{current_name}/a/b")
+        );
+        assert_eq!(
+            normalize_windows_include_from("a", "b/c").unwrap(),
+            "../../a"
+        );
+        assert_eq!(normalize_windows_include_from("a", "a").unwrap(), ".");
+
+        let drive = current.to_string_lossy().chars().next().unwrap();
+        let other_drive = if drive.eq_ignore_ascii_case(&'P') {
+            'Q'
+        } else {
+            'P'
+        };
+        assert_eq!(
+            normalize_windows_include_from(
+                &format!("{}:\\vs08\\stuff.h", drive.to_ascii_uppercase()),
+                &format!("{}:\\Vs08", drive.to_ascii_lowercase()),
+            )
+            .unwrap(),
+            "stuff.h"
+        );
+        assert_eq!(
+            normalize_windows_include_from(
+                &format!("{other_drive}:\\vs08\\..\\wee\\stuff.h"),
+                &format!("{drive}:\\stuff\\things"),
+            )
+            .unwrap(),
+            format!("{other_drive}:/wee/stuff.h")
+        );
+
+        let long = "a".repeat(300);
+        assert_eq!(
+            normalize_windows_include_from(&long, ".").unwrap(),
+            long,
+            "Knight intentionally retains long-path support beyond Ninja's MAX_PATH limit"
+        );
     }
 
     #[test]

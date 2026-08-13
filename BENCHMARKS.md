@@ -242,10 +242,16 @@ project-wide 10x requirement.
 
 Criterion now tracks Ninja-compatible `/showIncludes` parsing independently.
 A generated mixture of include lines, compiler warnings, and echoed source
-filenames measured 18.384 us for 100 lines, 194.88 us for 1,000 lines, and
-2.045 ms for 10,000 lines on Windows x64, sustaining roughly 155 MiB/s at the
-largest size. This benchmark protects the raw-output and dependency-extraction
-path while the full eight-case upstream `CLParser` corpus protects semantics.
+filenames now measures 6.695 us for 100 lines, 71.818 us for 1,000 lines, and
+788.67 us for 10,000 lines on Windows x64, sustaining about 402 MiB/s at the
+largest size. Caching the working-directory context and returning already-
+relative canonical paths directly made this workload 61-64% faster than the
+previous implementation. A second benchmark exercises differently-cased
+absolute paths and case-insensitive relativization at 43.084 us, 447.85 us,
+and 4.648 ms, respectively, sustaining 131 MiB/s at 10,000 lines. These
+benchmarks protect the raw-output, path-normalization, and dependency-
+extraction paths while the upstream `CLParser` and `IncludesNormalize` corpora
+protect semantics.
 
 ## Compilation database
 

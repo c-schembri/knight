@@ -275,7 +275,13 @@ This is an evidence ledger, not a claim of full compatibility.
   and custom prefixes, initial-space trimming, compiler input echoes, the
   post-include echo boundary, system-header filtering, duplicate headers, and
   canonicalized path duplicates. An empty configured prefix correctly falls
-  back to Ninja's English `/showIncludes` prefix.
+  back to Ninja's English `/showIncludes` prefix. Windows include paths use
+  Ninja's case-insensitive same-drive relativization across mixed separators,
+  `.`/`..`, differently-cased absolute roots, and cross-drive inputs. The four
+  path-behavior groups from the upstream `IncludesNormalize` corpus are mapped
+  directly; Knight deliberately retains its long-path support instead of
+  reproducing Ninja's two `MAX_PATH` rejection cases. The deprecated `msvc`
+  helper also writes Ninja's CRLF depfile bytes.
 - Diagnostic identity follows the invocation name: the normal executable uses
   `knight:`, while a copy or link installed as `ninja` uses Ninja-compatible
   `ninja:`/`ninja explain:` prefixes. `-d explain` identifies the dirty input
@@ -298,8 +304,8 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 71
-  library, 3 CLI, and 116 differential tests; Linux-under-WSL passes 70 library,
+- Broader cross-platform runtime validation. The current Windows gates pass 72
+  library, 3 CLI, and 117 differential tests; Linux-under-WSL passes 70 library,
   3 CLI, and 89 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
