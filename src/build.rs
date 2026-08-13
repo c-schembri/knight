@@ -1258,6 +1258,9 @@ fn run_build_impl(
     let mut prebuild_options = options.clone();
     prebuild_options.quiet_no_work = true;
     prebuild_options.quiet = true;
+    let all_initial_dyndeps_are_sources = dyndep_files
+        .iter()
+        .all(|file| !initial_output_map.contains_key(file.as_str()));
     let mut expanded = manifest.into_owned();
     let mut seen_dyndeps = HashSet::<String>::new();
     let mut loaded_dyndeps = Vec::new();
@@ -1265,7 +1268,15 @@ fn run_build_impl(
     let mut dyndep_graph_time = Duration::ZERO;
     let mut dyndep_prebuild_time = Duration::ZERO;
     let mut dyndep_load_time = Duration::ZERO;
-    loop {
+    let mut needs_graph_pass = true;
+    if all_initial_dyndeps_are_sources {
+        let dyndep_phase = Instant::now();
+        seen_dyndeps.extend(dyndep_files.iter().cloned());
+        loaded_dyndeps.extend(dyndep_files.iter().cloned());
+        needs_graph_pass = apply_dyndep_files_inner(&mut expanded, &dyndep_files)?;
+        dyndep_load_time += dyndep_phase.elapsed();
+    }
+    while needs_graph_pass {
         let dyndep_phase = Instant::now();
         let phase = Instant::now();
         let current_output_map = output_map(&expanded);
@@ -1391,9 +1402,7 @@ fn run_build_impl(
             }
         };
         dyndep_load_time += dyndep_phase.elapsed();
-        if !another_pass {
-            break;
-        }
+        needs_graph_pass = another_pass;
     }
     if options.stats {
         eprintln!(
