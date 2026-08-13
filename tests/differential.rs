@@ -2837,6 +2837,24 @@ fn restat_help_exit_status_matches_ninja() {
 }
 
 #[test]
+fn restat_discards_incompatible_build_logs_without_recreating_them() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".ninja_log"), "incompatible\n").unwrap();
+        let output = run(executable, temp.path(), &["-t", "restat"]);
+        assert!(output.status.success(), "{}", executable.display());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert!(!temp.path().join(".ninja_log").exists());
+    }
+}
+
+#[test]
 fn restat_compaction_missing_outputs_and_dry_run_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -3000,6 +3018,7 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
         &["-t", "restat", "--bogus"][..],
         &["-t", "commands", "app", "-s"][..],
         &["-t", "commands", "--", "-x"][..],
+        &["-t", "targets", "rule", ""][..],
         &["-t", "targets", "depth", "1trailing"][..],
         &["-t", "targets", "depth", "+2trailing"][..],
         &["-t", "rules", "ignored-operand", "-d"][..],
@@ -4029,7 +4048,14 @@ fn build_log_read_errors_fail_metadata_tools_like_ninja() {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        for tool in ["cleandead", "restat", "recompact"] {
+        for tool in [
+            "query",
+            "deps",
+            "missingdeps",
+            "cleandead",
+            "restat",
+            "recompact",
+        ] {
             let temp = tempdir().unwrap();
             fs::write(temp.path().join("build.ninja"), "build out: phony\n").unwrap();
             fs::create_dir(temp.path().join(".ninja_log")).unwrap();
@@ -4089,6 +4115,60 @@ fn build_log_directories_follow_ninjas_posix_behavior() {
 }
 
 #[test]
+fn build_log_versions_match_ninja_before_log_aware_work() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for arguments in [
+        &["-n"][..],
+        &["-t", "query", "out"][..],
+        &["-t", "deps"][..],
+        &["-t", "missingdeps", "out"][..],
+        &["-t", "cleandead"][..],
+    ] {
+        for (contents, valid) in [
+            ("invalid\n", false),
+            ("# ninja log v6\n", false),
+            ("# ninja log v8\n", false),
+            ("# ninja log v+7 trailing\n", true),
+            ("# ninja log v7", true),
+        ] {
+            let mut expected = None;
+            for executable in [Path::new(&ninja), knight] {
+                let temp = tempdir().unwrap();
+                fs::write(
+                    temp.path().join("build.ninja"),
+                    "build out: phony\ndefault out\n",
+                )
+                .unwrap();
+                let log_path = temp.path().join(".ninja_log");
+                fs::write(&log_path, contents).unwrap();
+                let output = run(executable, temp.path(), arguments);
+                let result = (
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout)
+                        .replace('\r', "")
+                        .replace("ninja:", "tool:")
+                        .replace("knight:", "tool:"),
+                    String::from_utf8_lossy(&output.stderr)
+                        .replace('\r', "")
+                        .replace("ninja:", "tool:")
+                        .replace("knight:", "tool:"),
+                );
+                if let Some(expected) = &expected {
+                    assert_eq!(&result, expected, "{arguments:?}, {contents:?}");
+                } else {
+                    expected = Some(result);
+                }
+                assert_eq!(log_path.exists(), valid, "{arguments:?}, {contents:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn deps_log_errors_and_tool_loading_phases_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -4102,6 +4182,7 @@ fn deps_log_errors_and_tool_loading_phases_match_ninja() {
             &["-t", "query", "out"][..],
             &["-t", "deps"][..],
             &["-t", "missingdeps", "out"][..],
+            &["-t", "cleandead"][..],
             &["-t", "recompact"][..],
         ] {
             let temp = tempdir().unwrap();

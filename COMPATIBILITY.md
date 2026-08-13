@@ -54,7 +54,9 @@ This is an evidence ledger, not a claim of full compatibility.
   without silently recreating them and follows Ninja's distinct build/deps-log
   exit behavior. Unreadable metadata logs fail before commands can run, while
   invalid dependency-log signatures retain Ninja's warning-and-recovery path.
-  Tools open logs only in Ninja's corresponding execution phase. Dependency-
+  Build-log recovery distinguishes old and future versions, while accepting
+  Ninja's numeric signature grammar. Tools open logs only in Ninja's
+  corresponding execution phase. Dependency-
   tool output and dependency-log recompaction preserve Ninja's persisted
   node-ID ordering.
 - Dyndep v1 implicit inputs, implicit outputs, and `restat`, including dyndep
@@ -181,8 +183,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 1 CLI, and 91 differential tests; Linux-under-WSL passes 62 library,
-  1 CLI, and 61 differential tests. Release builds, clippy, a Windows-hosted
+  library, 1 CLI, and 93 differential tests; Linux-under-WSL passes 62 library,
+  1 CLI, and 63 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

@@ -1,6 +1,8 @@
 #[cfg(windows)]
 use knight_build::build::filter_msvc_output;
-use knight_build::build::{render_binding, render_unescaped_binding, shell_escape_path};
+use knight_build::build::{
+    build_log_version, render_binding, render_unescaped_binding, shell_escape_path,
+};
 use knight_build::depfile::parse_depfile;
 use knight_build::deps_log::{DepsLog, deps_log_path};
 #[cfg(windows)]
@@ -800,6 +802,25 @@ fn read_optional_build_log(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+fn load_tool_build_log(manifest: &Manifest) -> Result<Option<String>, String> {
+    let path = build_log_path(manifest);
+    let Some(contents) = read_optional_build_log(&path)? else {
+        return Ok(None);
+    };
+    let version = build_log_version(&contents);
+    if !contents.is_empty() && version != 7 {
+        let age = if version > 7 { "new" } else { "old" };
+        eprintln!(
+            "{}: warning: build log version is too {age}; starting over",
+            program_name()
+        );
+        fs::remove_file(&path)
+            .map_err(|error| format!("removing '{}': {error}", path.display()))?;
+        return Ok(None);
+    }
+    Ok(Some(contents))
+}
+
 fn load_deps_log(builddir: Option<&str>) -> Result<DepsLog, String> {
     let path = deps_log_path(builddir);
     let log = DepsLog::load(path.clone())
@@ -858,6 +879,7 @@ fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
 }
 
 fn tool_deps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let _build_log = load_tool_build_log(manifest)?;
     let log = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let selected = if targets.is_empty() {
         let live = manifest
@@ -941,6 +963,11 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
     let Some(contents) = read_optional_build_log(&path)? else {
         return Ok(());
     };
+    if !contents.is_empty() && build_log_version(&contents) != 7 {
+        fs::remove_file(&path)
+            .map_err(|error| format!("removing '{}': {error}", path.display()))?;
+        return Ok(());
+    }
     let selected = targets.iter().map(String::as_str).collect::<HashSet<_>>();
     let mut latest = HashMap::<String, (u32, u32, u64, u64)>::new();
     for line in contents.lines().skip(1) {
@@ -1009,7 +1036,7 @@ fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("rule") => {
-            if let Some(rule) = args.get(1) {
+            if let Some(rule) = args.get(1).filter(|rule| !rule.is_empty()) {
                 let mut outputs = BTreeSet::new();
                 for edge in &manifest.edges {
                     if edge.rule == *rule {
@@ -1426,11 +1453,12 @@ fn print_clean_remove_error(path: &str, error: &io::Error) {
 }
 
 fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
+    let _build_log = load_tool_build_log(manifest)?;
+    let deps = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     if args.is_empty() {
         return Err("expected a target to query".to_owned());
     }
     let mut manifest = manifest.clone();
-    let deps = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let mut loaded_dyndeps = HashSet::new();
     for target in args {
         let target = resolve_target_path(&manifest, target, Some(&deps), true)?;
@@ -2063,6 +2091,8 @@ fn compdb_command(manifest: &Manifest, edge: &Edge, expand_rsp: bool) -> String 
 }
 
 fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), String> {
+    let contents = load_tool_build_log(manifest)?;
+    let _deps = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let expanded = manifest_with_clean_dyndeps(manifest);
     let manifest = expanded.as_ref().unwrap_or(manifest);
     let live = manifest
@@ -2070,8 +2100,7 @@ fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), Str
         .iter()
         .flat_map(|edge| edge.outputs().chain(edge.inputs()))
         .collect::<HashSet<_>>();
-    let path = build_log_path(manifest);
-    let Some(contents) = read_optional_build_log(&path)? else {
+    let Some(contents) = contents else {
         if !options.quiet {
             println!("Cleaning... 0 files.");
         }
@@ -2201,6 +2230,8 @@ fn canonical_eval_string(value: &str) -> String {
 }
 
 fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
+    let _build_log = load_tool_build_log(manifest)?;
+    let log = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let targets = if targets.is_empty() {
         default_targets(manifest)?
     } else {
@@ -2208,7 +2239,6 @@ fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), Strin
     };
     let selected = selected_edges(manifest, &targets)?;
     let outputs = output_index(manifest);
-    let log = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let mut missing_nodes = HashSet::new();
     let mut generated_inputs = HashSet::<String>::new();
     let mut generator_rules = HashSet::new();

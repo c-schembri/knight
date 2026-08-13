@@ -302,9 +302,36 @@ struct BuildLogEntry {
     elapsed_ms: u32,
 }
 
+pub fn build_log_version(contents: &str) -> i32 {
+    let Some(rest) = contents.strip_prefix("# ninja log v") else {
+        return 0;
+    };
+    let rest = rest.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let (negative, digits) = match rest.as_bytes().first() {
+        Some(b'-') => (true, &rest[1..]),
+        Some(b'+') => (false, &rest[1..]),
+        _ => (false, rest),
+    };
+    let digits = digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .map(char::from)
+        .collect::<String>();
+    if digits.is_empty() {
+        return 0;
+    }
+    let magnitude = digits.parse::<u64>().unwrap_or(u64::MAX);
+    if negative {
+        -(magnitude.min(i32::MAX as u64 + 1) as i64) as i32
+    } else {
+        magnitude.min(i32::MAX as u64) as i32
+    }
+}
+
 #[derive(Debug, Default)]
 struct BuildLog<'a> {
     path: PathBuf,
+    invalidation_warning: Option<&'static str>,
     entries: HashMap<&'a str, BuildLogEntry>,
 }
 
@@ -630,6 +657,7 @@ impl<'a> BuildLog<'a> {
     fn load(path: PathBuf, outputs: &HashMap<&'a str, usize>) -> io::Result<Self> {
         let mut log = Self {
             path,
+            invalidation_warning: None,
             entries: HashMap::new(),
         };
         let mut contents = match fs::read_to_string(&log.path) {
@@ -639,7 +667,13 @@ impl<'a> BuildLog<'a> {
             Err(error) if error.kind() == io::ErrorKind::IsADirectory => String::new(),
             Err(error) => return Err(error),
         };
-        if !contents.is_empty() && !contents.starts_with("# ninja log v7\n") {
+        let version = build_log_version(&contents);
+        if !contents.is_empty() && version != 7 {
+            log.invalidation_warning = Some(if version > 7 {
+                "build log version is too new; starting over"
+            } else {
+                "build log version is too old; starting over"
+            });
             let _ = fs::remove_file(&log.path);
             return Ok(log);
         }
@@ -951,6 +985,9 @@ pub fn run_build(
                 initial_build_log_path.display()
             )
         })?;
+    if let Some(warning) = build_log.invalidation_warning {
+        eprintln!("{}: warning: {warning}", program_name());
+    }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
     let discovered = DiscoveredDeps::load_for_build(manifest, &initial_output_map, &build_log)?;
@@ -1027,6 +1064,9 @@ pub fn run_build(
                     current_build_log_path.display()
                 )
             })?;
+        if let Some(warning) = current_build_log.invalidation_warning {
+            eprintln!("{}: warning: {warning}", program_name());
+        }
         let current_build_log_time = phase.elapsed();
         let phase = Instant::now();
         let current_discovered =
@@ -1365,6 +1405,9 @@ fn run_build_internal(
     let build_log_file = build_log_path(manifest);
     let build_log = BuildLog::load(build_log_file.clone(), &output_map)
         .map_err(|error| format!("loading build log {}: {error}", build_log_file.display()))?;
+    if let Some(warning) = build_log.invalidation_warning {
+        eprintln!("{}: warning: {warning}", program_name());
+    }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
     let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
