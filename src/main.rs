@@ -1301,6 +1301,11 @@ fn load_deps_log(builddir: Option<&str>) -> Result<DepsLog, String> {
             "{}: warning: bad deps log signature or version; starting over",
             program_name()
         );
+    } else if log.was_recovered() {
+        eprintln!(
+            "{}: warning: premature end of file; recovering",
+            program_name()
+        );
     }
     Ok(log)
 }
@@ -1347,7 +1352,13 @@ fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
     if !deps.path_exists() {
         return Err("failed recompaction: No such file or directory".to_owned());
     }
-    deps.recompact()
+    let live = manifest
+        .edges
+        .iter()
+        .filter(|edge| !render_binding(manifest, edge, "deps").is_empty())
+        .flat_map(Edge::outputs)
+        .collect::<HashSet<_>>();
+    deps.recompact_retain(|output| live.contains(output))
         .map_err(|error| format!("recompacting dependency log: {error}"))
 }
 

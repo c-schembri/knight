@@ -24,7 +24,7 @@ Status meanings:
 | `clean_test` | 20 | Partial | Clean, rule clean, dyndep, dead-output, directory, and failure behavior |
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |
 | `depfile_parser_test` | 29 | Mapped | `depfile::tests::upstream_depfile_parser_corpus` |
-| `deps_log_test` | 10 | Partial | Bidirectional interoperability, recovery, ordering, and recompaction |
+| `deps_log_test` | 10 | Mapped | Round-trip, 100K inputs, deduplication, live recompaction, headers, truncation, reverse lookup, and malformed-record recovery |
 | `disk_interface_test` | 16 | Partial | Missing/error distinctions, stat-cache behavior, long paths, and timestamps |
 | `dyndep_parser_test` | 42 | Mapped | `dyndep::tests::accepts_upstream_version_and_layout_corpus` and rejection corpus |
 | `edit_distance_test` | 4 | Mapped | `manifest::tests::upstream_edit_distance_corpus` |

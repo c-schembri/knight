@@ -4115,6 +4115,84 @@ fn recompact_does_not_create_missing_metadata_logs() {
 }
 
 #[test]
+fn deps_recompact_discards_entries_without_live_deps_edges_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let manifest = concat!(
+        "rule tracked\n  command = unused\n  deps = gcc\n",
+        "rule plain\n  command = unused\n",
+        "build live.o: tracked\n",
+        "build dead.o: plain\n",
+    );
+    let mut observed = Vec::new();
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let deps_path = temp.path().join(".ninja_deps");
+        let mut log = knight_build::deps_log::DepsLog::load(deps_path.clone()).unwrap();
+        log.record("live.o", 1, &["live.h".to_owned()]).unwrap();
+        log.record("dead.o", 2, &["dead.h".to_owned()]).unwrap();
+        drop(log);
+
+        let output = run(executable, temp.path(), &["-t", "recompact"]);
+        assert!(output.status.success(), "{}", executable.display());
+        let compact = knight_build::deps_log::DepsLog::load(deps_path.clone()).unwrap();
+        assert!(compact.get("live.o").is_some(), "{}", executable.display());
+        assert!(compact.get("dead.o").is_none(), "{}", executable.display());
+        observed.push((output.stdout, output.stderr, fs::read(deps_path).unwrap()));
+    }
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[test]
+fn deps_log_bad_tail_recovery_matches_ninja_alias() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let manifest = "rule cc\n  command = unused\n  deps = gcc\nbuild out.o: cc\n";
+    let mut observed = Vec::new();
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let deps_path = temp.path().join(".ninja_deps");
+        let mut log = knight_build::deps_log::DepsLog::load(deps_path.clone()).unwrap();
+        log.record("out.o", 1, &["foo.h".to_owned(), "bar.h".to_owned()])
+            .unwrap();
+        drop(log);
+        let valid_length = fs::metadata(&deps_path).unwrap().len();
+        let mut contents = fs::read(&deps_path).unwrap();
+        contents.extend_from_slice(&[
+            0x0c, 0x00, 0x00, 0x00, b'f', b'o', b'o', b'.', b'h', 0x00, 0x00, 0x00, 0xfe, 0xff,
+            0xff, 0xff,
+        ]);
+        fs::write(&deps_path, contents).unwrap();
+
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        let executable = if executable == knight {
+            #[cfg(windows)]
+            fs::copy(knight, &alias).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(knight, &alias).unwrap();
+            alias.as_path()
+        } else {
+            executable
+        };
+        let output = run(executable, temp.path(), &["-t", "deps", "out.o"]);
+        assert!(output.status.success(), "{}", executable.display());
+        assert_eq!(fs::metadata(&deps_path).unwrap().len(), valid_length);
+        observed.push((output.stdout, output.stderr, fs::read(deps_path).unwrap()));
+    }
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[test]
 fn recompact_discards_incompatible_metadata_without_recreating_it() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");

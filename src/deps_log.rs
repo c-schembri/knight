@@ -16,7 +16,9 @@ pub struct DepsEntry {
 #[derive(Debug, Default)]
 pub struct DepsLog {
     path: PathBuf,
+    file: Option<fs::File>,
     invalidated: bool,
+    recovered: bool,
     nodes: Vec<String>,
     ids: HashMap<String, u32>,
     entries: HashMap<String, DepsEntry>,
@@ -49,10 +51,11 @@ impl DepsLog {
                 }
             }
             Err(ParseError::Truncated(valid_length)) => {
-                let _ = OpenOptions::new()
+                OpenOptions::new()
                     .write(true)
                     .open(&log.path)
-                    .and_then(|file| file.set_len(valid_length as u64));
+                    .and_then(|file| file.set_len(valid_length as u64))?;
+                log.recovered = true;
             }
             Err(ParseError::Invalid) => {
                 log.invalidated = true;
@@ -68,6 +71,10 @@ impl DepsLog {
 
     pub fn was_invalidated(&self) -> bool {
         self.invalidated
+    }
+
+    pub fn was_recovered(&self) -> bool {
+        self.recovered
     }
 
     pub fn get(&self, output: &str) -> Option<&DepsEntry> {
@@ -124,14 +131,16 @@ impl DepsLog {
         if payload_size > MAX_RECORD_SIZE {
             return Err(record_too_large());
         }
-        let mut file = self.open_append()?;
-        file.write_all(&((payload_size as u32) | 0x8000_0000).to_le_bytes())?;
-        file.write_all(&output_id.to_le_bytes())?;
-        file.write_all(&(mtime as u32).to_le_bytes())?;
-        file.write_all(&((mtime >> 32) as u32).to_le_bytes())?;
+        let mut record = Vec::with_capacity(payload_size + 4);
+        record.extend_from_slice(&((payload_size as u32) | 0x8000_0000).to_le_bytes());
+        record.extend_from_slice(&output_id.to_le_bytes());
+        record.extend_from_slice(&(mtime as u32).to_le_bytes());
+        record.extend_from_slice(&((mtime >> 32) as u32).to_le_bytes());
         for input_id in input_ids {
-            file.write_all(&input_id.to_le_bytes())?;
+            record.extend_from_slice(&input_id.to_le_bytes());
         }
+        let file = self.open_append()?;
+        file.write_all(&record)?;
         file.flush()?;
         self.entries.insert(
             output.to_owned(),
@@ -144,11 +153,19 @@ impl DepsLog {
     }
 
     pub fn recompact(&mut self) -> io::Result<()> {
+        self.recompact_retain(|_| true)
+    }
+
+    pub fn recompact_retain(&mut self, mut is_live: impl FnMut(&str) -> bool) -> io::Result<()> {
+        self.close()?;
         let entries = self
             .outputs_in_node_order()
+            .filter(|output| is_live(output))
             .map(|output| (output.to_owned(), self.entries[output].clone()))
             .collect::<Vec<_>>();
-        let temporary = self.path.with_extension("ninja_deps.recompact");
+        let mut temporary = self.path.as_os_str().to_os_string();
+        temporary.push(".recompact");
+        let temporary = PathBuf::from(temporary);
         let mut compact = Self {
             path: temporary.clone(),
             ..Self::default()
@@ -160,13 +177,9 @@ impl DepsLog {
             compact.record(&output, entry.mtime, &entry.inputs)?;
         }
         if compact.entries.is_empty() {
-            if let Some(parent) = temporary.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = fs::File::create(&temporary)?;
-            file.write_all(SIGNATURE)?;
-            file.write_all(&VERSION.to_le_bytes())?;
+            compact.open_append()?;
         }
+        compact.close()?;
         fs::rename(&temporary, &self.path)?;
         *self = Self::load(self.path.clone())?;
         Ok(())
@@ -188,7 +201,7 @@ impl DepsLog {
             let is_deps = encoded_size & 0x8000_0000 != 0;
             let size = (encoded_size & 0x7fff_ffff) as usize;
             if size == 0 || size > MAX_RECORD_SIZE {
-                return Err(ParseError::Invalid);
+                return Err(ParseError::Truncated(record_start));
             }
             if offset + size > data.len() {
                 return Err(ParseError::Truncated(record_start));
@@ -196,10 +209,10 @@ impl DepsLog {
             let record = &data[offset..offset + size];
             if is_deps {
                 self.parse_deps_record(record)
-                    .map_err(|_| ParseError::Invalid)?;
+                    .map_err(|_| ParseError::Truncated(record_start))?;
             } else {
                 self.parse_path_record(record)
-                    .map_err(|_| ParseError::Invalid)?;
+                    .map_err(|_| ParseError::Truncated(record_start))?;
             }
             offset += size;
         }
@@ -261,31 +274,43 @@ impl DepsLog {
         if path_bytes.is_empty() || payload_size > MAX_RECORD_SIZE {
             return Err(record_too_large());
         }
-        let mut file = self.open_append()?;
-        file.write_all(&(payload_size as u32).to_le_bytes())?;
-        file.write_all(path_bytes)?;
-        file.write_all(&[0; 3][..padding])?;
-        file.write_all(&(!id).to_le_bytes())?;
-        file.flush()?;
+        let mut record = Vec::with_capacity(payload_size + 4);
+        record.extend_from_slice(&(payload_size as u32).to_le_bytes());
+        record.extend_from_slice(path_bytes);
+        record.extend_from_slice(&[0; 3][..padding]);
+        record.extend_from_slice(&(!id).to_le_bytes());
+        self.open_append()?.write_all(&record)?;
         self.ids.insert(path.to_owned(), id);
         self.nodes.push(path.to_owned());
         Ok(id)
     }
 
-    fn open_append(&self) -> io::Result<fs::File> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+    fn open_append(&mut self) -> io::Result<&mut fs::File> {
+        if self.file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let new_file = !self.path.exists() || self.path.metadata()?.len() == 0;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            if new_file {
+                file.write_all(SIGNATURE)?;
+                file.write_all(&VERSION.to_le_bytes())?;
+            }
+            self.file = Some(file);
         }
-        let new_file = !self.path.exists() || self.path.metadata()?.len() == 0;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        if new_file {
-            file.write_all(SIGNATURE)?;
-            file.write_all(&VERSION.to_le_bytes())?;
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("dependency log file was not opened"))
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        if let Some(mut file) = self.file.take() {
+            file.flush()?;
         }
-        Ok(file)
+        Ok(())
     }
 }
 
@@ -314,6 +339,16 @@ pub fn deps_log_path(builddir: Option<&str>) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn write_sample_log(path: &Path) -> Vec<u8> {
+        let mut log = DepsLog::load(path.to_owned()).unwrap();
+        log.record("out.o", 1, &["foo.h".to_owned(), "bar.h".to_owned()])
+            .unwrap();
+        log.record("out2.o", 2, &["foo.h".to_owned(), "bar2.h".to_owned()])
+            .unwrap();
+        drop(log);
+        fs::read(path).unwrap()
+    }
 
     #[test]
     fn round_trips_and_recompacts() {
@@ -403,5 +438,154 @@ mod tests {
             .record("out2.o", 3, &["second.h".to_owned()])
             .unwrap();
         assert_eq!(DepsLog::load(path).unwrap().get("out2.o").unwrap().mtime, 3);
+    }
+
+    #[test]
+    fn upstream_write_read_and_reverse_dependency_cases() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        write_sample_log(&path);
+        let log = DepsLog::load(path).unwrap();
+        assert_eq!(
+            log.outputs_in_node_order().collect::<Vec<_>>(),
+            ["out.o", "out2.o"]
+        );
+        assert_eq!(
+            log.get("out.o"),
+            Some(&DepsEntry {
+                mtime: 1,
+                inputs: vec!["foo.h".to_owned(), "bar.h".to_owned()],
+            })
+        );
+        assert_eq!(
+            log.get("out2.o"),
+            Some(&DepsEntry {
+                mtime: 2,
+                inputs: vec!["foo.h".to_owned(), "bar2.h".to_owned()],
+            })
+        );
+        assert_eq!(log.first_reverse_dep("foo.h"), Some("out.o"));
+        assert_eq!(log.first_reverse_dep("bar.h"), Some("out.o"));
+    }
+
+    #[test]
+    fn upstream_large_and_duplicate_dependency_entry_cases() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        let inputs = (0..100_000)
+            .map(|index| format!("file{index}.h"))
+            .collect::<Vec<_>>();
+        let mut log = DepsLog::load(path.clone()).unwrap();
+        log.record("out.o", 1, &inputs).unwrap();
+        assert_eq!(log.get("out.o").unwrap().inputs.len(), 100_000);
+        drop(log);
+
+        let mut loaded = DepsLog::load(path.clone()).unwrap();
+        assert_eq!(loaded.get("out.o").unwrap().inputs.len(), 100_000);
+        let before = fs::metadata(&path).unwrap().len();
+        loaded.record("out.o", 1, &inputs).unwrap();
+        assert_eq!(fs::metadata(path).unwrap().len(), before);
+    }
+
+    #[test]
+    fn upstream_invalid_header_corpus() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        for contents in [
+            &b""[..],
+            &b"# ninjad"[..],
+            &b"# ninjadeps\n"[..],
+            &b"# ninjadeps\n\x01\x02"[..],
+            &b"# ninjadeps\n\x01\x02\x03\x04"[..],
+        ] {
+            fs::write(&path, contents).unwrap();
+            let log = DepsLog::load(path.clone()).unwrap();
+            assert!(log.was_invalidated(), "contents={contents:?}");
+            assert!(!path.exists(), "contents={contents:?}");
+        }
+    }
+
+    #[test]
+    fn upstream_truncation_corpus_recovers_monotonically() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        let original = write_sample_log(&path);
+        let mut prior_nodes = usize::MAX;
+        let mut prior_entries = usize::MAX;
+        for size in (1..=original.len()).rev() {
+            fs::write(&path, &original[..size]).unwrap();
+            let log = DepsLog::load(path.clone()).unwrap();
+            if size < 16 {
+                assert!(log.was_invalidated(), "size={size}");
+                continue;
+            }
+            assert!(log.nodes.len() <= prior_nodes, "size={size}");
+            assert!(log.entries.len() <= prior_entries, "size={size}");
+            prior_nodes = log.nodes.len();
+            prior_entries = log.entries.len();
+        }
+    }
+
+    #[test]
+    fn upstream_malformed_and_duplicate_path_records_recover_the_valid_prefix() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        let original = write_sample_log(&path);
+
+        for (name, bad) in [
+            ("truncated size", original[..19].to_vec()),
+            ("oversized record", {
+                let mut bad = original.clone();
+                bad[16..20].copy_from_slice(&0xffff_aa55u32.to_le_bytes());
+                bad
+            }),
+            ("undersized record", {
+                let mut bad = original.clone();
+                bad[16..20].copy_from_slice(&1u32.to_le_bytes());
+                bad
+            }),
+        ] {
+            fs::write(&path, bad).unwrap();
+            let log = DepsLog::load(path.clone()).unwrap();
+            assert!(log.was_recovered(), "{name}");
+            assert_eq!(fs::metadata(&path).unwrap().len(), 16, "{name}");
+        }
+
+        let mut duplicate = original.clone();
+        duplicate.extend_from_slice(&[
+            0x0c, 0x00, 0x00, 0x00, b'f', b'o', b'o', b'.', b'h', 0x00, 0x00, 0x00, 0xfe, 0xff,
+            0xff, 0xff,
+        ]);
+        fs::write(&path, duplicate).unwrap();
+        let recovered = DepsLog::load(path.clone()).unwrap();
+        assert!(recovered.was_recovered());
+        assert_eq!(recovered.get("out.o").unwrap().inputs.len(), 2);
+        assert_eq!(fs::metadata(&path).unwrap().len(), original.len() as u64);
+        drop(recovered);
+        let clean = DepsLog::load(path).unwrap();
+        assert!(!clean.was_recovered());
+        assert_eq!(clean.get("out.o").unwrap().inputs.len(), 2);
+    }
+
+    #[test]
+    fn upstream_recompact_removes_entries_without_live_deps_edges() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(".ninja_deps");
+        let mut log = DepsLog::load(path.clone()).unwrap();
+        log.record("out.o", 1, &["foo.h".to_owned(), "bar.h".to_owned()])
+            .unwrap();
+        log.record("other_out.o", 1, &["foo.h".to_owned(), "baz.h".to_owned()])
+            .unwrap();
+        log.record("out.o", 1, &["foo.h".to_owned()]).unwrap();
+        let before = fs::metadata(&path).unwrap().len();
+
+        log.recompact_retain(|output| output == "out.o").unwrap();
+        assert_eq!(log.get("out.o").unwrap().inputs, ["foo.h"]);
+        assert!(log.get("other_out.o").is_none());
+        assert!(fs::metadata(&path).unwrap().len() < before);
+
+        log.recompact_retain(|_| false).unwrap();
+        assert!(log.get("out.o").is_none());
+        assert_eq!(fs::metadata(path).unwrap().len(), 16);
     }
 }

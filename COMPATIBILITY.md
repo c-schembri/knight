@@ -93,6 +93,14 @@ This is an evidence ledger, not a claim of full compatibility.
   corresponding execution phase. Dependency-
   tool output and dependency-log recompaction preserve Ninja's persisted
   node-ID ordering.
+  All 10 upstream dependency-log cases are mapped, including 100,000 inputs,
+  duplicate-record suppression, reverse lookup, every truncated file length,
+  malformed record sizes, and duplicate path recovery. Once the header is
+  valid, a bad record truncates only the invalid tail and emits Ninja's
+  recovery warning instead of discarding earlier entries. Explicit
+  recompaction removes entries whose outputs no longer have a `deps` edge.
+  The writer keeps one append handle and emits each record in one write rather
+  than reopening the log for every discovered path.
 - Dyndep v1 implicit inputs, implicit outputs, and `restat`, including dyndep
   files generated during the same build and multi-level discovery where one
   loaded dyndep reveals another. Preparation iterates to a fixed point while
@@ -323,9 +331,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 77
-  library, 6 CLI, and 121 differential tests; Linux-under-WSL passes 72 library,
-  5 CLI, and 96 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 83
+  library, 6 CLI, and 123 differential tests; Linux-under-WSL passes 78 library,
+  5 CLI, and 98 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
