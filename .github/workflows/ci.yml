@@ -94,6 +94,7 @@ jobs:
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             ulimit -n 4096
             cargo test --all-targets
+            cargo test --test differential subprocess_set_supports_more_than_1024_parallel_processes -- --exact --ignored --test-threads=1
             cargo build --release
 
   unix:

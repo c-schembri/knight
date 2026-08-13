@@ -1203,6 +1203,10 @@ fn subprocess_closes_stdin_for_non_console_commands() {
 
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "netbsd",
+    ignore = "run separately so the 1,025 processes cannot starve parallel tests"
+)]
 fn subprocess_set_supports_more_than_1024_parallel_processes() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
