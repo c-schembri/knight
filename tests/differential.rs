@@ -4051,6 +4051,7 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
             "rule link\n  command = echo link $in -o $out\n",
             "build obj: cc source\n",
             "build app: link obj\n",
+            "build other: cc unique\n",
             "default app\n",
         ),
     )
@@ -4066,26 +4067,43 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
         &["-t", "inputs", "--definitely-invalid"][..],
         &["-t", "inputs", "--help=ignored"][..],
         &["-t", "inputs", "--print0=ignored"][..],
+        &["-t", "inputs", "--"][..],
+        &["-t", "inputs", "--", "-d"][..],
+        &["-t", "inputs", "-dd"][..],
+        &["-t", "inputs", "-dh"][..],
+        &["-t", "inputs", "-dfoo"][..],
         &["-t", "multi-inputs", "-x"][..],
         &["-t", "multi-inputs", "--bogus"][..],
         &["-t", "multi-inputs", "--definitely-invalid"][..],
         &["-t", "multi-inputs", "--delimiter="][..],
         &["-t", "multi-inputs", "--delimiter"][..],
         &["-t", "multi-inputs", "-d"][..],
+        &["-t", "multi-inputs", "--"][..],
+        &["-t", "multi-inputs", "--", "-d"][..],
         &["-t", "compdb", "-z"][..],
         &["-t", "compdb-targets", "-z"][..],
         &["-t", "rules", "-x"][..],
+        &["-t", "rules", "-dh"][..],
+        &["-t", "rules", "-dfoo"][..],
         &["-t", "restat", "-x"][..],
         &["-t", "restat", "--bogus"][..],
         &["-t", "restat", "--help=ignored"][..],
         &["-t", "restat", "--builddir="][..],
         &["-t", "restat", "--builddir"][..],
         &["-t", "commands", "app", "-s"][..],
+        &["-t", "commands", "other", "-ss"][..],
         &["-t", "commands", "--", "-x"][..],
         &["-t", "targets", "rule", ""][..],
         &["-t", "targets", "depth", "1trailing"][..],
         &["-t", "targets", "depth", "+2trailing"][..],
         &["-t", "rules", "ignored-operand", "-d"][..],
+        &["-t", "clean", "app", "-gr"][..],
+        &["-t", "compdb", "app", "-xx"][..],
+        &["-t", "compdb-targets", "app", "-xx"][..],
+        &["-t", "inputs", "other", "-00"][..],
+        &["-t", "inputs", "other", "-0E"][..],
+        &["-t", "inputs", "other", "-dd"][..],
+        &["-t", "multi-inputs", "other", "-00"][..],
         &["-t", "deps", "source"][..],
         &["-t", "deps", "unknown"][..],
         &["-t", "query"][..],
@@ -4115,6 +4133,64 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
             expected_error.lines().collect::<Vec<_>>(),
             "{arguments:?}"
         );
+    }
+}
+
+#[test]
+fn posixly_correct_stops_option_permutation_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let alias = temp
+        .path()
+        .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+    fs::copy(knight, &alias).unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule cc\n  command = echo cc $in -o $out\n  description = CC $out\n",
+            "build out: cc source\n",
+            "build app: phony out\n",
+            "build other: cc unique\n",
+            "default app\n",
+        ),
+    )
+    .unwrap();
+
+    for arguments in [
+        &["out", "-n"][..],
+        &["out", "-v"][..],
+        &["-C", ".", "out", "-n"][..],
+        &["--status", "x", "out", "-n"][..],
+        &["-t", "commands", "other", "-s"][..],
+        &["-t", "rules", "operand", "-d"][..],
+        &["-t", "clean", "app", "-g"][..],
+        &["-t", "compdb", "cc", "-x"][..],
+        &["-t", "compdb-targets", "other", "-x"][..],
+        &["-t", "inputs", "other", "-0"][..],
+        &["-t", "multi-inputs", "other", "-0"][..],
+        &["-t", "restat", "out", "-h"][..],
+    ] {
+        let run_ordered = |executable: &Path| {
+            Command::new(executable)
+                .current_dir(temp.path())
+                .args(arguments)
+                .env("POSIXLY_CORRECT", "1")
+                .output()
+                .unwrap()
+        };
+        let expected = run_ordered(Path::new(&ninja));
+        let actual = run_ordered(&alias);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{arguments:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
     }
 }
 
@@ -4839,6 +4915,8 @@ fn top_level_short_option_clusters_match_ninja() {
         &["-k-999999999999999999999999999999999999", "-n", "out"][..],
         &["-l-1", "-tlist"][..],
         &["-tlist"][..],
+        &["-tinputs", "-0Ed"][..],
+        &["-ntinputs", "-dd"][..],
     ] {
         let expected = run(ninja, temp.path(), arguments);
         let actual = run(knight, temp.path(), arguments);

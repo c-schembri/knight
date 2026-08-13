@@ -149,6 +149,11 @@ Knight's median lead grows from 2.3% at 1,000 inputs to 12.0% at 10,000 and
 30.8% at 50,000. Its P95 is also lower at every size. This is a clear tool-path
 win, but remains well short of the project-wide order-of-magnitude target.
 
+After extending exact getopt permutation behavior, a 50-sample 10,000-input
+regression sweep produced the same 131,890-byte output and measured Ninja at
+19.156 ms median versus Knight at 16.538 ms. Knight remained 13.7% faster by
+median and its 65.188 ms P95 was 51.5% below Ninja's 134.468 ms.
+
 ## Status output
 
 `scripts/benchmark-status.ps1` first requires newline-normalized output parity,

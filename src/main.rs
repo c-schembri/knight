@@ -438,6 +438,7 @@ fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
         tool: None,
     };
     let mut index = 0;
+    let require_order = posixly_correct();
     while index < args.len() {
         #[allow(unused_mut)]
         let mut argument = resolve_long_option(
@@ -459,6 +460,10 @@ fn parse_cli(args: Vec<String>) -> Result<Cli, String> {
                 #[cfg(windows)]
                 return Err("option '--status' requires an argument".to_owned());
             }
+        }
+        if require_order && (argument == "-" || !argument.starts_with('-')) {
+            cli.targets.extend(args[index..].iter().cloned());
+            break;
         }
         match argument.as_str() {
             "--version" => {
@@ -604,12 +609,26 @@ fn resolve_long_option(argument: &str, options: &[&str]) -> Result<String, Strin
     Ok(value.map_or_else(|| option.to_owned(), |value| format!("{option}={value}")))
 }
 
+fn posixly_correct() -> bool {
+    env::var_os("POSIXLY_CORRECT").is_some()
+}
+
 fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
     let mut expanded = Vec::with_capacity(args.len());
     let mut parse_options = true;
-    for argument in args {
-        if !parse_options || argument == "-" || !argument.starts_with('-') {
+    let require_order = posixly_correct();
+    let mut arguments = args.into_iter();
+    while let Some(argument) = arguments.next() {
+        if !parse_options {
             expanded.push(argument);
+            continue;
+        }
+        if argument == "-" || !argument.starts_with('-') {
+            expanded.push(argument);
+            if require_order {
+                expanded.extend(arguments);
+                break;
+            }
             continue;
         }
         if argument == "--" {
@@ -617,8 +636,30 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
             expanded.push(argument);
             continue;
         }
-        if argument.starts_with("--") || argument.len() == 2 {
+        if argument.starts_with("--") {
+            let takes_argument = !argument.contains('=')
+                && "--status".starts_with(argument.as_str())
+                && argument.len() > 2;
             expanded.push(argument);
+            if takes_argument && let Some(value) = arguments.next() {
+                expanded.push(value);
+            }
+            continue;
+        }
+        if argument.len() == 2 {
+            let tool = argument == "-t";
+            let takes_argument = matches!(
+                argument.as_str(),
+                "-C" | "-f" | "-j" | "-k" | "-l" | "-d" | "-t" | "-w"
+            );
+            expanded.push(argument);
+            if takes_argument && let Some(value) = arguments.next() {
+                expanded.push(value);
+            }
+            if tool {
+                expanded.extend(arguments);
+                break;
+            }
             continue;
         }
 
@@ -629,6 +670,20 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
             if matches!(option, 'C' | 'f' | 'j' | 'k' | 'l' | 'd' | 't' | 'w') {
                 if let Some((offset, _)) = characters.peek().copied() {
                     expanded.push(cluster[offset..].to_owned());
+                }
+                if option == 't' {
+                    if characters.peek().is_none()
+                        && let Some(name) = arguments.next()
+                    {
+                        expanded.push(name);
+                    }
+                    expanded.extend(arguments);
+                    return expanded;
+                }
+                if characters.peek().is_none()
+                    && let Some(value) = arguments.next()
+                {
+                    expanded.push(value);
                 }
                 break;
             }
@@ -1181,10 +1236,15 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
     let mut builddir = None;
     let mut targets = Vec::new();
     let mut index = 0;
+    let mut parse_options = true;
     while index < args.len() {
         #[allow(unused_mut)]
-        let mut argument = resolve_long_option(&args[index], &["--builddir", "--help"])?;
-        if let Some((_, value)) = args[index].split_once('=') {
+        let mut argument = if parse_options {
+            resolve_long_option(&args[index], &["--builddir", "--help"])?
+        } else {
+            args[index].clone()
+        };
+        if parse_options && let Some((_, value)) = args[index].split_once('=') {
             let option = argument
                 .split_once('=')
                 .map_or(argument.as_str(), |(name, _)| name);
@@ -1206,18 +1266,18 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
                 }
             }
         }
-        if let Some(value) = argument.strip_prefix("--builddir=") {
+        if parse_options && let Some(value) = argument.strip_prefix("--builddir=") {
             builddir = Some(value.to_owned());
-        } else if argument == "--builddir" {
+        } else if parse_options && argument == "--builddir" {
             index += 1;
             let Some(value) = args.get(index) else {
                 print_required_tool_argument("restat", "--builddir", true);
                 return tool_restat_usage();
             };
             builddir = Some(value.clone());
-        } else if argument == "-h" || argument == "--help" {
+        } else if parse_options && (argument == "-h" || argument == "--help") {
             return tool_restat_usage();
-        } else if argument.starts_with('-') {
+        } else if parse_options && argument.starts_with('-') {
             if argument.starts_with("--") {
                 print_unrecognized_tool_option("restat", &argument);
             } else {
@@ -1230,6 +1290,9 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
             return tool_restat_usage();
         } else {
             targets.push(argument.clone());
+            if posixly_correct() {
+                parse_options = false;
+            }
         }
         index += 1;
     }
@@ -1434,8 +1497,13 @@ fn tool_commands(manifest: &Manifest, args: &[String]) -> Result<(), String> {
             }
         } else {
             targets.push(argument.clone());
+            if posixly_correct() {
+                parse_options = false;
+            }
         }
     }
+    #[cfg(windows)]
+    let targets = windows_getopt_operands(args, &[], &[], &[]);
     let targets = if targets.is_empty() {
         default_targets(manifest)?
     } else {
@@ -1488,6 +1556,77 @@ fn print_unrecognized_tool_option(tool: &str, argument: &str) {
     eprintln!("{tool}: unrecognized option '{argument}'");
 }
 
+#[cfg(windows)]
+fn windows_getopt_operands(
+    args: &[String],
+    required_short: &[char],
+    long_options: &[&str],
+    required_long: &[&str],
+) -> Vec<String> {
+    let mut operands = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == "--" {
+            operands.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        if argument == "-" || !argument.starts_with('-') {
+            if posixly_correct() {
+                operands.extend(args[index..].iter().cloned());
+                break;
+            }
+            operands.push(argument.clone());
+            index += 1;
+            continue;
+        }
+
+        let mut cluster = &argument[1..];
+        if let Some(long_name) = argument.strip_prefix("--") {
+            let (name, attached) = long_name
+                .split_once('=')
+                .map_or((long_name, false), |(name, _)| (name, true));
+            let exact = long_options.iter().copied().find(|option| *option == name);
+            let resolved = exact.or_else(|| {
+                let mut matches = long_options
+                    .iter()
+                    .copied()
+                    .filter(|option| option.starts_with(name));
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            });
+            if let Some(option) = resolved {
+                if required_long.contains(&option) && !attached {
+                    index += 1;
+                }
+                index += 1;
+                continue;
+            }
+            cluster = &argument[2..];
+        }
+
+        let mut calls = 0;
+        let mut characters = cluster.chars().peekable();
+        while let Some(option) = characters.next() {
+            calls += 1;
+            if required_short.contains(&option) {
+                if characters.peek().is_none() {
+                    index += 1;
+                }
+                break;
+            }
+        }
+        if calls > 1 {
+            // Ninja's bundled getopt forgets the pending permutation when it
+            // resumes a short-option cluster on the next call. Operands that
+            // preceded that cluster consequently fall before the final optind.
+            operands.clear();
+        }
+        index += 1;
+    }
+    operands
+}
+
 fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> Result<(), String> {
     let expanded = manifest_with_clean_dyndeps(manifest);
     let manifest = expanded.as_ref().unwrap_or(manifest);
@@ -1512,8 +1651,13 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
             }
         } else {
             operands.push(arg.clone());
+            if posixly_correct() {
+                parse_options = false;
+            }
         }
     }
+    #[cfg(windows)]
+    let operands = windows_getopt_operands(args, &[], &[], &[]);
     if rules_mode && operands.is_empty() {
         return Err("expected a rule to clean".to_owned());
     }
@@ -1832,6 +1976,11 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
         };
         #[allow(unused_mut)]
         let mut argument = resolve_long_option(&args[index], long_options)?;
+        if parse_options && argument == "--" {
+            parse_options = false;
+            index += 1;
+            continue;
+        }
         #[cfg(windows)]
         if parse_options && argument.starts_with("--") {
             let name = argument
@@ -1872,9 +2021,7 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 }
             }
         }
-        if parse_options && argument == "--" {
-            parse_options = false;
-        } else if parse_options && argument.starts_with("--") {
+        if parse_options && argument.starts_with("--") {
             match argument.as_str() {
                 "--help" => return tool_inputs_usage(grouped),
                 "--print0" => terminator = "\0",
@@ -1932,8 +2079,29 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
             }
         } else {
             targets.push(argument.clone());
+            if posixly_correct() {
+                parse_options = false;
+            }
         }
         index += 1;
+    }
+    #[cfg(windows)]
+    {
+        targets = if grouped {
+            windows_getopt_operands(
+                args,
+                &['d'],
+                &["help", "delimiter", "print0"],
+                &["delimiter"],
+            )
+        } else {
+            windows_getopt_operands(
+                args,
+                &[],
+                &["help", "no-shell-escape", "print0", "dependency-order"],
+                &[],
+            )
+        };
     }
     if targets.is_empty() {
         targets = default_targets(manifest)?;
@@ -2339,8 +2507,13 @@ fn parse_compdb_args(args: &[String], for_targets: bool) -> Result<(bool, Vec<St
             }
         } else {
             operands.push(arg.clone());
+            if posixly_correct() {
+                parse_options = false;
+            }
         }
     }
+    #[cfg(windows)]
+    let operands = windows_getopt_operands(args, &[], &[], &[]);
     Ok((expand_rsp, operands))
 }
 
@@ -2505,6 +2678,8 @@ fn tool_rules(manifest: &Manifest, args: &[String]) -> Result<(), String> {
                     }
                 }
             }
+        } else if posixly_correct() {
+            parse_options = false;
         }
     }
     let mut rules = HashMap::new();
@@ -2781,6 +2956,17 @@ mod tests {
                 "--",
                 "-target",
             ]
+        );
+
+        let tool_arguments = expand_short_option_clusters(
+            ["-nv", "-tinputs", "-0Ed", "--", "-d"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        assert_eq!(
+            tool_arguments,
+            ["-n", "-v", "-t", "inputs", "-0Ed", "--", "-d"]
         );
     }
 

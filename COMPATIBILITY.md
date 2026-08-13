@@ -156,6 +156,10 @@ This is an evidence ledger, not a claim of full compatibility.
   `restat`; the deprecated Windows `msvc` helper follows its getopt/usage exit
   behavior as well. Unknown Windows `getopt_long` words preserve its unusual
   fallback to a short-option cluster, including an initially valid `d` option.
+  Top-level cluster expansion stops at `-t`, leaving tool clusters intact for
+  the selected parser. The bundled Windows `getopt` operand permutation quirk
+  after multi-character clusters is reproduced on Windows, and
+  `POSIXLY_CORRECT` disables operand permutation at both levels like upstream.
   `inputs` uses a single collector
   across all requested targets, matching Ninja's shared-input deduplication,
   and sorts rendered shell-escaped paths rather than their raw spellings.
@@ -261,8 +265,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 66
-  library, 2 CLI, and 114 differential tests; Linux-under-WSL passes 65 library,
-  2 CLI, and 87 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 115 differential tests; Linux-under-WSL passes 65 library,
+  2 CLI, and 88 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
