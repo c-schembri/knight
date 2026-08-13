@@ -363,7 +363,7 @@ fn multi_output_restat_only_cleans_dependents_of_unchanged_outputs() {
     let ninja = Path::new(&ninja);
     let manifest = concat!(
         "rule generate\n",
-        "  command = if [ ! -e out1 ]; then printf first > out1; touch -d @1 out1; printf keep > out2; else printf second > out1; touch -d @2 out1; fi\n",
+        "  command = if [ ! -e out1 ]; then printf first > out1; python3 -c \"import os; os.utime('out1', (1, 1))\"; printf keep > out2; else printf second > out1; python3 -c \"import os; os.utime('out1', (2, 2))\"; fi\n",
         "  restat = 1\n",
         "rule copy\n",
         "  command = cat $in > $out\n",
@@ -1195,10 +1195,24 @@ fn subprocess_set_supports_more_than_1024_parallel_processes() {
     let args = ["--quiet", "-j1025"];
     let expected = run(Path::new(&ninja), expected_dir.path(), &args);
     let actual = run(knight, actual_dir.path(), &args);
-    assert_eq!(actual.status.code(), expected.status.code());
-    assert_eq!(actual.stdout, expected.stdout);
-    assert_eq!(actual.stderr, expected.stderr);
+    assert!(
+        actual.status.success(),
+        "Knight failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&actual.stderr)
+    );
     assert_eq!(actual.stdout, vec![b'\n'; PROCESS_COUNT]);
+    if expected.status.success() {
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    } else {
+        #[cfg(not(target_os = "macos"))]
+        panic!(
+            "Ninja failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&expected.stdout),
+            String::from_utf8_lossy(&expected.stderr)
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -2335,7 +2349,7 @@ fn epoch_timestamp_is_recorded_as_one_in_deps_log_like_ninja() {
         let temp = tempdir().unwrap();
         fs::write(
             temp.path().join("build.ninja"),
-            "rule epoch\n  command = touch $out && touch -d @0 $out && printf 'out:' > out.d\n  deps = gcc\n  depfile = out.d\nbuild out: epoch\n",
+            "rule epoch\n  command = touch $out && python3 -c \"import os; os.utime('out', (0, 0))\" && printf 'out:' > out.d\n  deps = gcc\n  depfile = out.d\nbuild out: epoch\n",
         )
         .unwrap();
         let result = run(executable, temp.path(), &[]);

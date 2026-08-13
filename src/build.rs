@@ -2540,10 +2540,18 @@ fn run_build_prepared<'a>(
                 } else if let Some(token) = job_token.take() {
                     Some(JobSlot::Explicit { _token: token })
                 } else {
-                    let token = client
-                        .try_acquire()
-                        .map_err(|error| format!("acquiring jobserver token: {error}"))?
-                        .map(|token| JobSlot::Explicit { _token: token });
+                    let token = match client.try_acquire() {
+                        Ok(token) => token,
+                        // Inherited pipe descriptors cannot be switched to
+                        // nonblocking mode on macOS without changing the
+                        // parent's shared file description. The helper thread
+                        // below uses the supported blocking acquisition path.
+                        Err(error) if error.kind() == io::ErrorKind::Unsupported => None,
+                        Err(error) => {
+                            return Err(format!("acquiring jobserver token: {error}"));
+                        }
+                    }
+                    .map(|token| JobSlot::Explicit { _token: token });
                     if token.is_none()
                         && !job_token_requested
                         && let Some(helper) = &jobserver_helper
@@ -5017,10 +5025,13 @@ fn modified_ns(path: &Path) -> Option<u128> {
 fn windows_modified_ns(path: &Path) -> io::Result<Option<u128>> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{
-        ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError,
+        CloseHandle, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileAttributesExW, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, GetFileAttributesExW, GetFileExInfoStandard,
+        GetFileInformationByHandle, OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_DATA,
     };
 
     let wide = path
@@ -5052,8 +5063,48 @@ fn windows_modified_ns(path: &Path) -> io::Result<Option<u128>> {
     }
     // SAFETY: a successful call initialized the complete structure.
     let data = unsafe { data.assume_init() };
-    let filetime = ((data.ftLastWriteTime.dwHighDateTime as u64) << 32)
-        | data.ftLastWriteTime.dwLowDateTime as u64;
+    let last_write_time = if data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        // GetFileAttributesEx reports the link's own timestamp. Ninja opens a
+        // reparse point normally so the handle resolves to the target.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = unsafe { GetLastError() };
+            return if matches!(
+                error,
+                ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_DIRECTORY
+            ) {
+                Ok(None)
+            } else {
+                Err(io::Error::from_raw_os_error(error as i32))
+            };
+        }
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        let ok = unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) };
+        let error = if ok == 0 {
+            Some(io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(handle) };
+        if let Some(error) = error {
+            return Err(error);
+        }
+        unsafe { information.assume_init() }.ftLastWriteTime
+    } else {
+        data.ftLastWriteTime
+    };
+    let filetime =
+        ((last_write_time.dwHighDateTime as u64) << 32) | last_write_time.dwLowDateTime as u64;
     Ok(Some(
         filetime.saturating_sub(126_227_704_000_000_000) as u128
     ))
