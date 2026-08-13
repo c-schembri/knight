@@ -45,7 +45,7 @@ jobs:
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
-            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
             cargo test --all-targets

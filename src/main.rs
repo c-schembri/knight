@@ -1753,16 +1753,24 @@ fn tool_commands_usage() -> Result<(), String> {
 }
 
 fn print_invalid_tool_option(tool: &str, option: char) {
-    #[cfg(windows)]
-    eprintln!("{tool}: invalid option -- `-{option}'");
     #[cfg(any(
         target_os = "dragonfly",
         target_os = "freebsd",
-        target_os = "macos",
         target_os = "netbsd",
         target_os = "openbsd"
     ))]
+    let _ = tool;
+    #[cfg(windows)]
+    eprintln!("{tool}: invalid option -- `-{option}'");
+    #[cfg(target_os = "macos")]
     eprintln!("{tool}: illegal option -- {option}");
+    #[cfg(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    eprintln!("{}: illegal option -- {option}", program_name());
     #[cfg(all(
         not(windows),
         not(any(
