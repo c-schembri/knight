@@ -1571,6 +1571,43 @@ fn two_level_dyndep_discovery_reaches_a_fixed_point() {
     assert_eq!(orders[1], ["dd1", "dd0", "source", "middle", "final"]);
 }
 
+#[test]
+fn ready_dyndep_outputs_are_loaded_before_missing_input_validation() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule run\n  command = echo run\n",
+            "build out: run in || dd\n  dyndep = dd\n",
+            "build in: run circ\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("dd"),
+        "ninja_dyndep_version = 1\nbuild out | circ: dyndep\n",
+    )
+    .unwrap();
+
+    let expected = run(ninja, temp.path(), &["-n", "out"]);
+    let actual = run(knight, temp.path(), &["-n", "out"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    let expected_error = String::from_utf8_lossy(&expected.stderr)
+        .replace('\r', "")
+        .replace("ninja:", "tool:");
+    let actual_error = String::from_utf8_lossy(&actual.stderr)
+        .replace('\r', "")
+        .replace("knight:", "tool:");
+    assert_eq!(actual_error, expected_error);
+}
+
 #[cfg(windows)]
 #[test]
 fn generated_dyndep_keeps_independent_requested_work_concurrent() {
@@ -2855,7 +2892,23 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
     .unwrap();
 
     for arguments in [
+        &["-t", "commands", "-x"][..],
+        &["-t", "clean", "cc"][..],
+        &["-t", "clean", "-r", "app"][..],
+        &["-t", "clean", "-x"][..],
+        &["-t", "inputs", "-x"][..],
+        &["-t", "inputs", "--bogus"][..],
+        &["-t", "multi-inputs", "-x"][..],
+        &["-t", "multi-inputs", "--bogus"][..],
+        &["-t", "compdb", "-z"][..],
+        &["-t", "compdb-targets", "-z"][..],
+        &["-t", "rules", "-x"][..],
+        &["-t", "restat", "-x"][..],
+        &["-t", "restat", "--bogus"][..],
         &["-t", "commands", "app", "-s"][..],
+        &["-t", "commands", "--", "-x"][..],
+        &["-t", "targets", "depth", "1trailing"][..],
+        &["-t", "targets", "depth", "+2trailing"][..],
         &["-t", "rules", "ignored-operand", "-d"][..],
         &["-t", "deps", "source"][..],
         &["-t", "deps", "unknown"][..],
@@ -3454,6 +3507,47 @@ fn top_level_short_option_clusters_match_ninja() {
 }
 
 #[test]
+fn long_option_abbreviations_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "rule echo\n  command = echo built > $out\nbuild out: echo input\ndefault out\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("input"), "input\n").unwrap();
+
+    for arguments in [
+        &["--verb", "-n"][..],
+        &["--qui", "-n"][..],
+        &["--sta", "<$finished/$total> $description", "-n"][..],
+        &["-l1trailing", "-tlist"][..],
+        &["-t", "inputs", "--dependency-o", "out"][..],
+        &["-t", "inputs", "--no-shell", "out"][..],
+        &["-t", "multi-inputs", "--delim=::", "out"][..],
+    ] {
+        let expected = run(ninja, temp.path(), arguments);
+        let actual = run(knight, temp.path(), arguments);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{arguments:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout).replace("\r\n", "\n"),
+            String::from_utf8_lossy(&expected.stdout).replace("\r\n", "\n"),
+            "{arguments:?}"
+        );
+        assert_eq!(actual.stderr, expected.stderr, "{arguments:?}");
+    }
+}
+
+#[test]
 fn graph_tool_uses_ninja_graphviz_shape_and_implicit_defaults() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let temp = tempdir().unwrap();
@@ -3469,6 +3563,46 @@ fn graph_tool_uses_ninja_graphviz_shape_and_implicit_defaults() {
     assert!(graph.contains("\"a\" -> \"final\" [label=\" phony\"]"));
     assert!(graph.contains("\"source\" -> \"a\" [label=\" phony\"]"));
     assert!(!graph.contains("shape=ellipse"));
+}
+
+#[test]
+fn graph_loads_only_reachable_dyndeps_and_warns_without_failing() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule generate\n  command = echo generated\n",
+                "build good: generate good.in || good.dd\n  dyndep = good.dd\n",
+                "build bad: generate bad.in || bad.dd\n  dyndep = bad.dd\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("good.dd"),
+            "ninja_dyndep_version = 1\nbuild good | dynamic.out: dyndep | dynamic.in\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("bad.dd"), "malformed\n").unwrap();
+
+        let good = run(executable, temp.path(), &["-t", "graph", "good"]);
+        assert!(good.status.success(), "{}", executable.display());
+        assert!(good.stderr.is_empty(), "{}", executable.display());
+        let good_graph = String::from_utf8_lossy(&good.stdout);
+        assert!(good_graph.contains("dynamic.in"));
+
+        let bad = run(executable, temp.path(), &["-t", "graph", "bad"]);
+        assert!(bad.status.success(), "{}", executable.display());
+        assert!(!bad.stderr.is_empty(), "{}", executable.display());
+        let bad_graph = String::from_utf8_lossy(&bad.stdout);
+        assert!(bad_graph.contains("bad.in"));
+        assert!(!bad_graph.contains("dynamic."));
+    }
 }
 
 #[test]
@@ -3634,50 +3768,214 @@ fn clean_loads_dyndeps_and_removes_dynamic_outputs() {
     }
 }
 
+#[test]
+fn clean_ignores_malformed_dyndeps_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "rule generate\n  command = echo generated\nbuild out: generate in || dd\n  dyndep = dd\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("dd"), "malformed\n").unwrap();
+        fs::write(temp.path().join("out"), "output\n").unwrap();
+        let cleaned = run(executable, temp.path(), &["-t", "clean"]);
+        assert!(
+            cleaned.status.success(),
+            "executable={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&cleaned.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&cleaned.stdout).replace('\r', ""),
+            "Cleaning... 1 files.\n"
+        );
+        assert!(cleaned.stderr.is_empty());
+        assert!(!temp.path().join("out").exists());
+    }
+}
+
+#[test]
+fn clean_removes_output_directories_and_continues_after_errors_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+
+    for nonempty in [false, true] {
+        let mut expected = None;
+        for executable in [ninja, knight] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                "rule generate\n  command = echo generated\nbuild outdir: generate\nbuild other: generate\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join("outdir")).unwrap();
+            if nonempty {
+                fs::write(temp.path().join("outdir/child"), "child\n").unwrap();
+            }
+            fs::write(temp.path().join("other"), "other\n").unwrap();
+
+            let cleaned = run(executable, temp.path(), &["-t", "clean"]);
+            let stdout = String::from_utf8_lossy(&cleaned.stdout).replace('\r', "");
+            let stderr = String::from_utf8_lossy(&cleaned.stderr)
+                .replace('\r', "")
+                .replace("ninja:", "tool:")
+                .replace("knight:", "tool:");
+            let result = (cleaned.status.code(), stdout, stderr);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected, "nonempty={nonempty}");
+            } else {
+                expected = Some(result);
+            }
+            assert!(!temp.path().join("other").exists());
+            assert_eq!(temp.path().join("outdir").exists(), nonempty);
+        }
+    }
+}
+
+#[test]
+fn clean_phony_rule_removes_phony_paths_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let mut expected = None;
+    for executable in [ninja, knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "build alias: phony input\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("alias"), "stale phony path\n").unwrap();
+        fs::write(temp.path().join("input"), "input\n").unwrap();
+        let cleaned = run(executable, temp.path(), &["-t", "clean", "-r", "phony"]);
+        let result = (
+            cleaned.status.code(),
+            String::from_utf8_lossy(&cleaned.stdout).replace('\r', ""),
+            String::from_utf8_lossy(&cleaned.stderr).replace('\r', ""),
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert!(!temp.path().join("alias").exists());
+        assert!(temp.path().join("input").exists());
+    }
+}
+
 #[cfg(windows)]
 #[test]
-fn console_pool_is_exclusive_with_other_commands() {
+fn console_pool_overlaps_work_and_buffers_its_output_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
-    let temp = tempdir().unwrap();
-    fs::write(
-        temp.path().join("build.ninja"),
-        concat!(
-            "rule foreground\n",
-            "  command = powershell -NoProfile -Command \"Add-Content trace console-start; ",
-            "Write-Output console-output; Start-Sleep -Milliseconds 250; ",
-            "Add-Content trace console-end; Set-Content $out done\"\n",
-            "  description = CONSOLE\n",
-            "  pool = console\n",
-            "rule background\n",
-            "  command = powershell -NoProfile -Command \"Add-Content trace normal; Set-Content $out done\"\n",
-            "build foreground.out: foreground\n",
-            "build background.out: background\n",
-            "build all: phony foreground.out background.out\n",
-            "default all\n",
-        ),
-    )
-    .unwrap();
-    let built = run(knight, temp.path(), &["-j", "2"]);
-    assert!(
-        built.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&built.stdout),
-        String::from_utf8_lossy(&built.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(temp.path().join("trace"))
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        ["console-start", "console-end", "normal"]
-    );
-    let stdout = String::from_utf8_lossy(&built.stdout);
-    let status_position = stdout.find("[0/2] CONSOLE").unwrap();
-    let output_position = stdout.find("console-output").unwrap();
-    assert!(
-        status_position < output_position,
-        "console status must precede live output: {stdout}"
-    );
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule foreground\n",
+                "  command = powershell -NoProfile -Command \"Set-Content console-start ready; ",
+                "for ($$i=0; $$i -lt 100 -and -not (Test-Path normal-done); $$i++) ",
+                "{ Start-Sleep -Milliseconds 20 }; if (-not (Test-Path normal-done)) { exit 9 }; ",
+                "Write-Output console-output; Set-Content $out done\"\n",
+                "  description = CONSOLE\n",
+                "  pool = console\n",
+                "rule background\n",
+                "  command = powershell -NoProfile -Command \"for ($$i=0; $$i -lt 100 ",
+                "-and -not (Test-Path console-start); $$i++) { Start-Sleep -Milliseconds 20 }; ",
+                "if (-not (Test-Path console-start)) { exit 8 }; Set-Content normal-done ready; ",
+                "Write-Output normal-output; Set-Content $out done\"\n",
+                "  description = NORMAL\n",
+                "build foreground.out: foreground\n",
+                "build background.out: background\n",
+                "build all: phony foreground.out background.out\n",
+                "default all\n",
+            ),
+        )
+        .unwrap();
+        let built = run(executable, temp.path(), &["-j", "2"]);
+        assert!(
+            built.status.success(),
+            "executable={} stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&built.stdout);
+        let status_position = stdout.find("[0/2] CONSOLE").unwrap();
+        let console_output = stdout.find("console-output").unwrap();
+        let normal_output = stdout.find("normal-output").unwrap();
+        assert!(
+            status_position < console_output && console_output < normal_output,
+            "{stdout}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn console_pool_overlaps_posix_work_and_buffers_its_output_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule foreground\n",
+                "  command = touch console-start; for i in $$(seq 1 100); do ",
+                "[ -e normal-done ] && break; sleep 0.02; done; ",
+                "[ -e normal-done ] || exit 9; echo console-output; touch $out\n",
+                "  description = CONSOLE\n",
+                "  pool = console\n",
+                "rule background\n",
+                "  command = for i in $$(seq 1 100); do [ -e console-start ] && break; ",
+                "sleep 0.02; done; [ -e console-start ] || exit 8; touch normal-done; ",
+                "echo normal-output; touch $out\n",
+                "  description = NORMAL\n",
+                "build foreground.out: foreground\n",
+                "build background.out: background\n",
+                "build all: phony foreground.out background.out\n",
+                "default all\n",
+            ),
+        )
+        .unwrap();
+        let built = run(executable, temp.path(), &["-j", "2"]);
+        assert!(
+            built.status.success(),
+            "executable={} stdout={} stderr={}",
+            executable.display(),
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&built.stdout);
+        let status_position = stdout.find("[0/2] CONSOLE").unwrap();
+        let console_output = stdout.find("console-output").unwrap();
+        let normal_output = stdout.find("normal-output").unwrap();
+        assert!(
+            status_position < console_output && console_output < normal_output,
+            "{stdout}"
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -3903,6 +4201,25 @@ fn interrupt_terminates_the_spawned_process_tree() {
     assert_eq!(
         fs::read_to_string(temp.path().join("out")).unwrap(),
         "retained"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn child_exit_130_is_an_interrupted_build_like_ninja() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "rule stop\n  command = exit 130\nbuild out: stop\ndefault out\n",
+    )
+    .unwrap();
+    let output = run(knight, temp.path(), &[]);
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "knight: build stopped: interrupted by user.\n"
     );
 }
 

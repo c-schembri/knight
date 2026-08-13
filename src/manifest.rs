@@ -1333,14 +1333,17 @@ pub fn spellcheck<'a>(
     text: &str,
     candidates: impl IntoIterator<Item = &'a str>,
 ) -> Option<&'a str> {
-    candidates
-        .into_iter()
-        .filter_map(|candidate| {
-            let distance = edit_distance(candidate.as_bytes(), text.as_bytes(), 3);
-            (distance <= 3).then_some((distance, candidate))
-        })
-        .min_by(|left, right| left.cmp(right))
-        .map(|(_, candidate)| candidate)
+    let mut best = None;
+    let mut best_distance = 4;
+    for candidate in candidates {
+        let distance = edit_distance(candidate.as_bytes(), text.as_bytes(), 3);
+        // Ninja retains the first candidate at the minimum edit distance.
+        if distance < best_distance {
+            best = Some(candidate);
+            best_distance = distance;
+        }
+    }
+    best
 }
 
 fn edit_distance(left: &[u8], right: &[u8], maximum: usize) -> usize {

@@ -62,7 +62,8 @@ This is an evidence ledger, not a claim of full compatibility.
   held until the relevant file is loaded. Version suffixes, final-newline
   requirements, and per-edge duplicate-statement detection follow Ninja.
 - Parallel command execution, longest-remaining-path scheduling with stable
-  declaration-order ties, exclusive/live console pools, default/custom pool
+  declaration-order ties, depth-one/live console pools with buffered output
+  from concurrent ordinary work, default/custom pool
   limits (including zero-depth meaning unlimited), and Ninja-compatible
   ready-edge pool reservations, including multi-output notification order.
   Response files, inherited
@@ -74,7 +75,9 @@ This is an evidence ledger, not a claim of full compatibility.
   attached option values are accepted, non-positive `-k` is unlimited, and
   the default parallelism uses Ninja's processor-count heuristic. Status ETA
   and predicted progress use Ninja's historical per-edge CPU-time model,
-  including its stale-history rejection heuristic.
+  including its stale-history rejection heuristic. GNU-style unambiguous long-
+  option abbreviations are accepted at top level and by `inputs`,
+  `multi-inputs`, and `restat`.
 - Debug modes `explain`, `keepdepfile`, `keeprsp`, and `nostatcache`, plus the
   `phonycycle` warning policy, including the legacy self-reference behavior
   exposed by graph tools. `-d stats` reports manifest, metadata, closure,
@@ -93,8 +96,11 @@ This is an evidence ledger, not a claim of full compatibility.
   delimiters, have differential coverage. `inputs` uses a single collector
   across all requested targets, matching Ninja's shared-input deduplication,
   and sorts rendered shell-escaped paths rather than their raw spellings.
-  Cleaning loads dyndeps, honors
-  dry-run/verbose/quiet, and counts auxiliary depfiles and response files.
+  Cleaning loads valid dyndeps while tolerating malformed ones, honors
+  dry-run/verbose/quiet, removes empty output directories, continues after
+  individual removal failures, and counts auxiliary depfiles and response
+  files. Target cleaning traverses prerequisites, while rule cleaning retains
+  Ninja's distinct behavior for paths produced by the built-in `phony` rule.
   Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
   phony-edge filtering behavior. Compilation databases use Ninja's exact
   pretty-printed JSON shape, and `compdb-targets` rejects input-only nodes as
@@ -121,7 +127,9 @@ This is an evidence ledger, not a claim of full compatibility.
   silently accepted as targets.
 - `graph` emits Ninja-shaped Graphviz output with implicit root selection,
   direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
-  dotted order-only edges. IDs remain deterministic rather than pointer-based.
+  dotted order-only edges. It loads only dyndeps reachable from the displayed
+  roots and warns without failing when one is missing or malformed. IDs remain
+  deterministic rather than pointer-based.
 - CMake configure, compiler detection, build, no-op rebuild, manifest
   regeneration, and header-triggered rebuild on Windows.
 - Iterative dependency traversal verified on a 50,000-edge chain without call
@@ -152,21 +160,21 @@ This is an evidence ledger, not a claim of full compatibility.
   `ninja:`/`ninja explain:` prefixes. `-d explain` identifies the dirty input
   that actually propagates through each edge, respects clean restat pruning,
   and reports dyndep loads. Knight intentionally emits a missing-output reason
-  once rather than reproducing Ninja's known duplicate dyndep explanation.
+  once, while an executable named `ninja` reproduces Ninja's legacy duplicate
+  dyndep explanation and build-stop summaries for drop-in output parity.
 
 ## Not yet complete
 
 - Exact semantics for every tool option.
 - Full lexical and diagnostic-text parity across Ninja's complete test corpus.
-  A staged run of Ninja's own POSIX `misc/output_test.py` currently passes 21
-  of 24 tests unchanged. The remaining three assertions require Ninja's known
-  duplicate dyndep explanation or discard Knight's more specific dynamic-
-  output and failed-command summaries. Smart-terminal progress, invocation
-  identity, `compdb-targets`, input ordering, absent-output scheduling, and
-  signal-status cases pass upstream unchanged.
+  Ninja's own POSIX `misc/output_test.py` now passes all 24 tests unchanged,
+  including smart-terminal progress, invocation identity, `compdb-targets`,
+  input ordering, absent-output scheduling, dyndep diagnostics, child exit
+  status 130, and signal-status cases. Wider upstream unit-test coverage is
+  still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 1 CLI, and 80 differential tests; Linux-under-WSL passes 62 library,
-  1 CLI, and 48 differential tests. Release builds, clippy, a Windows-hosted
+  library, 1 CLI, and 86 differential tests; Linux-under-WSL passes 62 library,
+  1 CLI, and 56 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

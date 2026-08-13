@@ -131,20 +131,25 @@ pub fn install_interrupt_handler() -> Result<(), String> {
 #[cfg(unix)]
 pub fn install_interrupt_handler() -> Result<(), String> {
     ctrlc::set_handler(|| {
-        if let Some(groups) = ACTIVE_PROCESS_GROUPS.get()
-            && let Ok(groups) = groups.try_lock()
-        {
-            for group in groups.iter() {
-                // SAFETY: each id is recorded immediately after spawning a
-                // child whose process group id equals its process id.
-                unsafe { libc::kill(-(*group as i32), libc::SIGTERM) };
-            }
-        }
+        terminate_active_process_groups();
         cleanup_interrupted_outputs();
         // Ninja reports every handled POSIX termination signal as 128 + SIGINT.
         std::process::exit(130);
     })
     .map_err(|error| format!("installing interrupt handler: {error}"))
+}
+
+#[cfg(unix)]
+fn terminate_active_process_groups() {
+    if let Some(groups) = ACTIVE_PROCESS_GROUPS.get()
+        && let Ok(groups) = groups.try_lock()
+    {
+        for group in groups.iter() {
+            // SAFETY: each id is recorded immediately after spawning a child
+            // whose process group id equals its process id.
+            unsafe { libc::kill(-(*group as i32), libc::SIGTERM) };
+        }
+    }
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -1195,7 +1200,11 @@ fn dyndep_prebuild_targets(
     let mut selected = targets.iter().cloned().collect::<HashSet<_>>();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
+        let has_missing_source = edge
+            .inputs()
+            .any(|input| !outputs.contains_key(input) && !Path::new(input).exists());
         if !unsafe_edge[edge_id]
+            && !has_missing_source
             && edge.rule != "phony"
             && let Some(output) = edge.outputs().next()
             && selected.insert(output.to_owned())
@@ -1557,7 +1566,6 @@ fn run_build_prepared<'a>(
     let mut failed_prerequisite = vec![false; manifest.edges.len()];
     let mut ran = vec![false; manifest.edges.len()];
     let mut running = 0usize;
-    let mut console_running = false;
     let mut implicit_job_slot = options.jobserver.is_some();
     let mut job_slots = HashMap::<usize, JobSlot>::new();
     let mut pool_usage = HashMap::<String, usize>::new();
@@ -1671,6 +1679,21 @@ fn run_build_prepared<'a>(
     if options.explain {
         for dyndep in &progress.loaded_dyndeps {
             eprintln!("{} explain: loading dyndep file '{dyndep}'", program_name());
+        }
+        if program_name() == "ninja" && !progress.loaded_dyndeps.is_empty() {
+            for &edge_id in &closure {
+                let edge = &manifest.edges[edge_id];
+                if edge.rule != "phony"
+                    && !evaluate_unescaped_binding(manifest, edge, "dyndep").is_empty()
+                    && let Some(output) = edge
+                        .outputs()
+                        .find(|output| stat_cache.get(output).is_none())
+                {
+                    // Ninja currently reports this once during dyndep loading
+                    // and again during the normal dirty-edge scan.
+                    eprintln!("ninja explain: output {output} doesn't exist");
+                }
+            }
         }
     }
 
@@ -1890,16 +1913,12 @@ fn run_build_prepared<'a>(
                 made_progress = true;
                 continue;
             }
-            if stop_starting || !can_run_more(running, options) || console_running {
+            if stop_starting || !can_run_more(running, options) {
                 ready.push((critical_path[edge_id], Reverse(edge_id)));
                 continue;
             }
             let pool = evaluated.pool.clone();
             let is_console = pool.as_deref() == Some("console");
-            if is_console && running != 0 {
-                ready.push((critical_path[edge_id], Reverse(edge_id)));
-                continue;
-            }
             if let Some(client) = &options.jobserver {
                 let slot = if implicit_job_slot {
                     implicit_job_slot = false;
@@ -1940,6 +1959,9 @@ fn run_build_prepared<'a>(
                 if is_console {
                     printer.finish_line()?;
                 }
+            }
+            if is_console {
+                printer.suspend();
             }
             for output in edge.outputs() {
                 create_parent_directory(Path::new(output))?;
@@ -2011,7 +2033,6 @@ fn run_build_prepared<'a>(
                 });
             });
             running += 1;
-            console_running |= is_console;
             made_progress = true;
         }
 
@@ -2066,7 +2087,6 @@ fn run_build_prepared<'a>(
         let completion = rx
             .recv()
             .map_err(|_| "command worker terminated unexpectedly")?;
-        unregister_active_cleanup(completion.edge);
         running -= 1;
         let edge = &manifest.edges[completion.edge];
         if let Some(slot) = job_slots.remove(&completion.edge)
@@ -2077,7 +2097,7 @@ fn run_build_prepared<'a>(
         let pool = edge_pool(manifest, edge);
         let was_console = pool.as_deref() == Some("console");
         if was_console {
-            console_running = false;
+            printer.resume()?;
         }
         release_pool_edge(
             manifest,
@@ -2088,6 +2108,14 @@ fn run_build_prepared<'a>(
         let mut output = completion
             .output
             .map_err(|error| format!("starting command '{}': {error}", completion.command))?;
+        #[cfg(unix)]
+        if output.status.code() == Some(130) {
+            LAST_BUILD_EXIT_CODE.with(|code| code.set(130));
+            terminate_active_process_groups();
+            cleanup_interrupted_outputs();
+            return Err("build stopped: interrupted by user.".to_owned());
+        }
+        unregister_active_cleanup(completion.edge);
         let dependency_result =
             extract_dependencies(manifest, edge, &mut output, options.keep_depfile);
         if status.tracks_prediction() {
@@ -3178,10 +3206,18 @@ fn dependency_closure(
                     });
                 }
                 1 => {
-                    return Err(format!(
-                        "dependency cycle involving '{}'",
-                        edge_label(&manifest.edges[producer])
-                    ));
+                    let start = stack
+                        .iter()
+                        .position(|frame| frame.edge == producer)
+                        .unwrap_or(0);
+                    let mut cycle = vec![input.to_owned()];
+                    cycle.extend(
+                        stack[start + 1..]
+                            .iter()
+                            .map(|frame| edge_label(&manifest.edges[frame.edge]).to_owned()),
+                    );
+                    cycle.push(input.to_owned());
+                    return Err(format!("dependency cycle: {}", cycle.join(" -> ")));
                 }
                 _ => {}
             }
@@ -4075,6 +4111,7 @@ struct BuildOutput {
     supports_color: bool,
     have_blank_line: bool,
     buffered: bool,
+    suspended: bool,
     pending: Vec<u8>,
 }
 
@@ -4094,6 +4131,7 @@ impl BuildOutput {
             supports_color: command_output_supports_color(is_terminal),
             have_blank_line: true,
             buffered: buffer_redirected_output && !smart_terminal,
+            suspended: false,
             pending: Vec::new(),
         }
     }
@@ -4106,8 +4144,26 @@ impl BuildOutput {
         self.supports_color
     }
 
+    fn suspend(&mut self) {
+        self.suspended = true;
+    }
+
+    fn resume(&mut self) -> Result<(), String> {
+        self.suspended = false;
+        if self.buffered || self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(&self.pending)
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("writing buffered console output: {error}"))?;
+        self.pending.clear();
+        Ok(())
+    }
+
     fn print_status(&mut self, line: &str, full: bool) -> Result<(), String> {
-        if self.buffered {
+        if self.buffered || self.suspended {
             self.pending.extend_from_slice(line.as_bytes());
             self.pending.push(b'\n');
             return Ok(());
@@ -4137,7 +4193,7 @@ impl BuildOutput {
     }
 
     fn print_on_new_line(&mut self, output: &[u8]) -> Result<(), String> {
-        if self.buffered {
+        if self.buffered || self.suspended {
             if !self.have_blank_line {
                 self.pending.push(b'\n');
             }
