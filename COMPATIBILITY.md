@@ -353,15 +353,15 @@ This is an evidence ledger, not a claim of full compatibility.
 ## Not yet complete
 
 - Exact semantics for every tool option.
-- Full lexical and diagnostic-text parity across Ninja's complete test corpus.
+- Full behavioral and diagnostic-text parity across Ninja's complete test corpus.
   Ninja's own POSIX `misc/output_test.py` now passes all 24 tests unchanged,
   including smart-terminal progress, invocation identity, `compdb-targets`,
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
-  status 130, and signal-status cases. Wider upstream unit-test coverage is
-  still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 93
-  library, 6 CLI, and 132 differential tests; Linux-under-WSL passes 88 library,
-  5 CLI, and 107 differential tests. Release builds, clippy, a Windows-hosted
+  status 130, and signal-status cases. All 53 manifest-parser cases are now
+  explicitly mapped; the graph and build suites remain open.
+- Broader cross-platform runtime validation. The current Windows gates pass 95
+  library, 6 CLI, and 135 differential tests; Linux-under-WSL passes 90 library,
+  5 CLI, and 110 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

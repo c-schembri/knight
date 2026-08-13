@@ -35,7 +35,7 @@ Status meanings:
 | `jobserver_test` | 7 | Mapped | `main::tests::upstream_jobserver_makeflags_parser_corpus` and native-mode corpus |
 | `json_test` | 4 | Mapped | `main::tests::upstream_json_encoder_corpus` |
 | `lexer_test` | 8 | Mapped | `manifest::tests::upstream_lexer_value_identifier_and_escape_corpus` |
-| `manifest_parser_test` | 53 | Partial | Acceptance, rejection, and byte-exact alias diagnostic corpora |
+| `manifest_parser_test` | 53 | Mapped | Explicit 53-case inventory with parser-state assertions, command expansion, paths, defaults, scopes/includes, dyndeps, and byte-exact alias diagnostics on Windows and WSL |
 | `missing_deps_test` | 7 | Mapped | Empty/clean graphs, direct and indirect fixes, missing/cyclic discovered deps, and graph-cycle rejection |
 | `msvc_helper_test` | 3 | Mapped | Helper depfile, raw output, environment, and stderr differentials |
 | `state_test` | 1 | Mapped | Command expansion case in `build` tests |
@@ -65,8 +65,8 @@ this ledger tracks all 514 upstream test cases in the pinned source tree.
 
 Of those, 36 cases exercise implementation-specific C++ helpers or optional
 Python support modules rather than the Ninja executable. The executable-parity
-scope is therefore 478 cases: 249 are explicitly mapped or pass unchanged, and
-the remaining 229 are the three Partial C++ suites above.
+scope is therefore 478 cases: 302 are explicitly mapped or pass unchanged, and
+the remaining 176 are the two Partial C++ suites above.
 
 The next parity work should turn **Partial** executable suites into **Mapped**
 or **Upstream pass** rows. New performance work does not close this ledger.

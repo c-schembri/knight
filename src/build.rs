@@ -4650,16 +4650,25 @@ fn append_path_list(
             output.push(separator);
         }
         let path = decanonicalize_path(path, slash_bits.get(index).copied().unwrap_or(0));
-        if escape
-            && path
-                .bytes()
-                .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
-        {
+        if escape && path_needs_shell_escape(&path) {
             output.push_str(&shell_escape_path(&path));
         } else {
             output.push_str(&path);
         }
     }
+}
+
+#[cfg(windows)]
+fn path_needs_shell_escape(path: &str) -> bool {
+    path.bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
+}
+
+#[cfg(not(windows))]
+fn path_needs_shell_escape(path: &str) -> bool {
+    !path
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_+-./".contains(&byte))
 }
 
 #[cfg(windows)]

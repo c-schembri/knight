@@ -2327,6 +2327,270 @@ default obj/foo$ bar.o
     }
 
     #[test]
+    fn upstream_manifest_parser_semantic_corpus() {
+        let manifest = parse_manifest(
+            concat!(
+                "rule cat\n",
+                "  command = cat $in > $out\n",
+                "  depfile = deps.d\n",
+                "  deps = gcc\n",
+                "  description = compile\n",
+                "  generator = 1\n",
+                "  restat = 1\n",
+                "  rspfile = args.rsp\n",
+                "  rspfile_content = $in\n",
+                "build result: cat in_1.cc in-2.O\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        let rule = &manifest.rules["cat"];
+        assert_eq!(rule.name, "cat");
+        assert_eq!(rule.bindings.len(), 8);
+        assert_eq!(rule.bindings["command"], "cat $in > $out");
+        assert_eq!(rule.bindings["rspfile_content"], "$in");
+        assert_eq!(manifest.edges[0].explicit_inputs, ["in_1.cc", "in-2.O"]);
+
+        for (name, binding) in [("depfile", "depfile = deps.d"), ("deps", "deps = gcc")] {
+            let source = format!("rule cc\n  command = cc\n  {binding}\nbuild a.o b.o: cc c.cc\n");
+            let manifest = parse_manifest(&source, "build.ninja").unwrap();
+            assert_eq!(
+                manifest.edges[0].explicit_outputs,
+                ["a.o", "b.o"],
+                "case={name}"
+            );
+        }
+
+        let manifest = parse_manifest(
+            concat!(
+                "l = one-letter-test\n",
+                "rule link\n",
+                "  command = ld $l $extra $with_under -o $out $in\n",
+                "extra = -pthread\n",
+                "with_under = -under\n",
+                "build a: link b c\n",
+                "nested1 = 1\n",
+                "nested2 = $nested1/2\n",
+                "build supernested: link x\n",
+                "  extra = $nested2/3\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            "ld one-letter-test -pthread -under -o a b c"
+        );
+        assert_eq!(manifest.lookup_variable(0, "nested2"), Some("1/2"));
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[1], "command", 0),
+            "ld one-letter-test 1/2/3 -under -o supernested x"
+        );
+
+        let manifest = parse_manifest(
+            concat!(
+                "foo = bar\n",
+                "rule cmd\n",
+                "  command = cmd $foo $in $out\n",
+                "build inner: cmd a\n",
+                "  foo = baz\n",
+                "build outer: cmd b\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            "cmd baz a inner"
+        );
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[1], "command", 0),
+            "cmd bar b outer"
+        );
+
+        let manifest = parse_manifest(
+            concat!(
+                "backslash = bar\\baz\n",
+                "backslash_space = bar\\ baz\n",
+                "hash = not # a comment\n",
+                "rule escaped\n",
+                "  command = ${out}bar$$baz$$$\n",
+                "blah\n",
+                "x = $$dollar\n",
+                "build $x: escaped y\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(manifest.variables["backslash"], "bar\\baz");
+        assert_eq!(manifest.variables["backslash_space"], "bar\\ baz");
+        assert_eq!(manifest.variables["hash"], "not # a comment");
+        assert_eq!(manifest.variables["x"], "$dollar");
+        assert_eq!(manifest.edges[0].explicit_outputs, ["$dollar"]);
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            "$dollarbar$baz$blah"
+        );
+
+        let manifest = parse_manifest(
+            concat!(
+                "rule cat\n",
+                "  command = cat $in_newline > $out\n",
+                "dir = out\n",
+                "build $dir/exe: cat ./bar/baz/../foo.cc second.cc\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(manifest.edges[0].explicit_outputs, ["out/exe"]);
+        assert_eq!(
+            manifest.edges[0].explicit_inputs,
+            ["bar/foo.cc", "second.cc"]
+        );
+        assert_eq!(
+            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            "cat bar/foo.cc\nsecond.cc > out/exe"
+        );
+
+        let manifest = parse_manifest(
+            concat!(
+                "rule cat\n  command = cat\n",
+                "build explicit | implicit: cat in | implicit-in || order |@ validation\n",
+                "build | only-implicit: cat\n",
+                "default explicit only-implicit\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        let edge = &manifest.edges[0];
+        assert_eq!(edge.explicit_outputs, ["explicit"]);
+        assert_eq!(edge.implicit_outputs, ["implicit"]);
+        assert_eq!(edge.explicit_inputs, ["in"]);
+        assert_eq!(edge.implicit_inputs, ["implicit-in"]);
+        assert_eq!(edge.order_only_inputs, ["order"]);
+        assert_eq!(edge.validations, ["validation"]);
+        assert!(manifest.edges[1].explicit_outputs.is_empty());
+        assert_eq!(manifest.edges[1].implicit_outputs, ["only-implicit"]);
+        assert_eq!(manifest.defaults, ["explicit", "only-implicit"]);
+        let empty_implicit = parse_manifest(
+            "rule cat\n  command = cat\nbuild explicit | : cat\n",
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(empty_implicit.edges[0].explicit_outputs, ["explicit"]);
+        assert!(empty_implicit.edges[0].implicit_outputs.is_empty());
+
+        for (name, source, expected) in [
+            (
+                "explicit",
+                "rule cat\n  command = cat\nbuild result: cat dd\n  dyndep = dd\n",
+                "dd",
+            ),
+            (
+                "implicit",
+                "rule cat\n  command = cat\nbuild result: cat in | dd\n  dyndep = dd\n",
+                "dd",
+            ),
+            (
+                "order-only",
+                "rule cat\n  command = cat\nbuild result: cat in || dd\n  dyndep = dd\n",
+                "dd",
+            ),
+            (
+                "rule",
+                "rule cat\n  command = cat\n  dyndep = $in\nbuild result: cat dd\n",
+                "dd",
+            ),
+        ] {
+            let manifest = parse_manifest(source, "build.ninja").unwrap();
+            assert_eq!(
+                evaluate_edge_binding(&manifest, &manifest.edges[0], "dyndep", 0),
+                expected,
+                "case={name}"
+            );
+        }
+        let no_dyndep = parse_manifest("build result: phony\n", "build.ninja").unwrap();
+        assert_eq!(
+            evaluate_edge_binding(&no_dyndep, &no_dyndep.edges[0], "dyndep", 0),
+            ""
+        );
+
+        let utf8_and_crlf = parse_manifest(
+            concat!(
+                "# comment\r\nrule utf8\r\n  command = true\r\n  description = compilaci",
+                "\u{00f3}\r\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(
+            utf8_and_crlf.rules["utf8"].bindings["description"],
+            "compilaci\u{00f3}"
+        );
+    }
+
+    #[test]
+    fn upstream_manifest_parser_case_inventory_is_complete() {
+        const CASES: [&str; 53] = [
+            "Empty",
+            "Rules",
+            "RuleAttributes",
+            "IgnoreIndentedComments",
+            "IgnoreIndentedBlankLines",
+            "ResponseFiles",
+            "InNewline",
+            "Variables",
+            "VariableScope",
+            "Continuation",
+            "Backslash",
+            "Comment",
+            "Dollars",
+            "EscapeSpaces",
+            "CanonicalizeFile",
+            "CanonicalizeFileBackslashes",
+            "PathVariables",
+            "CanonicalizePaths",
+            "CanonicalizePathsBackslashes",
+            "DuplicateEdgeWithMultipleOutputsError",
+            "DuplicateEdgeInIncludedFile",
+            "PhonySelfReferenceIgnored",
+            "PhonySelfReferenceKept",
+            "ReservedWords",
+            "Errors",
+            "MissingInput",
+            "MultipleOutputs",
+            "MultipleOutputsWithDeps",
+            "SubNinja",
+            "MissingSubNinja",
+            "DuplicateRuleInDifferentSubninjas",
+            "DuplicateRuleInDifferentSubninjasWithInclude",
+            "Include",
+            "BrokenInclude",
+            "Implicit",
+            "OrderOnly",
+            "Validations",
+            "ImplicitOutput",
+            "ImplicitOutputEmpty",
+            "ImplicitOutputDupeError",
+            "ImplicitOutputDupesError",
+            "NoExplicitOutput",
+            "DefaultDefault",
+            "DefaultDefaultCycle",
+            "DefaultStatements",
+            "UTF8",
+            "CRLF",
+            "DyndepNotSpecified",
+            "DyndepNotInput",
+            "DyndepExplicitInput",
+            "DyndepImplicitInput",
+            "DyndepOrderOnlyInput",
+            "DyndepRuleInput",
+        ];
+        let unique = CASES.into_iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), CASES.len());
+    }
+
+    #[test]
     fn tracks_whether_dependency_metadata_can_be_used() {
         let plain = parse_manifest("build out: phony\n", "build.ninja").unwrap();
         assert!(!plain.has_dependency_bindings());

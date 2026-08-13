@@ -2149,6 +2149,62 @@ fn subninja_rules_and_variables_remain_file_scoped() {
 }
 
 #[test]
+fn upstream_include_and_subninja_scope_cases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+
+    let include = tempdir().unwrap();
+    fs::write(
+        include.path().join("build.ninja"),
+        concat!(
+            "var = outer\n",
+            "include child.ninja\n",
+            "rule show\n  command = echo $var\n",
+            "build out: show\n",
+            "default out\n",
+        ),
+    )
+    .unwrap();
+    fs::write(include.path().join("child.ninja"), "var = inner\n").unwrap();
+    let expected = run(ninja, include.path(), &["-n", "-v"]);
+    let actual = run(knight, include.path(), &["-n", "-v"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+
+    let subninja = tempdir().unwrap();
+    fs::write(
+        subninja.path().join("build.ninja"),
+        concat!(
+            "include rules.ninja\n",
+            "subninja child.ninja\n",
+            "build parent: cat\n",
+            "default parent child\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        subninja.path().join("rules.ninja"),
+        "rule cat\n  command = echo cat\n",
+    )
+    .unwrap();
+    fs::write(
+        subninja.path().join("child.ninja"),
+        "include rules.ninja\nbuild child: cat\n",
+    )
+    .unwrap();
+    let expected = run(ninja, subninja.path(), &["-n", "-v"]);
+    let actual = run(knight, subninja.path(), &["-n", "-v"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
 fn dependency_type_configuration_matches_ninjas_build_phases() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -3514,6 +3570,59 @@ fn declaration_order_and_default_lookup_match_ninja() {
 }
 
 #[test]
+fn upstream_default_node_selection_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let cases = [
+        (
+            "all roots",
+            concat!(
+                "rule cat\n  command = echo $out\n",
+                "build a: cat\n",
+                "build b: cat\n",
+                "build c: cat\n",
+                "build d: cat\n",
+            ),
+        ),
+        (
+            "root cycle",
+            "rule cat\n  command = echo $out\nbuild a: cat a\n",
+        ),
+        (
+            "explicit defaults",
+            concat!(
+                "rule cat\n  command = echo $out\n",
+                "build a: cat\n",
+                "build b: cat\n",
+                "build c: cat\n",
+                "build d: cat\n",
+                "third = c\n",
+                "default a b\n",
+                "default $third\n",
+            ),
+        ),
+    ];
+
+    for (name, manifest) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        install_ninja_alias(knight, &alias);
+        let expected = run(ninja, temp.path(), &["-n"]);
+        let actual = run(&alias, temp.path(), &["-n"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+}
+
+#[test]
 fn upstream_manifest_parser_acceptance_corpus_matches_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -3611,6 +3720,68 @@ fn upstream_manifest_parser_acceptance_corpus_matches_ninja() {
                 .collect::<Vec<_>>(),
             "case={name}"
         );
+    }
+}
+
+#[test]
+fn upstream_manifest_command_expansion_cases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let cases = [
+        (
+            "in-newline",
+            "rule cat\n  command = cat $in_newline > $out\nbuild out: cat in in2\n",
+        ),
+        (
+            "variables",
+            concat!(
+                "l = one-letter-test\n",
+                "rule link\n  command = ld $l $extra $with_under -o $out $in\n",
+                "extra = -pthread\n",
+                "with_under = -under\n",
+                "build a: link b c\n",
+                "nested1 = 1\n",
+                "nested2 = $nested1/2\n",
+                "build supernested: link x\n  extra = $nested2/3\n",
+            ),
+        ),
+        (
+            "variable-scope",
+            concat!(
+                "foo = bar\n",
+                "rule cmd\n  command = cmd $foo $in $out\n",
+                "build inner: cmd a\n  foo = baz\n",
+                "build outer: cmd b\n",
+            ),
+        ),
+        (
+            "dollars",
+            concat!(
+                "rule foo\n",
+                "  command = ${out}bar$$baz$$$\n",
+                "blah\n",
+                "x = $$dollar\n",
+                "build $x: foo y\n",
+            ),
+        ),
+        (
+            "continuation",
+            "rule link\n  command = foo bar $\n    baz\nbuild a: link c $\n d e f\n",
+        ),
+    ];
+
+    for (name, manifest) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let expected = run(ninja, temp.path(), &["-t", "commands"]);
+        let actual = run(knight, temp.path(), &["-t", "commands"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
     }
 }
 
@@ -3816,6 +3987,20 @@ fn manifest_diagnostics_match_ninja_when_invoked_as_ninja() {
             "rule cat\n  command = cat\nbuild foo baz | foo baq foo: cat bar\n",
         ),
         (
+            "repeated duplicate implicit outputs",
+            "rule cat\n  command = cat\nbuild foo foo foo | foo foo foo foo: cat bar\n",
+        ),
+        (
+            "duplicate edge with multiple outputs",
+            concat!(
+                "rule cat\n",
+                "  command = cat $in > $out\n",
+                "build out1 out2: cat in1\n",
+                "build out1: cat in2\n",
+                "build final: cat out1\n",
+            ),
+        ),
+        (
             "dyndep not input",
             "rule touch\n  command = touch $out\nbuild result: touch\n  dyndep = notin\n",
         ),
@@ -3878,6 +4063,17 @@ fn included_manifest_diagnostics_match_ninja_without_sacrificing_cycle_detection
         ("empty subninja path", "subninja $missing\n", None),
         ("broken include", "include child.ninja\n", Some("build\n")),
         ("broken subninja", "subninja child.ninja\n", Some("build\n")),
+        (
+            "duplicate edge in included file",
+            "subninja child.ninja\n",
+            Some(concat!(
+                "rule cat\n",
+                "  command = cat $in > $out\n",
+                "build out1 out2: cat in1\n",
+                "build out1: cat in2\n",
+                "build final: cat out1\n",
+            )),
+        ),
     ];
 
     for (name, manifest, child) in cases {
