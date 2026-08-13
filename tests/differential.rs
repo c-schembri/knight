@@ -3039,6 +3039,143 @@ fn dyndep_version_and_edge_identity_match_ninja() {
 }
 
 #[test]
+fn dyndep_output_conflict_diagnostic_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule touch\n  command = echo built > $out\n",
+            "build out1: touch || dd1\n  dyndep = dd1\n",
+            "build out2: touch || dd2\n  dyndep = dd2\n",
+            "default out1 out2\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("dd1"),
+        "ninja_dyndep_version = 1\nbuild out1 | shared: dyndep\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("dd2"),
+        "ninja_dyndep_version = 1\nbuild out2 | shared: dyndep\n",
+    )
+    .unwrap();
+
+    let expected = run(Path::new(&ninja), temp.path(), &["-n"]);
+    let actual = run(knight, temp.path(), &["-n"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    let expected_error = String::from_utf8_lossy(&expected.stderr)
+        .replace("ninja:", "tool:")
+        .replace("ninja.exe:", "tool:");
+    let actual_error = String::from_utf8_lossy(&actual.stderr)
+        .replace("knight:", "tool:")
+        .replace("knight.exe:", "tool:");
+    assert_eq!(actual_error, expected_error);
+}
+
+#[test]
+fn dyndep_file_entry_ownership_diagnostics_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let cases = [
+        (
+            "missing entry",
+            concat!(
+                "rule touch\n  command = echo built > $out\n",
+                "build out: touch || dd\n  dyndep = dd\n",
+                "default out\n",
+            ),
+            "ninja_dyndep_version = 1\n",
+        ),
+        (
+            "entry without binding",
+            concat!(
+                "rule touch\n  command = echo built > $out\n",
+                "build out: touch || dd\n  dyndep = dd\n",
+                "build extra: touch || dd\n",
+                "default out\n",
+            ),
+            concat!(
+                "ninja_dyndep_version = 1\n",
+                "build out: dyndep\n",
+                "build extra: dyndep\n",
+            ),
+        ),
+        (
+            "existing output repeated dynamically",
+            concat!(
+                "rule touch\n  command = echo built > $out\n",
+                "build out | existing: touch || dd\n  dyndep = dd\n",
+                "default out\n",
+            ),
+            concat!(
+                "ninja_dyndep_version = 1\n",
+                "build out | existing: dyndep\n",
+            ),
+        ),
+    ];
+
+    for (name, manifest, dyndep) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        fs::write(temp.path().join("dd"), dyndep).unwrap();
+        let expected = run(ninja, temp.path(), &["-n"]);
+        let actual = run(knight, temp.path(), &["-n"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        let expected_error = String::from_utf8_lossy(&expected.stderr)
+            .replace("ninja:", "tool:")
+            .replace("ninja.exe:", "tool:");
+        let actual_error = String::from_utf8_lossy(&actual.stderr)
+            .replace("knight:", "tool:")
+            .replace("knight.exe:", "tool:");
+        assert_eq!(actual_error, expected_error, "case={name}");
+    }
+}
+
+#[test]
+fn missing_dyndep_diagnostic_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule touch\n  command = echo built > $out\n",
+            "build out: touch || dd\n  dyndep = dd\n",
+            "default out\n",
+        ),
+    )
+    .unwrap();
+
+    let expected = run(Path::new(&ninja), temp.path(), &["-n"]);
+    let actual = run(knight, temp.path(), &["-n"]);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    let expected_error = String::from_utf8_lossy(&expected.stderr)
+        .replace("ninja:", "tool:")
+        .replace("ninja.exe:", "tool:");
+    let actual_error = String::from_utf8_lossy(&actual.stderr)
+        .replace("knight:", "tool:")
+        .replace("knight.exe:", "tool:");
+    assert_eq!(actual_error, expected_error);
+}
+
+#[test]
 fn rootless_graph_error_matches_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");

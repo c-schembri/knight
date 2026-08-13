@@ -65,6 +65,35 @@ at once, so this is correctness evidence rather than a timing-only inference.
 Knight is within 1.3% of Ninja's median and 1.5% ahead at P95 on this sample,
 but does not yet win the median.
 
+## Ready dyndep loading
+
+`scripts/benchmark-dyndep-load.ps1` measures warm quiet no-op builds in which
+every real output already exists and each edge owns a separate ready dyndep
+file. This isolates file discovery, loading, parsing, ownership validation,
+graph expansion, and final incremental planning. The runner warms each tool
+three times and alternates launch order. The initial Knight implementation took
+about 149 ms at 1,000 files; it redundantly probed every ready source dyndep and
+ran generated-file prebuild planning before loading it.
+
+Ready files now bypass prebuild planning, file sets use linear-time hash
+deduplication, and batches are read and parsed on two workers while semantic
+application and diagnostics remain in deterministic manifest order. On Windows
+x64 the final interleaved sweeps produced:
+
+| Files | Samples | Tool | Median | Minimum | P95 |
+| ---: | ---: | :--- | ---: | ---: | ---: |
+| 100 | 300 | Ninja | 8.347 ms | 7.559 ms | 51.145 ms |
+| 100 | 300 | Knight | 8.306 ms | 7.372 ms | 12.094 ms |
+| 1,000 | 100 | Ninja | 49.088 ms | 45.658 ms | 90.103 ms |
+| 1,000 | 100 | Knight | 37.642 ms | 35.451 ms | 40.814 ms |
+| 5,000 | 100 | Ninja | 218.313 ms | 213.903 ms | 261.165 ms |
+| 5,000 | 100 | Knight | 171.362 ms | 163.698 ms | 181.009 ms |
+
+Knight is essentially tied at 100 files, 23.3% faster at 1,000, and 21.5%
+faster at 5,000. Its P95 is lower by 30.7-76.4% across all three sizes. This is
+a substantial reversal of the discovered regression, though not an
+order-of-magnitude result.
+
 ## Inputs tool
 
 `scripts/benchmark-inputs.ps1` validates byte-equivalent `-t inputs all`

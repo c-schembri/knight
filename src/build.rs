@@ -1,6 +1,6 @@
 use crate::depfile::parse_depfile;
 use crate::deps_log::{DepsLog, deps_log_path};
-use crate::dyndep::parse_dyndep;
+use crate::dyndep::{DyndepRecord, parse_dyndep};
 use crate::manifest::{
     Edge, Manifest, canonicalize_owned_path, canonicalize_path, unknown_target_message,
 };
@@ -1061,6 +1061,7 @@ pub fn run_build(
     )?;
     let closure_time = phase.elapsed();
     let mut dyndep_files = Vec::new();
+    let mut unique_dyndep_files = HashSet::new();
     for &edge_id in &closure {
         let edge = &manifest.edges[edge_id];
         let dyndep = evaluate_unescaped_binding(manifest, edge, "dyndep");
@@ -1073,7 +1074,7 @@ pub fn run_build(
                 edge_label(edge)
             ));
         }
-        if !dyndep_files.contains(&dyndep) {
+        if unique_dyndep_files.insert(dyndep.clone()) {
             dyndep_files.push(dyndep);
         }
     }
@@ -1104,7 +1105,11 @@ pub fn run_build(
     let mut seen_dyndeps = HashSet::<String>::new();
     let mut loaded_dyndeps = Vec::new();
     let mut prebuild = BuildOutcome::default();
+    let mut dyndep_graph_time = Duration::ZERO;
+    let mut dyndep_prebuild_time = Duration::ZERO;
+    let mut dyndep_load_time = Duration::ZERO;
     loop {
+        let dyndep_phase = Instant::now();
         let phase = Instant::now();
         let current_output_map = output_map(&expanded);
         let current_output_map_time = phase.elapsed();
@@ -1152,36 +1157,44 @@ pub fn run_build(
             &dyndep_files,
         );
 
-        let prebuild_target_edges = select_targets(
-            &expanded,
-            &prebuild_targets,
-            &current_output_map,
-            &current_discovered.log,
-        )?;
-        let prebuild_closure = dependency_closure(
-            &expanded,
-            &prebuild_target_edges,
-            &current_output_map,
-            &current_discovered,
-            options.phony_cycle_error,
-        )?;
-        let pass = run_build_prepared(
-            &expanded,
-            &prebuild_options,
-            PreparedBuild {
-                output_map: current_output_map,
-                discovered: current_discovered,
-                build_log: current_build_log,
-                closure: prebuild_closure,
-                stats: PreparationStats {
-                    output_map: current_output_map_time,
-                    dependencies: current_dependencies_time,
-                    closure: current_closure_time,
-                    build_log: current_build_log_time,
+        dyndep_graph_time += dyndep_phase.elapsed();
+        let pass = if prebuild_targets.is_empty() {
+            BuildOutcome::default()
+        } else {
+            let prebuild_target_edges = select_targets(
+                &expanded,
+                &prebuild_targets,
+                &current_output_map,
+                &current_discovered.log,
+            )?;
+            let prebuild_closure = dependency_closure(
+                &expanded,
+                &prebuild_target_edges,
+                &current_output_map,
+                &current_discovered,
+                options.phony_cycle_error,
+            )?;
+            let dyndep_phase = Instant::now();
+            let pass = run_build_prepared(
+                &expanded,
+                &prebuild_options,
+                PreparedBuild {
+                    output_map: current_output_map,
+                    discovered: current_discovered,
+                    build_log: current_build_log,
+                    closure: prebuild_closure,
+                    stats: PreparationStats {
+                        output_map: current_output_map_time,
+                        dependencies: current_dependencies_time,
+                        closure: current_closure_time,
+                        build_log: current_build_log_time,
+                    },
                 },
-            },
-            ProgressContext::default(),
-        )?;
+                ProgressContext::default(),
+            )?;
+            dyndep_prebuild_time += dyndep_phase.elapsed();
+            pass
+        };
         let known_dyndeps = expanded
             .edges
             .iter()
@@ -1205,6 +1218,7 @@ pub fn run_build(
         prebuild.commands_failed += pass.commands_failed;
         prebuild.edges_clean += pass.edges_clean;
         prebuild.ran_edges.extend(pass.ran_edges);
+        let dyndep_phase = Instant::now();
         if let Err(error) = apply_dyndep_files(&mut expanded, &apply_files) {
             let total = current_closure
                 .iter()
@@ -1213,6 +1227,24 @@ pub fn run_build(
             print_prior_statuses(&expanded, options, &prebuild.ran_edges, total)?;
             return Err(error);
         }
+        dyndep_load_time += dyndep_phase.elapsed();
+    }
+    if options.stats {
+        eprintln!(
+            "{} stats: dyndep graph             {:>9.3} ms",
+            program_name(),
+            dyndep_graph_time.as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "{} stats: dyndep prebuild          {:>9.3} ms",
+            program_name(),
+            dyndep_prebuild_time.as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "{} stats: dyndep load/apply        {:>9.3} ms",
+            program_name(),
+            dyndep_load_time.as_secs_f64() * 1000.0
+        );
     }
     let mut final_options = options.clone();
     final_options.quiet_no_work |= prebuild.commands_run > 0;
@@ -1240,6 +1272,7 @@ fn pending_dyndep_files(
     seen: &HashSet<String>,
 ) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
+    let mut pending = HashSet::new();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
         let dyndep = evaluate_unescaped_binding(manifest, edge, "dyndep");
@@ -1252,7 +1285,7 @@ fn pending_dyndep_files(
                 edge_label(edge)
             ));
         }
-        if !seen.contains(&dyndep) && !files.contains(&dyndep) {
+        if !seen.contains(&dyndep) && pending.insert(dyndep.clone()) {
             files.push(dyndep);
         }
     }
@@ -1315,16 +1348,22 @@ fn dyndep_prebuild_targets(
         }
     }
 
-    let mut targets = dyndep_files.to_vec();
+    let mut targets = dyndep_files
+        .iter()
+        .filter(|file| outputs.contains_key(file.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return targets;
+    }
     let mut selected = targets.iter().cloned().collect::<HashSet<_>>();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
-        let has_missing_source = edge
-            .inputs()
-            .any(|input| !outputs.contains_key(input) && !Path::new(input).exists());
         if !unsafe_edge[edge_id]
-            && !has_missing_source
             && edge.rule != "phony"
+            && !edge
+                .inputs()
+                .any(|input| !outputs.contains_key(input) && !Path::new(input).exists())
             && let Some(output) = edge.outputs().next()
             && selected.insert(output.to_owned())
         {
@@ -1376,11 +1415,23 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
         .into_iter()
         .map(|(path, edge)| (path.to_owned(), edge))
         .collect::<HashMap<_, _>>();
-    for file in files {
-        let source = fs::read_to_string(file)
-            .map_err(|error| format!("loading dyndep file '{file}': {error}"))?;
-        let records = parse_dyndep(&source, Path::new(file))?;
+    let edge_dyndeps = manifest
+        .edges
+        .iter()
+        .map(|edge| canonicalize_owned_path(evaluate_unescaped_binding(manifest, edge, "dyndep")))
+        .collect::<Vec<_>>();
+    let mut bound_edges = HashMap::<&str, Vec<usize>>::new();
+    for (edge_id, dyndep) in edge_dyndeps.iter().enumerate() {
+        if !dyndep.is_empty() {
+            bound_edges.entry(dyndep).or_default().push(edge_id);
+        }
+    }
+    let parsed_files = load_dyndep_records(files);
+    for (file, records) in files.iter().zip(parsed_files) {
+        let canonical_file = canonicalize_owned_path(file.clone());
+        let records = records?;
         let mut seen_edges = HashSet::new();
+        let mut normalized_records = Vec::with_capacity(records.len());
         for mut record in records {
             record.output = canonicalize_owned_path(record.output);
             for path in record
@@ -1399,6 +1450,33 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
                     record.output
                 ));
             }
+            normalized_records.push((edge_id, record));
+        }
+
+        for &edge_id in bound_edges
+            .get(canonical_file.as_str())
+            .into_iter()
+            .flatten()
+        {
+            if !seen_edges.contains(&edge_id) {
+                let edge = &manifest.edges[edge_id];
+                return Err(format!(
+                    "'{}' not mentioned in its dyndep file '{file}'",
+                    edge.outputs().next().unwrap_or_default()
+                ));
+            }
+        }
+
+        for (edge_id, record) in normalized_records {
+            if edge_dyndeps[edge_id] != canonical_file {
+                return Err(format!(
+                    "dyndep file '{file}' mentions output '{}' whose build statement does not have a dyndep binding for the file",
+                    manifest.edges[edge_id]
+                        .outputs()
+                        .next()
+                        .unwrap_or(&record.output)
+                ));
+            }
             let edge = &mut manifest.edges[edge_id];
             for input in record.implicit_inputs {
                 if !edge.implicit_inputs.contains(&input) {
@@ -1406,12 +1484,8 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
                 }
             }
             for output in record.implicit_outputs {
-                if let Some(previous) = outputs.get(&output)
-                    && *previous != edge_id
-                {
-                    return Err(format!(
-                        "{file}: dynamic output '{output}' is already generated by another edge"
-                    ));
+                if outputs.contains_key(&output) {
+                    return Err(format!("multiple rules generate {output}"));
                 }
                 if !edge.implicit_outputs.contains(&output) {
                     edge.implicit_outputs.push(output.clone());
@@ -1424,6 +1498,142 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
         }
     }
     Ok(())
+}
+
+fn load_dyndep_records(files: &[String]) -> Vec<Result<Vec<DyndepRecord>, String>> {
+    if files.len() < 16 {
+        return files.iter().map(|file| load_dyndep_record(file)).collect();
+    }
+    let middle = files.len().div_ceil(2);
+    thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            files[..middle]
+                .iter()
+                .map(|file| load_dyndep_record(file))
+                .collect::<Vec<_>>()
+        });
+        let second = scope.spawn(|| {
+            files[middle..]
+                .iter()
+                .map(|file| load_dyndep_record(file))
+                .collect::<Vec<_>>()
+        });
+        let mut records = first.join().expect("dyndep loader worker panicked");
+        records.extend(second.join().expect("dyndep loader worker panicked"));
+        records
+    })
+}
+
+fn load_dyndep_record(file: &str) -> Result<Vec<DyndepRecord>, String> {
+    let source = load_dyndep_source(file)?;
+    parse_dyndep(&source, Path::new(file))
+}
+
+#[cfg(windows)]
+fn load_dyndep_source(file: &str) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileA, CreateFileW, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ, OPEN_EXISTING,
+        ReadFile,
+    };
+
+    let mut narrow = [0u8; 512];
+    let handle = if file.is_ascii() && file.len() < narrow.len() {
+        narrow[..file.len()].copy_from_slice(file.as_bytes());
+        // SAFETY: `narrow` is zero-initialized after the copied ASCII path and
+        // the remaining arguments follow the documented read-only contract.
+        unsafe {
+            CreateFileA(
+                narrow.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_SEQUENTIAL_SCAN,
+                std::ptr::null_mut(),
+            )
+        }
+    } else {
+        let wide = Path::new(file)
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: `wide` is NUL-terminated and the remaining arguments follow
+        // the documented read-only CreateFile contract.
+        unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_SEQUENTIAL_SCAN,
+                std::ptr::null_mut(),
+            )
+        }
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(dyndep_load_error(file, &io::Error::last_os_error()));
+    }
+
+    let mut source = Vec::new();
+    let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 64 << 10];
+    loop {
+        let mut read = 0;
+        // SAFETY: `handle` is open, and `buffer` provides the writable byte
+        // range described by its length for this synchronous read.
+        if unsafe {
+            ReadFile(
+                handle,
+                buffer.as_mut_ptr().cast::<u8>(),
+                buffer.len() as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            // SAFETY: `handle` remains valid until it is closed exactly once.
+            unsafe { CloseHandle(handle) };
+            return Err(dyndep_load_error(file, &error));
+        }
+        if read == 0 {
+            break;
+        }
+        // SAFETY: ReadFile initialized exactly the reported prefix.
+        let initialized =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), read as usize) };
+        source.extend_from_slice(initialized);
+    }
+    // SAFETY: `handle` remains valid until it is closed exactly once.
+    unsafe { CloseHandle(handle) };
+    String::from_utf8(source).map_err(|_| {
+        dyndep_load_error(
+            file,
+            &io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ),
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn load_dyndep_source(file: &str) -> Result<String, String> {
+    fs::read_to_string(file).map_err(|error| dyndep_load_error(file, &error))
+}
+
+fn dyndep_load_error(file: &str, error: &io::Error) -> String {
+    let message = error.to_string();
+    let message = message
+        .rfind(" (os error ")
+        .map_or(message.as_str(), |suffix| &message[..suffix]);
+    #[cfg(windows)]
+    return format!("loading '{file}': {message}\r\r\n");
+    #[cfg(not(windows))]
+    format!("loading '{file}': {message}")
 }
 
 pub fn manifest_with_existing_dyndeps(manifest: &Manifest) -> Result<Option<Manifest>, String> {

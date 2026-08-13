@@ -73,7 +73,15 @@ This is an evidence ledger, not a claim of full compatibility.
   preserving generated-file order. Independent requested work runs concurrently
   with generated dyndep producers, while consumers that may gain new inputs are
   held until the relevant file is loaded. Version suffixes, final-newline
-  requirements, and per-edge duplicate-statement detection follow Ninja.
+  requirements, per-edge duplicate-statement detection, entry ownership, and
+  output-conflict diagnostics follow Ninja. Every edge bound to a loaded file
+  must be mentioned, records for edges bound to another file are rejected, and
+  dynamic outputs may not redeclare either static or previously discovered
+  outputs. Missing source dyndeps fail in Ninja's load phase with matching
+  platform diagnostics. Ready source dyndeps bypass generated-file prebuild
+  planning, while batches of independent files are read and parsed on two
+  workers with deterministic file-order validation. `-d stats` reports dyndep
+  graph, prebuild, and load/apply time separately.
 - Parallel command execution, longest-remaining-path scheduling with stable
   declaration-order ties, depth-one/live console pools with buffered output
   from concurrent ordinary work, default/custom pool
@@ -218,8 +226,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 102 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 75 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 105 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 78 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
