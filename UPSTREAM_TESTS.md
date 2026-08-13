@@ -72,14 +72,17 @@ Partial.
 This closes the pinned test-corpus ledger. Separate explicit inventories in
 `tests/differential.rs` map all 20 public/hidden tool entry points and all 15
 top-level option families on Windows, Linux, macOS, FreeBSD, OpenBSD, and
-NetBSD. The native CI matrix also covers inherited-pipe jobservers, BSD `getopt`
+NetBSD. DragonFly BSD runs the same executable inventory natively, including
+its distinct build-log directory and `restat` behavior. The native CI matrix
+also covers inherited-pipe jobservers, BSD `getopt`
 diagnostics and operand ordering, portable timestamp manipulation, and
 Knight's successful 1,025-process run when the macOS Ninja reference exhausts
 its descriptor limit.
 FreeBSD and OpenBSD each pass 90 native library, 6 CLI, and 128 differential
 tests. NetBSD passes 90 library, 6 CLI, and all 128 differential tests, with
-the 1,025-process case isolated from the parallel test runner. NetBSD, illumos,
-Solaris, and MinGW cross-target CI checks pass, but native runtime
-differentials on illumos, Solaris, MinGW, DragonFly BSD, and AIX remain
-separate platform-validation work. New performance work does not substitute
-for that platform validation.
+the 1,025-process case isolated from the parallel test runner. DragonFly passes
+90 library, 6 CLI, and 127 regular differential tests; its isolated 1,025-
+process case passes with an 8,192-descriptor limit. NetBSD, illumos, Solaris,
+and MinGW cross-target CI checks pass, but native runtime differentials on
+illumos, Solaris, MinGW, and AIX remain separate platform-validation work. New
+performance work does not substitute for that platform validation.
