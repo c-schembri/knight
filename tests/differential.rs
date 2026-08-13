@@ -1766,6 +1766,39 @@ fn knight_tracks_and_filters_msvc_showincludes() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn msvc_output_line_boundaries_match_ninja_byte_for_byte() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let manifest = concat!(
+        "rule cc\n",
+        "  command = python -c \"import sys; sys.stdout.buffer.write(b'source.c\\rkept one\\r\\nNote: including file: \\nNote: including file:   \\rkept two\\nNote: including file: header.h'); open(r'$out', 'wb').write(b'x')\"\n",
+        "  description = CC $out\n",
+        "  deps = msvc\n",
+        "build out.obj: cc source.c\n",
+        "default out.obj\n",
+    );
+    let run_build = |name: &str, executable: &Path| {
+        let directory = temp.path().join(name);
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("build.ninja"), manifest).unwrap();
+        fs::write(directory.join("source.c"), "source\n").unwrap();
+        fs::write(directory.join("header.h"), "header\n").unwrap();
+        run(executable, &directory, &[])
+    };
+
+    let expected = run_build("ninja", Path::new(&ninja));
+    let actual = run_build("knight", knight);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
 #[test]
 fn subninja_rules_and_variables_remain_file_scoped() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));

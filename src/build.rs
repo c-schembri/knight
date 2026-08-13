@@ -2623,6 +2623,8 @@ fn run_build_prepared<'a>(
             return Err("build stopped: interrupted by user.".to_owned());
         }
         unregister_active_cleanup(completion.edge);
+        let raw_command_output =
+            cfg!(windows) && evaluate_binding(manifest, edge, "deps") == "msvc";
         let dependency_result =
             extract_dependencies(manifest, edge, &mut output, options.keep_depfile);
         if status.tracks_prediction() {
@@ -2650,8 +2652,8 @@ fn run_build_prepared<'a>(
         }
         let succeeded = output.status.success() && dependency_result.is_ok();
         if succeeded {
-            printer.write_command_output(&output.stdout)?;
-            printer.write_command_output(&output.stderr)?;
+            printer.write_command_output(&output.stdout, raw_command_output)?;
+            printer.write_command_output(&output.stderr, raw_command_output)?;
             if !options.keep_rsp
                 && let Some(rspfile) = &completion.rspfile
             {
@@ -2746,8 +2748,8 @@ fn run_build_prepared<'a>(
                 printer.print_on_new_line(format!("{failed}\n").as_bytes())?;
             }
             printer.print_on_new_line(format!("{}\n", completion.command).as_bytes())?;
-            printer.write_command_output(&output.stdout)?;
-            printer.write_command_output(&output.stderr)?;
+            printer.write_command_output(&output.stdout, raw_command_output)?;
+            printer.write_command_output(&output.stderr, raw_command_output)?;
             if let Err(error) = &dependency_result
                 && output.status.success()
             {
@@ -3888,18 +3890,32 @@ pub fn filter_msvc_output(
     let output = String::from_utf8_lossy(output);
     let mut filtered = String::with_capacity(output.len());
     let mut saw_include = false;
-    for line in output.lines() {
-        if let Some(include) = line.strip_prefix(prefix) {
+    let mut start = 0;
+    while start < output.len() {
+        let end = output[start..]
+            .find(['\r', '\n'])
+            .map_or(output.len(), |offset| start + offset);
+        let line = &output[start..end];
+        let include = line
+            .strip_prefix(prefix)
+            .filter(|include| !include.is_empty())
+            .map(str::trim_start)
+            .filter(|include| !include.is_empty());
+        if let Some(include) = include {
             saw_include = true;
-            let include = include.trim_start();
             if let Some(normalized) = normalize_msvc_include(include)? {
                 includes.insert(normalized);
             }
-        } else if !saw_include && is_compiler_input_echo(line) {
-            continue;
-        } else {
+        } else if saw_include || !is_compiler_input_echo(line) {
             filtered.push_str(line);
             filtered.push('\n');
+        }
+        start = end;
+        if output.as_bytes().get(start) == Some(&b'\r') {
+            start += 1;
+        }
+        if output.as_bytes().get(start) == Some(&b'\n') {
+            start += 1;
         }
     }
     Ok(filtered.into_bytes())
@@ -4797,6 +4813,27 @@ fn write_build_text(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+fn append_build_text(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    #[cfg(not(windows))]
+    buffer.extend_from_slice(bytes);
+    #[cfg(windows)]
+    {
+        if !bytes.contains(&b'\n') {
+            buffer.extend_from_slice(bytes);
+            return;
+        }
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
+                buffer.extend_from_slice(&bytes[start..index]);
+                buffer.extend_from_slice(BUILD_NEWLINE);
+                start = index + 1;
+            }
+        }
+        buffer.extend_from_slice(&bytes[start..]);
+    }
+}
+
 impl BuildOutput {
     fn new(fancy_status: bool, buffer_redirected_output: bool) -> Self {
         let is_terminal = io::stdout().is_terminal();
@@ -4836,7 +4873,8 @@ impl BuildOutput {
             return Ok(());
         }
         let mut stdout = io::stdout().lock();
-        write_build_text(&mut stdout, &self.pending)
+        stdout
+            .write_all(&self.pending)
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("writing buffered console output: {error}"))?;
         self.pending.clear();
@@ -4845,7 +4883,7 @@ impl BuildOutput {
 
     fn print_status(&mut self, line: &str, full: bool) -> Result<(), String> {
         if self.buffered || self.suspended {
-            self.pending.extend_from_slice(line.as_bytes());
+            append_build_text(&mut self.pending, line.as_bytes());
             self.pending.extend_from_slice(BUILD_NEWLINE);
             return Ok(());
         }
@@ -4873,11 +4911,19 @@ impl BuildOutput {
     }
 
     fn print_on_new_line(&mut self, output: &[u8]) -> Result<(), String> {
+        self.print_on_new_line_mode(output, false)
+    }
+
+    fn print_on_new_line_mode(&mut self, output: &[u8], raw: bool) -> Result<(), String> {
         if self.buffered || self.suspended {
             if !self.have_blank_line {
                 self.pending.extend_from_slice(BUILD_NEWLINE);
             }
-            self.pending.extend_from_slice(output);
+            if raw {
+                self.pending.extend_from_slice(output);
+            } else {
+                append_build_text(&mut self.pending, output);
+            }
             self.have_blank_line = output.is_empty() || output.ends_with(b"\n");
             return Ok(());
         }
@@ -4887,20 +4933,24 @@ impl BuildOutput {
                 .write_all(BUILD_NEWLINE)
                 .map_err(|error| format!("writing command output: {error}"))?;
         }
-        write_build_text(&mut stdout, output)
-            .map_err(|error| format!("writing command output: {error}"))?;
+        if raw {
+            stdout.write_all(output)
+        } else {
+            write_build_text(&mut stdout, output)
+        }
+        .map_err(|error| format!("writing command output: {error}"))?;
         self.have_blank_line = output.is_empty() || output.ends_with(b"\n");
         Ok(())
     }
 
-    fn write_command_output(&mut self, output: &[u8]) -> Result<(), String> {
+    fn write_command_output(&mut self, output: &[u8], raw: bool) -> Result<(), String> {
         if output.is_empty() {
             return Ok(());
         }
         if self.supports_color {
-            self.print_on_new_line(output)
+            self.print_on_new_line_mode(output, raw)
         } else {
-            self.print_on_new_line(&strip_ansi_escapes::strip(output))
+            self.print_on_new_line_mode(&strip_ansi_escapes::strip(output), raw)
         }
     }
 
@@ -4910,7 +4960,8 @@ impl BuildOutput {
             return Ok(());
         }
         let mut stdout = io::stdout().lock();
-        write_build_text(&mut stdout, &self.pending)
+        stdout
+            .write_all(&self.pending)
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("writing build output: {error}"))?;
         self.pending.clear();
@@ -5488,6 +5539,23 @@ mod tests {
         assert_eq!(String::from_utf8(filtered).unwrap(), "warning: hello\n");
         assert_eq!(includes.len(), 1);
         assert!(includes.iter().next().unwrap().ends_with("include/local.h"));
+    }
+
+    #[test]
+    fn msvc_filter_matches_ninja_line_boundaries_and_empty_prefixes() {
+        let mut includes = BTreeSet::new();
+        let filtered = filter_msvc_output(
+            b"source.c\rkept one\r\nNote: including file: \nNote: including file:   \rkept two\nNote: including file: header.h",
+            "Note: including file: ",
+            &mut includes,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(filtered).unwrap(),
+            "kept one\nNote: including file: \nNote: including file:   \nkept two\n"
+        );
+        assert_eq!(includes.len(), 1);
+        assert!(includes.iter().next().unwrap().ends_with("header.h"));
     }
 
     #[test]

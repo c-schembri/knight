@@ -187,6 +187,12 @@ uses a successful directory enumeration as authoritative for absent entries,
 avoiding 10,000 redundant missing-file probes while preserving individual-stat
 fallback if enumeration itself fails.
 
+The buffered output path was later split so MSVC-filtered lines can retain
+Ninja's LF-only bytes while ordinary Windows output still receives CRLF text-
+mode conversion. A 30-sample 10,000-edge regression sweep remained byte-exact
+and measured Ninja at 331.918 ms median versus Knight at 36.241 ms, a 9.2x
+lead, with 84.322 ms Knight P95 versus 395.540 ms for Ninja.
+
 `scripts/benchmark-status-pty.sh` measures the smart-terminal path through a
 real Linux pseudo-terminal. Thirty alternating 1,000-edge samples, backed by a
 byte-for-byte PTY differential test covering normal, quiet, verbose, custom
