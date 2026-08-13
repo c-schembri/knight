@@ -9893,7 +9893,7 @@ fn returned_jobserver_token_wakes_a_waiting_build_client() {
         format!(
             concat!(
                 "rule work\n",
-                "  command = date +%s%N > $out; sleep {duration}; date +%s%N >> $out\n",
+                "  command = python3 -c 'import time; print(time.time_ns())' > $out; sleep {duration}; python3 -c 'import time; print(time.time_ns())' >> $out\n",
                 "build out0: work\n",
                 "build out1: work\n",
                 "build all: phony out0 out1\n",

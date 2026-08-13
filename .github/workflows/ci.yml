@@ -69,6 +69,7 @@ jobs:
             cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
             cmake --build ninja-reference/build --parallel 2
             export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
+            ulimit -n 4096
             cargo test --all-targets
             cargo clippy --all-targets -- -D warnings
             cargo build --release
