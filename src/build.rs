@@ -4096,11 +4096,16 @@ struct MsvcIncludeNormalizer {
     relative_is_current: bool,
     relative_parts: Vec<String>,
     relative_root: Option<String>,
+    ninja_max_path: bool,
 }
 
 #[cfg(windows)]
 impl MsvcIncludeNormalizer {
     fn new(relative_to: &str) -> Result<Self, String> {
+        Self::with_max_path_policy(relative_to, program_name() == "ninja")
+    }
+
+    fn with_max_path_policy(relative_to: &str, ninja_max_path: bool) -> Result<Self, String> {
         let current = std::env::current_dir()
             .map_err(|error| format!("resolving include path: {error}"))?
             .to_string_lossy()
@@ -4112,6 +4117,7 @@ impl MsvcIncludeNormalizer {
             relative_is_current: canonicalize_path(relative_to) == ".",
             relative_root: windows_root_key(&relative),
             relative_parts: relative.split('/').map(str::to_owned).collect(),
+            ninja_max_path,
         })
     }
 
@@ -4125,7 +4131,25 @@ impl MsvcIncludeNormalizer {
     }
 
     fn normalize(&self, input: &str) -> Result<String, String> {
+        const NINJA_MAX_PATH: usize = 260;
+
+        if self.ninja_max_path && input.len() > NINJA_MAX_PATH {
+            return Err("path too long".to_owned());
+        }
         let partially_fixed = canonicalize_path(input);
+        if self.ninja_max_path && !Path::new(&partially_fixed).is_absolute() {
+            let absolute = format!("{}/{partially_fixed}", self.current);
+            if absolute.len() >= NINJA_MAX_PATH {
+                let error = format!(
+                    "GetFullPathNameA({partially_fixed}): The filename or extension is too long."
+                );
+                return Err(if program_name() == "ninja" {
+                    format!("\0fatal:{error}\r\r\n\n")
+                } else {
+                    error
+                });
+            }
+        }
         if self.relative_is_current
             && !Path::new(&partially_fixed).is_absolute()
             && partially_fixed.as_bytes().get(1) != Some(&b':')
@@ -4172,6 +4196,14 @@ fn windows_root_key(path: &str) -> Option<String> {
 #[cfg(all(windows, test))]
 fn normalize_windows_include_from(input: &str, relative_to: &str) -> Result<String, String> {
     MsvcIncludeNormalizer::new(relative_to)?.normalize(input)
+}
+
+#[cfg(all(windows, test))]
+fn normalize_windows_include_with_max_path(
+    input: &str,
+    relative_to: &str,
+) -> Result<String, String> {
+    MsvcIncludeNormalizer::with_max_path_policy(relative_to, true)?.normalize(input)
 }
 
 #[cfg(not(windows))]
@@ -6614,6 +6646,46 @@ mod tests {
             long,
             "Knight intentionally retains long-path support beyond Ninja's MAX_PATH limit"
         );
+
+        let upstream_long_error = concat!(
+            "C:\\Program Files (x86)\\Microsoft Visual Studio ",
+            "12.0\\VC\\INCLUDEwarning #31001: The dll for reading and writing the ",
+            "pdb (for example, mspdb110.dll) could not be found on your path. This ",
+            "is usually a configuration error. Compilation will continue using /Z7 ",
+            "instead of /Zi, but expect a similar error when you link your program.",
+        );
+        assert_eq!(
+            normalize_windows_include_with_max_path(upstream_long_error, ".").unwrap_err(),
+            "path too long"
+        );
+
+        let mut exactly_max_absolute = current.to_string_lossy().into_owned();
+        exactly_max_absolute.push_str(r"\a\");
+        while exactly_max_absolute.len() < 260 {
+            if exactly_max_absolute.len() > 1 && exactly_max_absolute.len().is_multiple_of(10) {
+                exactly_max_absolute.push('\\');
+            } else {
+                exactly_max_absolute.push('a');
+            }
+        }
+        assert_eq!(exactly_max_absolute.len(), 260);
+        assert!(
+            normalize_windows_include_with_max_path(&exactly_max_absolute, ".").is_ok(),
+            "an absolute path exactly MAX_PATH bytes long remains valid"
+        );
+
+        let exactly_max_relative = (0..260)
+            .map(|index| {
+                if index % 10 == 4 && index < 259 {
+                    '\\'
+                } else {
+                    'a'
+                }
+            })
+            .collect::<String>();
+        let error =
+            normalize_windows_include_with_max_path(&exactly_max_relative, ".").unwrap_err();
+        assert!(error.contains("GetFullPathName"), "{error}");
     }
 
     #[test]

@@ -325,8 +325,10 @@ This is an evidence ledger, not a claim of full compatibility.
   Ninja's case-insensitive same-drive relativization across mixed separators,
   `.`/`..`, differently-cased absolute roots, and cross-drive inputs. The four
   path-behavior groups from the upstream `IncludesNormalize` corpus are mapped
-  directly; Knight deliberately retains its long-path support instead of
-  reproducing Ninja's two `MAX_PATH` rejection cases. The deprecated `msvc`
+  directly. The two `MAX_PATH` cases are mapped as well: a `ninja` alias
+  reproduces Ninja's overlong-input and relative-to-absolute failure policy and
+  exact `GetFullPathNameA` fatal framing, while native Knight deliberately
+  retains Unicode long-path support. The deprecated `msvc`
   helper also writes Ninja's CRLF depfile bytes and space escapes, preserves
   raw child output when dependency extraction is not requested, imports its
   binary environment block, and forwards child stderr byte-for-byte.
@@ -353,7 +355,7 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 93
-  library, 6 CLI, and 128 differential tests; Linux-under-WSL passes 88 library,
+  library, 6 CLI, and 129 differential tests; Linux-under-WSL passes 88 library,
   5 CLI, and 102 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.

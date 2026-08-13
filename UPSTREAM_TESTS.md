@@ -31,7 +31,7 @@ Status meanings:
 | `elide_middle_test` | 3 | Mapped | `build::tests::upstream_elide_middle_corpus` |
 | `explanations_test` | 3 | Implementation-specific | C++ explanation-storage wrapper; observable `-d explain` behavior has separate differentials |
 | `graph_test` | 55 | Partial | Generated DAG corpus plus graph/query/target traversal differentials |
-| `includes_normalize_test` | 6 | Partial | Four path groups mapped; two `MAX_PATH` rejections intentionally remain long-path successes |
+| `includes_normalize_test` | 6 | Mapped | Simple, relative, case, drive, overlong-input, exact-`MAX_PATH`, and relative-to-absolute overflow cases; native Knight retains long-path support |
 | `jobserver_test` | 7 | Mapped | `main::tests::upstream_jobserver_makeflags_parser_corpus` and native-mode corpus |
 | `json_test` | 4 | Mapped | `main::tests::upstream_json_encoder_corpus` |
 | `lexer_test` | 8 | Mapped | `manifest::tests::upstream_lexer_value_identifier_and_escape_corpus` |

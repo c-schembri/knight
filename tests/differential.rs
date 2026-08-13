@@ -2825,6 +2825,43 @@ fn msvc_helper_normalizes_include_paths_like_ninja() {
 
 #[cfg(windows)]
 #[test]
+fn msvc_helper_alias_preserves_ninjas_max_path_rejection() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let alias = temp.path().join("ninja.exe");
+    install_ninja_alias(knight, &alias);
+    let include = (0..260)
+        .map(|index| {
+            if index % 10 == 4 && index < 259 {
+                '\\'
+            } else {
+                'a'
+            }
+        })
+        .collect::<String>();
+    let command = format!("echo Note: including file: {include}");
+    let arguments = ["-t", "msvc", "-o", "obj", "--", "cmd", "/d", "/c", &command];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(&alias, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+
+    let native = run(knight, temp.path(), &arguments);
+    assert!(native.status.success());
+    assert!(
+        fs::read_to_string(temp.path().join("obj.d"))
+            .unwrap()
+            .starts_with("obj: ")
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn msvc_helper_environment_and_stderr_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
