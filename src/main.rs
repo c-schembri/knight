@@ -1292,7 +1292,13 @@ fn read_optional_build_log(path: &Path) -> Result<Option<String>, String> {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         #[cfg(unix)]
-        Err(error) if error.kind() == io::ErrorKind::IsADirectory => Ok(Some(String::new())),
+        Err(error)
+            if error.kind() == io::ErrorKind::IsADirectory
+                || error.raw_os_error() == Some(libc::EISDIR)
+                || path.is_dir() =>
+        {
+            Ok(Some(String::new()))
+        }
         Err(error) => Err(format!("loading build log {}: {error}", path.display())),
     }
 }

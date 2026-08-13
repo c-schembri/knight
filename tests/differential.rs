@@ -6186,7 +6186,9 @@ fn explain_reports_the_dirty_dependency_that_triggers_each_edge() {
         assert!(expected.status.success() && actual.status.success());
         assert_eq!(actual.stdout, expected.stdout, "invocation={invocation}");
         assert_eq!(
-            String::from_utf8_lossy(&actual.stderr).replace("knight explain:", "build explain:"),
+            String::from_utf8_lossy(&actual.stderr)
+                .replace("knight explain:", "build explain:")
+                .replace("ninja explain:", "build explain:"),
             String::from_utf8_lossy(&expected.stderr).replace("ninja explain:", "build explain:"),
             "invocation={invocation}"
         );

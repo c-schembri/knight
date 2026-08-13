@@ -2895,20 +2895,22 @@ fn run_build_prepared<'a>(
                 .map(|output| build_log.recorded_mtime(output))
                 .collect::<Vec<_>>();
             let ninja_dragonfly_restat = cfg!(target_os = "dragonfly") && program_name() == "ninja";
+            let restat_output_is_clean = |before: &Option<u128>, after: &Option<u128>| {
+                before == after && !(ninja_dragonfly_restat && before.is_some())
+            };
             let restat_cleaned = restat
-                && !ninja_dragonfly_restat
                 && completion
                     .prior_output_mtimes
                     .iter()
                     .zip(&current_output_mtimes)
-                    .any(|(before, after)| before == after);
-            if restat && !ninja_dragonfly_restat {
+                    .any(|(before, after)| restat_output_is_clean(before, after));
+            if restat {
                 for ((output, before), after) in edge
                     .outputs()
                     .zip(&completion.prior_output_mtimes)
                     .zip(&current_output_mtimes)
                 {
-                    if before == after {
+                    if restat_output_is_clean(before, after) {
                         restat_cleaned_outputs.insert(output);
                     }
                 }
