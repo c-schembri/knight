@@ -3,6 +3,7 @@ use rapidhash::{HashMapExt, HashSetExt};
 use std::borrow::Cow;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -191,6 +192,16 @@ impl Diagnostic {
             message.push('\n');
         }
         message
+    }
+
+    pub fn ninja_manifest_load_message(&self) -> Option<String> {
+        let cause = self.message.strip_prefix("loading manifest: ")?;
+        let cause = io_error_message(cause);
+        let mut message = format!("loading '{}': {cause}", self.path.display());
+        if cfg!(windows) {
+            message.push_str("\r\r\n");
+        }
+        Some(message)
     }
 }
 
@@ -419,6 +430,40 @@ pub fn load_manifest(path: impl AsRef<Path>) -> Result<Manifest, Diagnostic> {
     Ok(manifest)
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum FileIdentity {
+    #[cfg(windows)]
+    Windows(u32, u64),
+    #[cfg(unix)]
+    Unix(u64, u64),
+    Path(PathBuf),
+}
+
+fn file_identity(file: &fs::File, path: &Path) -> FileIdentity {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } != 0 {
+            let index = (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow);
+            return FileIdentity::Windows(information.dwVolumeSerialNumber, index);
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(metadata) = file.metadata() {
+            use std::os::unix::fs::MetadataExt as _;
+            return FileIdentity::Unix(metadata.dev(), metadata.ino());
+        }
+    }
+    FileIdentity::Path(path.canonicalize().unwrap_or_else(|_| path.to_owned()))
+}
+
 pub fn parse_manifest(source: &str, path: impl AsRef<Path>) -> Result<Manifest, Diagnostic> {
     let path = path.as_ref();
     let mut manifest = Manifest::new(path.to_owned());
@@ -431,17 +476,20 @@ pub fn parse_manifest(source: &str, path: impl AsRef<Path>) -> Result<Manifest, 
 fn parse_file_into(
     path: &Path,
     manifest: &mut Manifest,
-    stack: &mut HashSet<PathBuf>,
+    stack: &mut HashSet<FileIdentity>,
     scope: usize,
 ) -> Result<(), Diagnostic> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    if !stack.insert(canonical.clone()) {
+    let mut file = fs::File::open(path)
+        .map_err(|error| Diagnostic::new(path, 1, 1, format!("loading manifest: {error}")))?;
+    let identity = file_identity(&file, path);
+    if !stack.insert(identity.clone()) {
         return Err(Diagnostic::new(path, 1, 1, "include cycle detected"));
     }
-    let source = fs::read_to_string(path)
+    let mut source = String::new();
+    file.read_to_string(&mut source)
         .map_err(|error| Diagnostic::new(path, 1, 1, format!("loading manifest: {error}")))?;
     parse_source_into_with_loader(&source, path, manifest, scope, Some(stack))?;
-    stack.remove(&canonical);
+    stack.remove(&identity);
     Ok(())
 }
 
@@ -459,7 +507,7 @@ fn parse_source_into_with_loader(
     path: &Path,
     manifest: &mut Manifest,
     scope: usize,
-    mut stack: Option<&mut HashSet<PathBuf>>,
+    mut stack: Option<&mut HashSet<FileIdentity>>,
 ) -> Result<(), Diagnostic> {
     let missing_final_newline = !source.is_empty() && !source.ends_with('\n');
     let source_path = Arc::new(path.to_owned());
@@ -791,15 +839,23 @@ fn parse_source_into_with_loader(
             return Err(
                 Diagnostic::new(path, line_no, 8, "expected target name").with_source(&raw_line)
             );
-        } else if let Some(rest) = line.strip_prefix("include ") {
+        } else if let Some(rest) = line
+            .strip_prefix("include ")
+            .or_else(|| (line == "include").then_some(""))
+        {
             let include = expand(rest.trim(), |name| {
                 manifest.lookup_variable(scope, name).map(str::to_owned)
             });
             if let Some(stack) = stack.as_deref_mut() {
                 let child = PathBuf::from(include);
-                parse_file_into(&child, manifest, stack, scope)?;
+                parse_file_into(&child, manifest, stack, scope).map_err(|error| {
+                    contextualize_include_error(error, path, line_no, &raw_line, &child)
+                })?;
             }
-        } else if let Some(rest) = line.strip_prefix("subninja ") {
+        } else if let Some(rest) = line
+            .strip_prefix("subninja ")
+            .or_else(|| (line == "subninja").then_some(""))
+        {
             let include = expand(rest.trim(), |name| {
                 manifest.lookup_variable(scope, name).map(str::to_owned)
             });
@@ -810,7 +866,9 @@ fn parse_source_into_with_loader(
                     parent: Some(scope),
                     ..Scope::default()
                 });
-                parse_file_into(&child, manifest, stack, child_scope)?;
+                parse_file_into(&child, manifest, stack, child_scope).map_err(|error| {
+                    contextualize_include_error(error, path, line_no, &raw_line, &child)
+                })?;
             }
         } else if let Some((key, value)) = parse_binding(line) {
             let expanded = expand(value, |name| {
@@ -920,6 +978,41 @@ fn first_unescaped_colon(input: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn contextualize_include_error(
+    error: Diagnostic,
+    parent: &Path,
+    line: usize,
+    source_line: &str,
+    included: &Path,
+) -> Diagnostic {
+    let Some(cause) = error.message.strip_prefix("loading manifest: ") else {
+        return error;
+    };
+    let cause = io_error_message(cause);
+    let ninja_compat = crate::program_name() == "ninja";
+    let mut message = if ninja_compat {
+        format!("loading '{}': {cause}", included.display())
+    } else {
+        format!(
+            "loading included manifest '{}': {cause}",
+            included.display()
+        )
+    };
+    if ninja_compat && cfg!(windows) {
+        // Windows Ninja retains FormatMessage's CRLF, then routes it through
+        // its text-mode stderr stream before the lexer adds another newline.
+        message.push_str("\r\r\n");
+    }
+    Diagnostic::new(parent, line, line_end_column(source_line), message).with_source(source_line)
+}
+
+fn io_error_message(cause: &str) -> &str {
+    cause
+        .rsplit_once(" (os error ")
+        .and_then(|(message, code)| code.strip_suffix(')').map(|_| message))
+        .unwrap_or(cause)
 }
 
 fn validate(manifest: &Manifest) -> Result<(), Diagnostic> {
@@ -1807,6 +1900,19 @@ fn strip_comment(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detects_include_cycles_through_hard_links() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("build.ninja");
+        let alias = temp.path().join("alias.ninja");
+        fs::write(&manifest, format!("include {}\n", alias.display())).unwrap();
+        fs::hard_link(&manifest, alias).unwrap();
+
+        let error = load_manifest(&manifest).unwrap_err();
+        assert_eq!(error.message, "include cycle detected");
+    }
 
     #[test]
     fn parses_core_manifest_syntax() {

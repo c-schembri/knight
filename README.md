@@ -28,6 +28,7 @@ powershell -NoProfile -File scripts\benchmark-status.ps1 -Ninja C:\path\to\ninja
 powershell -NoProfile -File scripts\benchmark-compdb.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-phony.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-pools.ps1 -Ninja C:\path\to\ninja.exe
+powershell -NoProfile -File scripts\benchmark-includes.ps1 -Ninja C:\path\to\ninja.exe
 wsl -e bash scripts/benchmark-status-pty.sh /path/to/ninja /path/to/knight
 python scripts\differential-fuzz.py --ninja C:\path\to\ninja.exe --knight target\release\knight.exe --execute
 python scripts\differential-fuzz.py --ninja C:\path\to\ninja.exe --knight target\release\knight.exe --missing-sources --execute

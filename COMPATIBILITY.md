@@ -29,6 +29,10 @@ This is an evidence ledger, not a claim of full compatibility.
   locations after continuations, EOF distinctions, separator ordering,
   duplicate outputs, pools, defaults, and response-file pairs. Native Knight
   retains its richer line-and-column diagnostic format.
+  Missing or malformed root, `include`, and `subninja` manifests also match the
+  alias's platform-specific diagnostic bytes and parent-directive locations.
+  Knight detects direct, indirect, and hard-link include cycles; this remains an
+  intentional robustness improvement over the observed Windows Ninja crash.
   `ninja_required_version` follows Ninja's major/minor
   compatibility comparison and older-major warning policy, including patch
   suffixes and nonnumeric values. The `$^` newline escape is gated by those
@@ -256,9 +260,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 65
-  library, 2 CLI, and 113 differential tests; Linux-under-WSL passes 64 library,
-  2 CLI, and 86 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 66
+  library, 2 CLI, and 114 differential tests; Linux-under-WSL passes 65 library,
+  2 CLI, and 87 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

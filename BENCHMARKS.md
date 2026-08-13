@@ -56,6 +56,30 @@ measured 3.269 ms median for Ninja and 3.333 ms for Knight, showing that fresh
 Windows process startup consumes most of a small no-op invocation before build
 logic runs. The requested order-of-magnitude goal remains open.
 
+## Included manifests
+
+`scripts/benchmark-includes.ps1` generates a root manifest containing only
+flat `include` declarations, validates identical `-t targets all` output, and
+then times fresh interleaved processes. Opening each file and deriving its
+cycle-detection identity from the open handle replaces an extra canonicalize
+filesystem lookup per include. It also detects cycles through hard links, which
+path spelling alone cannot do.
+
+| Files | Samples | Tool | Median | Minimum | P95 |
+| ---: | ---: | :--- | ---: | ---: | ---: |
+| 100 | 100 | Ninja | 8.076 ms | 6.978 ms | 75.790 ms |
+| 100 | 100 | Knight | 8.718 ms | 7.924 ms | 10.829 ms |
+| 1,000 | 50 | Ninja | 44.343 ms | 41.366 ms | 111.207 ms |
+| 1,000 | 50 | Knight | 48.287 ms | 47.109 ms | 49.958 ms |
+| 5,000 | 20 | Ninja | 201.526 ms | 198.546 ms | 285.243 ms |
+| 5,000 | 20 | Knight | 222.449 ms | 220.355 ms | 228.657 ms |
+
+Knight's medians now trail Ninja by 8.0-10.4%, while its P95 is substantially
+lower in these samples. Before the handle-identity change, Knight measured
+12.625, 87.783, and 422.178 ms at the same three sizes, so the redundant path
+canonicalization accounted for 31.0-49.4% of its prior elapsed time. This closes
+most of the discovered include-loading gap but is not yet a performance win.
+
 ## Generated dyndep concurrency
 
 `scripts/benchmark-dyndep.ps1` measures a fresh `-j2` build in which a generated

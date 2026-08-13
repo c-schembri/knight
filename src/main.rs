@@ -212,7 +212,9 @@ fn ninja_compat_build_error(error: &str) -> Option<String> {
 
 fn format_manifest_diagnostic(error: Diagnostic) -> String {
     if program_name() == "ninja" {
-        error.ninja_message()
+        error
+            .ninja_manifest_load_message()
+            .unwrap_or_else(|| error.ninja_message())
     } else {
         error.to_string()
     }

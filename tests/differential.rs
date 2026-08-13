@@ -3310,6 +3310,82 @@ fn manifest_diagnostics_match_ninja_when_invoked_as_ninja() {
 }
 
 #[test]
+fn included_manifest_diagnostics_match_ninja_without_sacrificing_cycle_detection() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let cases = [
+        ("missing include", "include absent.ninja\n", None),
+        ("missing subninja", "subninja absent.ninja\n", None),
+        ("missing CRLF include", "include absent.ninja\r\n", None),
+        ("missing empty include", "include\n", None),
+        ("missing empty subninja", "subninja\n", None),
+        ("empty include path", "include $missing\n", None),
+        ("empty subninja path", "subninja $missing\n", None),
+        ("broken include", "include child.ninja\n", Some("build\n")),
+        ("broken subninja", "subninja child.ninja\n", Some("build\n")),
+    ];
+
+    for (name, manifest, child) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        if let Some(child) = child {
+            fs::write(temp.path().join("child.ninja"), child).unwrap();
+        }
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        fs::copy(knight, &alias).unwrap();
+        let arguments = ["-t", "targets", "all"];
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        let actual = run(&alias, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+
+    for (name, arguments, directory_manifest) in [
+        ("missing default manifest", vec![], false),
+        (
+            "missing explicit manifest",
+            vec!["-f", "absent.ninja"],
+            false,
+        ),
+        ("empty manifest path", vec!["-f", ""], false),
+        ("directory manifest", vec!["-f", "folder"], true),
+    ] {
+        let temp = tempdir().unwrap();
+        if directory_manifest {
+            fs::create_dir(temp.path().join("folder")).unwrap();
+        }
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        fs::copy(knight, &alias).unwrap();
+        let mut arguments = arguments;
+        arguments.extend(["-t", "targets", "all"]);
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        let actual = run(&alias, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("build.ninja"), "include child.ninja\n").unwrap();
+    fs::write(temp.path().join("child.ninja"), "include build.ninja\n").unwrap();
+    let cycle = run(knight, temp.path(), &["-t", "targets", "all"]);
+    assert_eq!(cycle.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&cycle.stderr).contains("include cycle detected"),
+        "stderr={}",
+        String::from_utf8_lossy(&cycle.stderr)
+    );
+}
+
+#[test]
 fn required_version_uses_ninja_major_minor_compatibility() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
