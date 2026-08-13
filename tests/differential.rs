@@ -6610,6 +6610,311 @@ fn upstream_graph_case_inventory_is_complete() {
 }
 
 #[test]
+fn upstream_build_core_planning_corpus_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let rule = "rule cat\n  command = echo cat $in $out\n";
+    let cases = [
+        ("no work", "build all: phony\ndefault all\n", &[][..]),
+        ("one step", "build out: cat in\ndefault out\n", &["in"][..]),
+        (
+            "two steps",
+            "build mid: cat in\nbuild out: cat mid\ndefault out\n",
+            &["in"][..],
+        ),
+        (
+            "two outputs",
+            "build out1 out2: cat in\ndefault out1 out2\n",
+            &["in"][..],
+        ),
+        (
+            "implicit output",
+            "build out | out.imp: cat in\ndefault out\n",
+            &["in"][..],
+        ),
+        (
+            "multiple output input",
+            "build left right: cat in\nbuild final: cat left right\ndefault final\n",
+            &["in"][..],
+        ),
+        (
+            "double dependent",
+            "build left: cat in\nbuild right: cat in\nbuild final: cat left right\ndefault final\n",
+            &["in"][..],
+        ),
+        (
+            "order only",
+            "build order: cat order.in\nbuild out: cat in || order\ndefault out\n",
+            &["in", "order.in"][..],
+        ),
+        (
+            "phony chain",
+            "build alias: phony in\nbuild out: cat alias\ndefault out\n",
+            &["in"][..],
+        ),
+        (
+            "complex target",
+            "name = foo %2F bar?baz&x=1\nbuild $name: cat in\ndefault $name\n",
+            &["in"][..],
+        ),
+    ];
+
+    for (name, edges, inputs) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), format!("{rule}{edges}")).unwrap();
+        for input in inputs {
+            fs::write(temp.path().join(input), "input\n").unwrap();
+        }
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        install_ninja_alias(knight, &alias);
+        let expected = run(ninja, temp.path(), &["-n", "-v"]);
+        let actual = run(&alias, temp.path(), &["-n", "-v"]);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "case={name} actual_stdout={} actual_stderr={} expected_stdout={} expected_stderr={}",
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stdout),
+            String::from_utf8_lossy(&expected.stderr),
+        );
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+
+    for (name, manifest, arguments) in [
+        (
+            "missing input",
+            format!("{rule}build out: cat missing\ndefault out\n"),
+            vec!["-n", "-v"],
+        ),
+        (
+            "missing target",
+            format!("{rule}build out: cat in\n"),
+            vec!["-n", "-v", "absent"],
+        ),
+        (
+            "missing input target",
+            format!("{rule}build out: cat missing\n"),
+            vec!["-n", "-v", "missing"],
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        install_ninja_alias(knight, &alias);
+        let expected = run(ninja, temp.path(), &arguments);
+        let actual = run(&alias, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+}
+
+#[test]
+fn upstream_build_response_file_lifecycle_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg(windows)]
+    let commands = [
+        "cmd /d /c type $rspfile > $out",
+        "cmd /d /c type $rspfile & exit /b 1",
+    ];
+    #[cfg(not(windows))]
+    let commands = ["cat $rspfile > $out", "cat $rspfile; false"];
+
+    for (name, command) in [("success", commands[0]), ("failure", commands[1])] {
+        let mut outputs = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                format!(
+                    concat!(
+                        "rule rsp\n",
+                        "  command = {command}\n",
+                        "  rspfile = args.rsp\n",
+                        "  rspfile_content = content\n",
+                        "build out: rsp\n",
+                        "default out\n",
+                    ),
+                    command = command
+                ),
+            )
+            .unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            let output = run(executable, temp.path(), &["-v"]);
+            assert_eq!(
+                temp.path().join("args.rsp").exists(),
+                name == "failure",
+                "case={name} implementation={implementation}"
+            );
+            if name == "failure" {
+                assert_eq!(
+                    fs::read_to_string(temp.path().join("args.rsp")).unwrap(),
+                    "content"
+                );
+            }
+            outputs.push((output.status.code(), output.stdout, output.stderr));
+        }
+        assert_eq!(outputs[1].0, outputs[0].0, "case={name}");
+        assert_eq!(outputs[1].1, outputs[0].1, "case={name}");
+        assert_eq!(outputs[1].2, outputs[0].2, "case={name}");
+    }
+}
+
+#[test]
+fn upstream_build_case_inventory_is_complete() {
+    const CASES: [&str; 121] = [
+        "Basic",
+        "DoubleOutputDirect",
+        "DoubleOutputIndirect",
+        "DoubleDependent",
+        "PoolWithDepthOne",
+        "ConsolePool",
+        "PoolsWithDepthTwo",
+        "PoolWithRedundantEdges",
+        "PoolWithFailingEdge",
+        "PriorityWithoutBuildLog",
+        "NoWork",
+        "OneStep",
+        "OneStep2",
+        "TwoStep",
+        "TwoOutputs",
+        "ImplicitOutput",
+        "MultiOutIn",
+        "Chain",
+        "MissingInput",
+        "MissingTarget",
+        "MissingInputTarget",
+        "MakeDirs",
+        "DepFileMissing",
+        "DepFileOK",
+        "DepFileParseError",
+        "EncounterReadyTwice",
+        "OrderOnlyDeps",
+        "RebuildOrderOnlyDeps",
+        "DepFileCanonicalize",
+        "Phony",
+        "PhonyNoWork",
+        "PhonySelfReference",
+        "PhonyUseCase1",
+        "PhonyUseCase2",
+        "PhonyUseCase3",
+        "PhonyUseCase4",
+        "PhonyUseCase5",
+        "PhonyUseCase6",
+        "Fail",
+        "SwallowFailures",
+        "SwallowFailuresLimit",
+        "SwallowFailuresPool",
+        "PoolEdgesReadyButNotWanted",
+        "ImplicitGeneratedOutOfDate",
+        "ImplicitGeneratedOutOfDate2",
+        "NotInLogButOnDisk",
+        "RebuildAfterFailure",
+        "RebuildWithNoInputs",
+        "RestatTest",
+        "RestatMissingFile",
+        "RestatSingleDependentOutputDirty",
+        "RestatMissingInput",
+        "RestatInputChangesDueToRule",
+        "GeneratedPlainDepfileMtime",
+        "AllCommandsShown",
+        "WithDyndep",
+        "RspFileSuccess",
+        "RspFileFailure",
+        "RspFileCmdLineChange",
+        "InterruptCleanup",
+        "StatFailureAbortsBuild",
+        "PhonyWithNoInputs",
+        "DepsGccWithEmptyDepfileErrorsOut",
+        "StatusFormatElapsed_e",
+        "StatusFormatElapsed_w",
+        "StatusFormatETA",
+        "StatusFormatTimeProgress",
+        "StatusFormatReplacePlaceholder",
+        "FailedDepsParse",
+        "TwoOutputsDepFileMSVC",
+        "TwoOutputsDepFileGCCOneLine",
+        "TwoOutputsDepFileGCCMultiLineInput",
+        "TwoOutputsDepFileGCCMultiLineOutput",
+        "TwoOutputsDepFileGCCOnlyMainOutput",
+        "TwoOutputsDepFileGCCOnlySecondaryOutput",
+        "Straightforward",
+        "ObsoleteDeps",
+        "DepsIgnoredInDryRun",
+        "TestInputMtimeRaceCondition",
+        "TestInputMtimeRaceConditionWithDepFile",
+        "RestatDepfileDependency",
+        "RestatDepfileDependencyDepsLog",
+        "DepFileOKDepsLog",
+        "DiscoveredDepDuringBuildChanged",
+        "DepFileDepsLogCanonicalize",
+        "RestatMissingDepfile",
+        "RestatMissingDepfileDepslog",
+        "WrongOutputInDepfileCausesRebuild",
+        "Console",
+        "DyndepMissingAndNoRule",
+        "DyndepReadyImplicitConnection",
+        "DyndepReadySyntaxError",
+        "DyndepReadyCircular",
+        "DyndepBuild",
+        "DyndepBuildSyntaxError",
+        "DyndepBuildUnrelatedOutput",
+        "DyndepBuildDiscoverNewOutput",
+        "DyndepBuildDiscoverNewOutputWithMultipleRules1",
+        "DyndepBuildDiscoverNewOutputWithMultipleRules2",
+        "DyndepBuildDiscoverNewInput",
+        "DyndepBuildDiscoverNewInputWithValidation",
+        "DyndepBuildDiscoverNewInputWithTransitiveValidation",
+        "DyndepBuildDiscoverImplicitConnection",
+        "DyndepBuildDiscoverOutputAndDepfileInput",
+        "DyndepBuildDiscoverNowWantEdge",
+        "DyndepBuildDiscoverNowWantEdgeAndDependent",
+        "DyndepBuildDiscoverCircular",
+        "DyndepBuildDiscoverRestat",
+        "DyndepBuildDiscoverScheduledEdge",
+        "DyndepTwoLevelDirect",
+        "DyndepTwoLevelIndirect",
+        "DyndepTwoLevelDiscoveredReady",
+        "DyndepTwoLevelDiscoveredDirty",
+        "DyndepBuildMultiple",
+        "Validation",
+        "ValidationDependsOnOutput",
+        "ValidationThroughDepfile",
+        "ValidationCircular",
+        "ValidationWithCircularDependency",
+        "ComplexTargetPreserved",
+        "CycleWithOldDepfile",
+    ];
+    let unique = CASES.into_iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), CASES.len());
+}
+
+#[test]
 fn graph_loads_only_reachable_dyndeps_and_warns_without_failing() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");

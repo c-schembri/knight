@@ -479,6 +479,17 @@ impl<'a> StatCache<'a> {
         for (directory, paths) in groups {
             if paths.len() < 8 {
                 for path in paths {
+                    #[cfg(windows)]
+                    if Path::new(path)
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().contains(['?', '*']))
+                    {
+                        // Ninja's Windows stat cache treats wildcard bytes in
+                        // a leaf name as a literal directory-cache miss. A
+                        // direct Win32 stat would instead reject the path.
+                        mtimes.insert(path, None);
+                        continue;
+                    }
                     mtimes.insert(path, checked_modified_ns_cached(Path::new(path), true)?);
                 }
                 continue;

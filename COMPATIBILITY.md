@@ -360,8 +360,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. All 53 manifest-parser and 55 graph
   cases are now explicitly mapped; the 121-case build suite remains open.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
-  library, 6 CLI, and 140 differential tests; Linux-under-WSL passes 90 library,
-  5 CLI, and 115 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 143 differential tests; Linux-under-WSL passes 90 library,
+  5 CLI, and 118 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

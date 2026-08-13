@@ -20,7 +20,7 @@ Status meanings:
 | Upstream suite | Cases | Status | Current evidence |
 | :--- | ---: | :--- | :--- |
 | `build_log_test` | 11 | Mapped | Round-trip, signatures, duplicates, truncation, versions, spaces, restat, long lines, multi-output records, and recompaction |
-| `build_test` | 121 | Partial | Broad scheduling/build differentials; full case mapping remains open |
+| `build_test` | 121 | Partial | Explicit 121-case inventory plus core planning and response-file lifecycle differentials; detailed case-to-evidence closure remains open |
 | `clean_test` | 20 | Mapped | All/target/rule and dry-run modes, multi-output/generator/phony edges, dep/rsp files, dyndeps, failures, spaces, and live/dead build-log outputs |
 | `clparser_test` | 8 | Mapped | `build::tests::upstream_msvc_clparser_corpus` |
 | `depfile_parser_test` | 29 | Mapped | `depfile::tests::upstream_depfile_parser_corpus` |
