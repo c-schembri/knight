@@ -31,27 +31,36 @@ used 50 because short Windows process samples showed a bimodal tail.
 
 | Scenario | Ninja median | Knight median | Knight/Ninja | Winner |
 | :--- | ---: | ---: | ---: | :--- |
-| Parallel clean build | 894.434 ms | 734.541 ms | 0.821 | Knight |
-| Serial clean build | 4895.305 ms | 4982.723 ms | 1.018 | Ninja |
-| Warm no-op | 77.664 ms | 19.485 ms | 0.251 | Knight |
-| One-source rebuild and relink | 110.940 ms | 113.436 ms | 1.022 | Ninja |
-| Shared-header rebuild and relink | 889.102 ms | 758.324 ms | 0.853 | Knight |
-| Direct depfile load, no deps log | 12.588 ms | 21.436 ms | 1.703 | Ninja |
-| 256 parallel short commands | 2940.069 ms | 2399.953 ms | 0.816 | Knight |
-| Manifest regenerate and reload | 5.406 ms | 5.962 ms | 1.103 | Ninja |
-| 1,000 ready dyndep files | 75.144 ms | 54.448 ms | 0.725 | Knight |
+| Parallel clean build | 956.706 ms | 796.895 ms | 0.833 | Knight |
+| Serial clean build | 4686.792 ms | 4789.391 ms | 1.022 | Ninja |
+| Warm no-op | 6.731 ms | 11.718 ms | 1.741 | Ninja |
+| One-source rebuild and relink | 117.258 ms | 109.407 ms | 0.933 | Knight |
+| Shared-header rebuild and relink | 976.744 ms | 848.213 ms | 0.868 | Knight |
+| Direct depfile load, no deps log | 13.400 ms | 13.310 ms | 0.993 | Knight |
+| 256 parallel short commands | 3068.189 ms | 2558.602 ms | 0.834 | Knight |
+| Manifest regenerate and reload | 5.220 ms | 5.494 ms | 1.052 | Ninja |
+| 1,000 ready dyndep files | 119.791 ms | 45.096 ms | 0.376 | Knight |
 
-Knight wins five of nine medians, including the parallel clean, shared-header,
-short-command, warm no-op, and ready-dyndep cases. Serial clean and one-source
-incremental builds are within 2.2% of Ninja. Direct depfile loading and manifest
-regeneration remain clear optimization targets.
+Knight wins six of nine medians after the dependency-planning and build-state
+reuse work. Relative to the immediately preceding lifecycle run, Knight's warm
+no-op time fell 39.9%, direct depfile loading fell 37.9%, manifest regeneration
+fell 7.8%, and the one-source case fell 3.6%. Direct depfile loading moved from
+70.3% behind Ninja to effectively tied. Parallel clean, shared-header,
+short-command, and ready-dyndep builds retain substantial leads.
 
-The warm no-op result needs a tail-latency caveat: Ninja samples clustered near
-5-6 ms or 76-85 ms, while Knight stayed near 18-23 ms. The table reports the
-predeclared median, but Ninja's 5.248 ms minimum demonstrates a faster quiet
-path when the host does not impose the recurring stall. The suite stores every
-sample in `target/benchmark-build-lifecycle/results.json` so this distribution
-is visible rather than collapsed into a single favorable ratio.
+The remaining losses are the warm no-op path, manifest regeneration, and the
+compiler-dominated serial build. The serial gap is 2.2% and the manifest gap is
+0.274 ms. Warm no-op is the clearest engine target: Ninja measured 6.731 ms
+median and 5.551 ms minimum, while Knight measured 11.718 ms median and
+10.854 ms minimum. Knight's 15.170 ms P95 was nevertheless far below Ninja's
+87.111 ms P95 on this Windows run.
+
+Two more aggressive experiments were deliberately rejected rather than shipped:
+a persistent lock-file handle broke restat and metadata-log compatibility, and
+a reusable command-worker pool regressed the short-command A/B median by 5.3%.
+The suite stores every sample in
+`target/benchmark-build-lifecycle/results.json` so session noise and tails stay
+visible rather than being collapsed into a favorable ratio.
 
 ## 2026-08-13, Windows x64
 

@@ -448,6 +448,71 @@ struct StatCache<'a> {
     ninja_stat_cache_diagnostics: bool,
 }
 
+#[derive(Debug, Default)]
+struct DeclaredStatCache<'a> {
+    mtimes: HashMap<&'a str, Option<u128>>,
+}
+
+impl<'a> DeclaredStatCache<'a> {
+    fn preload(manifest: &'a Manifest) -> Self {
+        let mut paths = HashSet::new();
+        for edge in &manifest.edges {
+            paths.extend(edge.outputs());
+            paths.extend(edge.explicit_inputs.iter().map(String::as_str));
+            paths.extend(edge.implicit_inputs.iter().map(String::as_str));
+        }
+        let mut groups = HashMap::<&Path, Vec<&str>>::new();
+        for path in paths {
+            let parent = Path::new(path)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            groups.entry(parent).or_default().push(path);
+        }
+
+        let mut mtimes = HashMap::with_capacity(groups.values().map(Vec::len).sum::<usize>());
+        for (directory, paths) in groups {
+            if paths.len() < 8 {
+                for path in paths {
+                    mtimes.insert(path, modified_ns(Path::new(path)));
+                }
+                continue;
+            }
+            let entries = match directory_mtimes(directory) {
+                DirectoryMtimes::Entries(entries) => entries,
+                DirectoryMtimes::Missing => {
+                    for path in paths {
+                        mtimes.insert(path, None);
+                    }
+                    continue;
+                }
+                DirectoryMtimes::Unavailable => {
+                    for path in paths {
+                        mtimes.insert(path, modified_ns(Path::new(path)));
+                    }
+                    continue;
+                }
+            };
+            for path in paths {
+                let mtime = Path::new(path)
+                    .file_name()
+                    .and_then(|name| entries.get(&directory_entry_key(name)).copied());
+                mtimes.insert(path, mtime);
+            }
+        }
+        Self { mtimes }
+    }
+
+    fn get(&mut self, path: &'a str) -> Option<u128> {
+        if let Some(mtime) = self.mtimes.get(path) {
+            return *mtime;
+        }
+        let mtime = modified_ns(Path::new(path));
+        self.mtimes.insert(path, mtime);
+        mtime
+    }
+}
+
 impl<'a> StatCache<'a> {
     fn preload(
         manifest: &'a Manifest,
@@ -711,12 +776,66 @@ struct DiscoveredDeps {
     missing: Vec<bool>,
     errors: Vec<Option<String>>,
     log: DepsLog,
+    specs: Vec<DependencySpec>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum DependencyMode {
+    #[default]
+    None,
+    Gcc,
+    Msvc,
+    Unknown(String),
+}
+
+#[derive(Clone, Debug, Default)]
+struct DependencySpec {
+    mode: DependencyMode,
+    depfile: String,
+    msvc_prefix: String,
+}
+
+impl DependencySpec {
+    fn evaluate(manifest: &Manifest, edge: &Edge) -> Self {
+        let rule = manifest.lookup_rule(edge.scope, &edge.rule);
+        let has_binding = |name: &str| {
+            edge.bindings.contains_key(name)
+                || rule.is_some_and(|rule| rule.bindings.contains_key(name))
+        };
+        if !has_binding("deps") && !has_binding("depfile") {
+            return Self::default();
+        }
+        let deps = evaluate_binding(manifest, edge, "deps");
+        Self {
+            mode: match deps.as_str() {
+                "" => DependencyMode::None,
+                "gcc" => DependencyMode::Gcc,
+                "msvc" => DependencyMode::Msvc,
+                unknown => DependencyMode::Unknown(unknown.to_owned()),
+            },
+            depfile: evaluate_unescaped_binding(manifest, edge, "depfile"),
+            msvc_prefix: if deps == "msvc" {
+                evaluate_binding(manifest, edge, "msvc_deps_prefix")
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    fn has_metadata(&self) -> bool {
+        self.mode != DependencyMode::None || !self.depfile.is_empty()
+    }
 }
 
 impl DiscoveredDeps {
     #[cfg(test)]
     fn load(manifest: &Manifest) -> Self {
-        Self::load_filtered(manifest, &vec![true; manifest.edges.len()]).unwrap()
+        let specs = manifest
+            .edges
+            .iter()
+            .map(|edge| DependencySpec::evaluate(manifest, edge))
+            .collect();
+        Self::load_filtered(manifest, &vec![true; manifest.edges.len()], specs).unwrap()
     }
 
     fn load_for_build<'a>(
@@ -725,17 +844,32 @@ impl DiscoveredDeps {
         build_log: &BuildLog<'a>,
     ) -> Result<Self, String> {
         if !manifest.has_dependency_bindings() {
-            return Self::load_filtered(manifest, &[]);
+            return Self::load_filtered(
+                manifest,
+                &[],
+                vec![DependencySpec::default(); manifest.edges.len()],
+            );
         }
-        let declared_dirty = declared_dirty_edges(manifest, outputs, build_log);
+        let specs = manifest
+            .edges
+            .iter()
+            .map(|edge| DependencySpec::evaluate(manifest, edge))
+            .collect::<Vec<_>>();
+        let mut stat_cache = DeclaredStatCache::preload(manifest);
+        let declared_dirty =
+            declared_dirty_edges(manifest, outputs, build_log, &specs, &mut stat_cache);
         let load = declared_dirty
             .into_iter()
             .map(|dirty| !dirty)
             .collect::<Vec<_>>();
-        Self::load_filtered(manifest, &load)
+        Self::load_filtered(manifest, &load, specs)
     }
 
-    fn load_filtered(manifest: &Manifest, load: &[bool]) -> Result<Self, String> {
+    fn load_filtered(
+        manifest: &Manifest,
+        load: &[bool],
+        specs: Vec<DependencySpec>,
+    ) -> Result<Self, String> {
         let mut inputs = vec![Vec::new(); manifest.edges.len()];
         let mut missing = vec![false; manifest.edges.len()];
         let mut errors = vec![None; manifest.edges.len()];
@@ -755,17 +889,17 @@ impl DiscoveredDeps {
                 missing,
                 errors,
                 log,
+                specs,
             });
         }
         for (edge_id, edge) in manifest.edges.iter().enumerate() {
-            let deps = evaluate_binding(manifest, edge, "deps");
-            let depfile = evaluate_unescaped_binding(manifest, edge, "depfile");
-            if deps.is_empty() && depfile.is_empty() {
+            let spec = &specs[edge_id];
+            if !spec.has_metadata() {
                 continue;
             }
-            if !deps.is_empty() {
-                if !matches!(deps.as_str(), "gcc" | "msvc") {
-                    let error = format!("unknown deps type '{deps}'");
+            if spec.mode != DependencyMode::None {
+                if let DependencyMode::Unknown(unknown) = &spec.mode {
+                    let error = format!("unknown deps type '{unknown}'");
                     errors[edge_id] = Some(if program_name() == "ninja" {
                         format!("\0fatal:{error}")
                     } else {
@@ -783,9 +917,8 @@ impl DiscoveredDeps {
                 if load[edge_id] && valid {
                     inputs[edge_id] = entry
                         .unwrap()
-                        .inputs
-                        .iter()
-                        .cloned()
+                        .inputs()
+                        .map(str::to_owned)
                         .map(canonicalize_owned_path)
                         .collect();
                 } else if !valid {
@@ -793,23 +926,23 @@ impl DiscoveredDeps {
                 }
                 continue;
             }
-            if !depfile.is_empty() {
+            if !spec.depfile.is_empty() {
                 if !load[edge_id] {
-                    missing[edge_id] = !Path::new(&depfile).exists();
+                    missing[edge_id] = !Path::new(&spec.depfile).exists();
                     continue;
                 }
-                match fs::read_to_string(&depfile) {
+                match fs::read_to_string(&spec.depfile) {
                     Ok(contents) => match parse_depfile(&contents).map(normalize_depfile) {
                         Ok(parsed) if parsed.outputs.is_empty() => missing[edge_id] = true,
                         Ok(parsed)
-                            if deps.is_empty()
+                            if spec.mode == DependencyMode::None
                                 && parsed.outputs.first().map(String::as_str)
                                     != edge.outputs().next() =>
                         {
                             missing[edge_id] = true;
                         }
                         Ok(parsed)
-                            if deps.is_empty()
+                            if spec.mode == DependencyMode::None
                                 && parsed.outputs.iter().any(|output| {
                                     !edge.outputs().any(|declared| declared == output)
                                 }) =>
@@ -820,7 +953,8 @@ impl DiscoveredDeps {
                                 .find(|output| !edge.outputs().any(|declared| declared == *output))
                                 .unwrap();
                             errors[edge_id] = Some(format!(
-                                "{depfile}: depfile mentions '{unexpected}' as an output, but no such output was declared"
+                                "{}: depfile mentions '{unexpected}' as an output, but no such output was declared",
+                                spec.depfile
                             ));
                         }
                         Ok(parsed) => {
@@ -830,7 +964,9 @@ impl DiscoveredDeps {
                                 .map(canonicalize_owned_path)
                                 .collect();
                         }
-                        Err(error) => errors[edge_id] = Some(format!("{depfile}: {error}")),
+                        Err(error) => {
+                            errors[edge_id] = Some(format!("{}: {error}", spec.depfile));
+                        }
                     },
                     Err(_) => missing[edge_id] = true,
                 }
@@ -843,6 +979,7 @@ impl DiscoveredDeps {
             missing,
             errors,
             log,
+            specs,
         })
     }
 
@@ -1009,14 +1146,17 @@ fn declared_dirty_edges<'a>(
     manifest: &'a Manifest,
     outputs: &HashMap<&'a str, usize>,
     build_log: &BuildLog<'a>,
+    specs: &[DependencySpec],
+    stat_cache: &mut DeclaredStatCache<'a>,
 ) -> Vec<bool> {
     fn path_mtime<'a>(
-        path: &str,
+        path: &'a str,
         manifest: &'a Manifest,
         outputs: &HashMap<&'a str, usize>,
         visiting: &mut HashSet<usize>,
+        stat_cache: &mut DeclaredStatCache<'a>,
     ) -> Option<u128> {
-        if let Some(mtime) = modified_ns(Path::new(path)) {
+        if let Some(mtime) = stat_cache.get(path) {
             return Some(mtime);
         }
         let edge_id = outputs.get(path).copied()?;
@@ -1030,7 +1170,7 @@ fn declared_dirty_edges<'a>(
         }
         let mut newest = 0;
         for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-            newest = newest.max(path_mtime(input, manifest, outputs, visiting)?);
+            newest = newest.max(path_mtime(input, manifest, outputs, visiting, stat_cache)?);
         }
         visiting.remove(&edge_id);
         Some(newest)
@@ -1043,6 +1183,7 @@ fn declared_dirty_edges<'a>(
         build_log: &BuildLog<'a>,
         state: &mut [u8],
         result: &mut [bool],
+        stat_cache: &mut DeclaredStatCache<'a>,
     ) -> bool {
         match state[edge_id] {
             1 => return true,
@@ -1055,7 +1196,7 @@ fn declared_dirty_edges<'a>(
         let mut newest_input = 0;
         if edge.rule != "phony" {
             for output in edge.outputs() {
-                let Some(mtime) = modified_ns(Path::new(output)) else {
+                let Some(mtime) = stat_cache.get(output) else {
                     dirty = true;
                     continue;
                 };
@@ -1065,11 +1206,14 @@ fn declared_dirty_edges<'a>(
 
         for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
             if let Some(producer) = outputs.get(input.as_str()).copied() {
-                if visit(producer, manifest, outputs, build_log, state, result) {
+                if visit(
+                    producer, manifest, outputs, build_log, state, result, stat_cache,
+                ) {
                     dirty = true;
                 }
             }
-            let Some(mtime) = path_mtime(input, manifest, outputs, &mut HashSet::new()) else {
+            let Some(mtime) = path_mtime(input, manifest, outputs, &mut HashSet::new(), stat_cache)
+            else {
                 dirty = true;
                 continue;
             };
@@ -1103,10 +1247,8 @@ fn declared_dirty_edges<'a>(
 
     let mut state = vec![0; manifest.edges.len()];
     let mut result = vec![false; manifest.edges.len()];
-    for (edge_id, edge) in manifest.edges.iter().enumerate() {
-        if !evaluate_binding(manifest, edge, "deps").is_empty()
-            || !evaluate_unescaped_binding(manifest, edge, "depfile").is_empty()
-        {
+    for (edge_id, spec) in specs.iter().enumerate() {
+        if spec.has_metadata() {
             visit(
                 edge_id,
                 manifest,
@@ -1114,6 +1256,7 @@ fn declared_dirty_edges<'a>(
                 build_log,
                 &mut state,
                 &mut result,
+                stat_cache,
             );
         }
     }
@@ -1166,6 +1309,118 @@ pub fn run_build(
     options: &BuildOptions,
 ) -> Result<BuildOutcome, String> {
     run_build_impl(Cow::Borrowed(manifest), requested_targets, options)
+}
+
+pub fn run_build_reusable<'a>(
+    manifest: &'a Manifest,
+    requested_targets: &[String],
+    options: &BuildOptions,
+) -> Result<(BuildOutcome, Option<ReusableBuildState<'a>>), String> {
+    LAST_BUILD_EXIT_CODE.with(|code| code.set(0));
+    ensure_build_directory(manifest, options.dry_run)?;
+    let phase = Instant::now();
+    let output_map = output_map(manifest);
+    let output_map_time = phase.elapsed();
+    let phase = Instant::now();
+    let build_log_file = build_log_path(manifest);
+    let build_log = BuildLog::load(build_log_file.clone(), &output_map)
+        .map_err(|error| format!("loading build log {}: {error}", build_log_file.display()))?;
+    if let Some(warning) = build_log.invalidation_warning {
+        eprintln!("{}: warning: {warning}", program_name());
+    }
+    let build_log_time = phase.elapsed();
+    let phase = Instant::now();
+    let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
+    let deps_time = phase.elapsed();
+    let phase = Instant::now();
+    let targets = select_targets(manifest, requested_targets, &output_map, &discovered.log)?;
+    let closure = dependency_closure(
+        manifest,
+        &targets,
+        &output_map,
+        &discovered,
+        options.phony_cycle_error,
+    )?;
+    let closure_time = phase.elapsed();
+    if closure_has_dyndeps(manifest, &closure)? {
+        return run_build(manifest, requested_targets, options).map(|outcome| (outcome, None));
+    }
+    let (outcome, state) = run_build_prepared_reusable(
+        manifest,
+        options,
+        PreparedBuild {
+            output_map,
+            discovered,
+            build_log,
+            closure,
+            stats: PreparationStats {
+                output_map: output_map_time,
+                dependencies: deps_time,
+                closure: closure_time,
+                build_log: build_log_time,
+            },
+        },
+        ProgressContext::default(),
+    )?;
+    Ok((outcome, Some(state)))
+}
+
+pub fn run_build_from_state<'a>(
+    manifest: &'a Manifest,
+    requested_targets: &[String],
+    options: &BuildOptions,
+    mut state: ReusableBuildState<'a>,
+) -> Result<BuildOutcome, String> {
+    LAST_BUILD_EXIT_CODE.with(|code| code.set(0));
+    let phase = Instant::now();
+    let targets = select_targets(
+        manifest,
+        requested_targets,
+        &state.output_map,
+        &state.discovered.log,
+    )?;
+    let closure = dependency_closure(
+        manifest,
+        &targets,
+        &state.output_map,
+        &state.discovered,
+        options.phony_cycle_error,
+    )?;
+    state.stats.closure += phase.elapsed();
+    if closure_has_dyndeps(manifest, &closure)? {
+        drop(state);
+        return run_build(manifest, requested_targets, options);
+    }
+    run_build_prepared(
+        manifest,
+        options,
+        PreparedBuild {
+            output_map: state.output_map,
+            discovered: state.discovered,
+            build_log: state.build_log,
+            closure,
+            stats: state.stats,
+        },
+        ProgressContext::default(),
+    )
+}
+
+fn closure_has_dyndeps(manifest: &Manifest, closure: &[usize]) -> Result<bool, String> {
+    for &edge_id in closure {
+        let edge = &manifest.edges[edge_id];
+        let dyndep = evaluate_unescaped_binding(manifest, edge, "dyndep");
+        if dyndep.is_empty() {
+            continue;
+        }
+        if !edge.inputs().any(|input| input == dyndep) {
+            return Err(format!(
+                "dyndep file '{dyndep}' is not an input of '{}'",
+                edge_label(edge)
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub fn run_build_owned(
@@ -1924,6 +2179,13 @@ struct PreparedBuild<'a> {
     stats: PreparationStats,
 }
 
+pub struct ReusableBuildState<'a> {
+    output_map: HashMap<&'a str, usize>,
+    discovered: DiscoveredDeps,
+    build_log: BuildLog<'a>,
+    stats: PreparationStats,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ProgressContext {
     offset: usize,
@@ -1938,6 +2200,15 @@ fn run_build_prepared<'a>(
     prepared: PreparedBuild<'a>,
     progress: ProgressContext,
 ) -> Result<BuildOutcome, String> {
+    run_build_prepared_reusable(manifest, options, prepared, progress).map(|(outcome, _)| outcome)
+}
+
+fn run_build_prepared_reusable<'a>(
+    manifest: &'a Manifest,
+    options: &BuildOptions,
+    prepared: PreparedBuild<'a>,
+    progress: ProgressContext,
+) -> Result<(BuildOutcome, ReusableBuildState<'a>), String> {
     let PreparedBuild {
         output_map,
         mut discovered,
@@ -2125,6 +2396,7 @@ fn run_build_prepared<'a>(
     let mut dry_run_statuses = Vec::new();
     let mut dry_run_pending = VecDeque::<(usize, Option<String>)>::new();
     let mut command_buffer = String::new();
+    let mut created_directories = HashSet::<PathBuf>::new();
     let start = Instant::now();
     let (tx, rx) = mpsc::channel::<SchedulerEvent>();
     let mut job_token = None;
@@ -2437,7 +2709,7 @@ fn run_build_prepared<'a>(
 
             let dry_dependency_error = options
                 .dry_run
-                .then(|| dry_dependency_configuration_error(manifest, edge))
+                .then(|| dry_dependency_configuration_error(&discovered.specs[edge_id]))
                 .flatten();
             let precomputed_dirty = if options.dry_run
                 && options.quiet
@@ -2645,21 +2917,14 @@ fn run_build_prepared<'a>(
                 printer.suspend();
             }
             for output in edge.outputs() {
-                create_parent_directory(Path::new(output))?;
+                create_parent_directory_cached(Path::new(output), &mut created_directories)?;
             }
-            let depfile = evaluate_unescaped_binding(manifest, edge, "depfile");
+            let depfile = &discovered.specs[edge_id].depfile;
             if !depfile.is_empty() {
-                create_parent_directory(Path::new(&depfile))?;
+                create_parent_directory_cached(Path::new(&depfile), &mut created_directories)?;
             }
             if let Some(rspfile) = &evaluated.rspfile {
-                if let Some(parent) = rspfile.parent() {
-                    fs::create_dir_all(parent).map_err(|error| {
-                        format!(
-                            "creating response-file directory '{}': {error}",
-                            parent.display()
-                        )
-                    })?;
-                }
+                create_parent_directory_cached(rspfile, &mut created_directories)?;
                 let contents = evaluated.rspfile_content.as_deref().unwrap_or_default();
                 #[cfg(windows)]
                 let contents = contents.replace('\n', "\r\n");
@@ -2677,10 +2942,8 @@ fn run_build_prepared<'a>(
             let rspfile = evaluated.rspfile;
             let newest_input = evaluated.newest_input;
             let start_ms = start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-            if let Some(parent) = lock_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("creating build directory: {error}"))?;
-            }
+            create_parent_directory_cached(&lock_path, &mut created_directories)
+                .map_err(|error| format!("creating build directory: {error}"))?;
             fs::write(&lock_path, b"")
                 .map_err(|error| format!("updating '{}': {error}", lock_path.display()))?;
             // Ninja expects the lock-file timestamp taken immediately before
@@ -2875,10 +3138,11 @@ fn run_build_prepared<'a>(
             return Err("build stopped: interrupted by user.".to_owned());
         }
         unregister_active_cleanup(completion.edge);
+        let dependency_spec = &discovered.specs[completion.edge];
         let raw_command_output = cfg!(windows)
-            && (evaluate_binding(manifest, edge, "deps") == "msvc" || raw_command_start_failure);
+            && (dependency_spec.mode == DependencyMode::Msvc || raw_command_start_failure);
         let dependency_result =
-            extract_dependencies(manifest, edge, &mut output, options.keep_depfile);
+            extract_dependencies(dependency_spec, &mut output, options.keep_depfile);
         if status.tracks_prediction() {
             status.finish_edge(
                 build_log.previous_elapsed(edge),
@@ -3120,7 +3384,15 @@ fn run_build_prepared<'a>(
         printer.print_on_new_line(format!("{}: no work to do.\n", program_name()).as_bytes())?;
         printer.finish_line()?;
     }
-    Ok(outcome)
+    Ok((
+        outcome,
+        ReusableBuildState {
+            output_map,
+            discovered,
+            build_log,
+            stats: preparation,
+        },
+    ))
 }
 
 fn initially_dirty_edges(
@@ -3606,15 +3878,28 @@ fn expand_status_variables(
     Ok(rendered)
 }
 
+#[cfg(test)]
 fn create_parent_directory(path: &Path) -> Result<(), String> {
+    create_parent_directory_cached(path, &mut HashSet::new())
+}
+
+fn create_parent_directory_cached(
+    path: &Path,
+    created: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     else {
         return Ok(());
     };
+    if created.contains(parent) {
+        return Ok(());
+    }
     fs::create_dir_all(parent)
-        .map_err(|error| format!("creating output directory '{}': {error}", parent.display()))
+        .map_err(|error| format!("creating output directory '{}': {error}", parent.display()))?;
+    created.insert(parent.to_owned());
+    Ok(())
 }
 
 struct Dependents {
@@ -4072,62 +4357,61 @@ fn tolerates_phony_self_reference(edge: &Edge, phony_cycle_error: bool) -> bool 
         && edge.implicit_inputs.is_empty()
 }
 
-fn dry_dependency_configuration_error(manifest: &Manifest, edge: &Edge) -> Option<String> {
-    (evaluate_binding(manifest, edge, "deps") == "gcc"
-        && evaluate_unescaped_binding(manifest, edge, "depfile").is_empty())
-    .then(|| "edge with deps=gcc but no depfile makes no sense".to_owned())
+fn dry_dependency_configuration_error(spec: &DependencySpec) -> Option<String> {
+    (spec.mode == DependencyMode::Gcc && spec.depfile.is_empty())
+        .then(|| "edge with deps=gcc but no depfile makes no sense".to_owned())
 }
 
 fn extract_dependencies(
-    manifest: &Manifest,
-    edge: &Edge,
+    spec: &DependencySpec,
     output: &mut Output,
     keep_depfile: bool,
 ) -> Result<Option<Vec<String>>, String> {
-    let deps_type = evaluate_binding(manifest, edge, "deps");
-    match deps_type.as_str() {
-        "" => Ok(None),
-        "gcc" => {
-            let depfile = evaluate_unescaped_binding(manifest, edge, "depfile");
-            if depfile.is_empty() {
+    match &spec.mode {
+        DependencyMode::None => Ok(None),
+        DependencyMode::Gcc => {
+            if spec.depfile.is_empty() {
                 return Err("edge with deps=gcc but no depfile makes no sense".to_owned());
             }
-            let contents = match fs::read_to_string(&depfile) {
+            let contents = match fs::read_to_string(&spec.depfile) {
                 Ok(contents) => contents,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-                Err(error) => return Err(format!("reading depfile '{depfile}': {error}")),
+                Err(error) => {
+                    return Err(format!("reading depfile '{}': {error}", spec.depfile));
+                }
             };
             let inputs = if contents.is_empty() {
                 Vec::new()
             } else {
                 normalize_depfile(
                     parse_depfile(&contents)
-                        .map_err(|error| format!("parsing depfile '{depfile}': {error}"))?,
+                        .map_err(|error| format!("parsing depfile '{}': {error}", spec.depfile))?,
                 )
                 .inputs
             };
             if !keep_depfile {
-                match fs::remove_file(&depfile) {
+                match fs::remove_file(&spec.depfile) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(format!("deleting depfile '{depfile}': {error}")),
+                    Err(error) => {
+                        return Err(format!("deleting depfile '{}': {error}", spec.depfile));
+                    }
                 }
             }
             Ok(Some(inputs))
         }
-        "msvc" => {
-            let prefix = evaluate_binding(manifest, edge, "msvc_deps_prefix");
-            let prefix = if prefix.is_empty() {
+        DependencyMode::Msvc => {
+            let prefix = if spec.msvc_prefix.is_empty() {
                 "Note: including file: "
             } else {
-                &prefix
+                &spec.msvc_prefix
             };
             let mut inputs = BTreeSet::new();
             output.stdout = filter_msvc_output(&output.stdout, prefix, &mut inputs)?;
             output.stderr = filter_msvc_output(&output.stderr, prefix, &mut inputs)?;
             Ok(Some(inputs.into_iter().collect()))
         }
-        unknown => Err(format!("unknown deps type '{unknown}'")),
+        DependencyMode::Unknown(unknown) => Err(format!("unknown deps type '{unknown}'")),
     }
 }
 
@@ -6469,6 +6753,7 @@ mod tests {
             missing: vec![false; count],
             errors: vec![None; count],
             log: DepsLog::default(),
+            specs: vec![DependencySpec::default(); count],
         };
         let closure =
             dependency_closure(&manifest, &[count - 1], &outputs, &discovered, false).unwrap();

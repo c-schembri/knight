@@ -8,9 +8,28 @@ const VERSION: u32 = 4;
 const MAX_RECORD_SIZE: usize = (1 << 19) - 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepsEntry {
+struct StoredDepsEntry {
+    mtime: u64,
+    inputs: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DepsEntry<'a> {
     pub mtime: u64,
-    pub inputs: Vec<String>,
+    nodes: &'a [String],
+    inputs: &'a [u32],
+}
+
+impl<'a> DepsEntry<'a> {
+    pub fn inputs(self) -> impl ExactSizeIterator<Item = &'a str> + Clone {
+        self.inputs
+            .iter()
+            .map(|id| self.nodes[*id as usize].as_str())
+    }
+
+    pub fn input_count(self) -> usize {
+        self.inputs.len()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -21,7 +40,7 @@ pub struct DepsLog {
     recovered: bool,
     nodes: Vec<String>,
     ids: HashMap<String, u32>,
-    entries: HashMap<String, DepsEntry>,
+    entries: HashMap<u32, StoredDepsEntry>,
     total_dep_records: usize,
 }
 
@@ -77,20 +96,35 @@ impl DepsLog {
         self.recovered
     }
 
-    pub fn get(&self, output: &str) -> Option<&DepsEntry> {
-        self.entries.get(output)
+    pub fn get(&self, output: &str) -> Option<DepsEntry<'_>> {
+        let id = *self.ids.get(output)?;
+        let entry = self.entries.get(&id)?;
+        Some(DepsEntry {
+            mtime: entry.mtime,
+            nodes: &self.nodes,
+            inputs: &entry.inputs,
+        })
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &DepsEntry)> {
-        self.entries
-            .iter()
-            .map(|(path, entry)| (path.as_str(), entry))
+    pub fn entries(&self) -> impl Iterator<Item = (&str, DepsEntry<'_>)> {
+        self.entries.iter().map(|(id, entry)| {
+            (
+                self.nodes[*id as usize].as_str(),
+                DepsEntry {
+                    mtime: entry.mtime,
+                    nodes: &self.nodes,
+                    inputs: &entry.inputs,
+                },
+            )
+        })
     }
 
     pub fn outputs_in_node_order(&self) -> impl Iterator<Item = &str> {
         self.nodes
             .iter()
-            .filter(|path| self.entries.contains_key(path.as_str()))
+            .enumerate()
+            .filter(|(id, _)| self.entries.contains_key(&(*id as u32)))
+            .map(|(_, path)| path)
             .map(String::as_str)
     }
 
@@ -99,20 +133,23 @@ impl DepsLog {
     }
 
     pub fn first_reverse_dep(&self, input: &str) -> Option<&str> {
-        self.nodes.iter().find_map(|node| {
+        self.nodes.iter().enumerate().find_map(|(id, node)| {
             self.entries
-                .get(node)
-                .is_some_and(|entry| entry.inputs.iter().any(|candidate| candidate == input))
+                .get(&(id as u32))
+                .is_some_and(|entry| {
+                    entry
+                        .inputs
+                        .iter()
+                        .any(|candidate| self.nodes[*candidate as usize] == input)
+                })
                 .then_some(node.as_str())
         })
     }
 
     pub fn record(&mut self, output: &str, mtime: u64, inputs: &[String]) -> io::Result<()> {
-        if self
-            .entries
-            .get(output)
-            .is_some_and(|entry| entry.mtime == mtime && entry.inputs == inputs)
-        {
+        if self.get(output).is_some_and(|entry| {
+            entry.mtime == mtime && entry.inputs().eq(inputs.iter().map(String::as_str))
+        }) {
             return Ok(());
         }
         let output_id = self.ensure_id(output)?;
@@ -136,17 +173,17 @@ impl DepsLog {
         record.extend_from_slice(&output_id.to_le_bytes());
         record.extend_from_slice(&(mtime as u32).to_le_bytes());
         record.extend_from_slice(&((mtime >> 32) as u32).to_le_bytes());
-        for input_id in input_ids {
+        for input_id in &input_ids {
             record.extend_from_slice(&input_id.to_le_bytes());
         }
         let file = self.open_append()?;
         file.write_all(&record)?;
         file.flush()?;
         self.entries.insert(
-            output.to_owned(),
-            DepsEntry {
+            output_id,
+            StoredDepsEntry {
                 mtime,
-                inputs: inputs.to_vec(),
+                inputs: input_ids,
             },
         );
         Ok(())
@@ -161,7 +198,16 @@ impl DepsLog {
         let entries = self
             .outputs_in_node_order()
             .filter(|output| is_live(output))
-            .map(|output| (output.to_owned(), self.entries[output].clone()))
+            .map(|output| {
+                let entry = self
+                    .get(output)
+                    .expect("live dependency output has an entry");
+                (
+                    output.to_owned(),
+                    entry.mtime,
+                    entry.inputs().map(str::to_owned).collect::<Vec<_>>(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut temporary = self.path.as_os_str().to_os_string();
         temporary.push(".recompact");
@@ -173,8 +219,8 @@ impl DepsLog {
         if temporary.exists() {
             fs::remove_file(&temporary)?;
         }
-        for (output, entry) in entries {
-            compact.record(&output, entry.mtime, &entry.inputs)?;
+        for (output, mtime, inputs) in entries {
+            compact.record(&output, mtime, &inputs)?;
         }
         if compact.entries.is_empty() {
             compact.open_append()?;
@@ -250,16 +296,18 @@ impl DepsLog {
         if record.len() < 12 || record.len() % 4 != 0 {
             return Err(());
         }
-        let output_id = read_u32(record, 0)? as usize;
-        let output = self.nodes.get(output_id).ok_or(())?.clone();
+        let output_id = read_u32(record, 0)?;
+        self.nodes.get(output_id as usize).ok_or(())?;
         let mtime = read_u32(record, 4)? as u64 | ((read_u32(record, 8)? as u64) << 32);
         let mut inputs = Vec::with_capacity(record.len() / 4 - 3);
         for offset in (12..record.len()).step_by(4) {
-            let input_id = read_u32(record, offset)? as usize;
-            inputs.push(self.nodes.get(input_id).ok_or(())?.clone());
+            let input_id = read_u32(record, offset)?;
+            self.nodes.get(input_id as usize).ok_or(())?;
+            inputs.push(input_id);
         }
         self.total_dep_records += 1;
-        self.entries.insert(output, DepsEntry { mtime, inputs });
+        self.entries
+            .insert(output_id, StoredDepsEntry { mtime, inputs });
         Ok(())
     }
 
@@ -361,13 +409,9 @@ mod tests {
         let before = fs::metadata(&path).unwrap().len();
 
         let mut loaded = DepsLog::load(path.clone()).unwrap();
-        assert_eq!(
-            loaded.get("out.o"),
-            Some(&DepsEntry {
-                mtime: 43,
-                inputs: vec!["a.h".to_owned()]
-            })
-        );
+        let entry = loaded.get("out.o").unwrap();
+        assert_eq!(entry.mtime, 43);
+        assert_eq!(entry.inputs().collect::<Vec<_>>(), ["a.h"]);
         loaded.recompact().unwrap();
         assert!(fs::metadata(&path).unwrap().len() < before);
         assert_eq!(DepsLog::load(path).unwrap().get("out.o").unwrap().mtime, 43);
@@ -450,20 +494,12 @@ mod tests {
             log.outputs_in_node_order().collect::<Vec<_>>(),
             ["out.o", "out2.o"]
         );
-        assert_eq!(
-            log.get("out.o"),
-            Some(&DepsEntry {
-                mtime: 1,
-                inputs: vec!["foo.h".to_owned(), "bar.h".to_owned()],
-            })
-        );
-        assert_eq!(
-            log.get("out2.o"),
-            Some(&DepsEntry {
-                mtime: 2,
-                inputs: vec!["foo.h".to_owned(), "bar2.h".to_owned()],
-            })
-        );
+        let first = log.get("out.o").unwrap();
+        assert_eq!(first.mtime, 1);
+        assert_eq!(first.inputs().collect::<Vec<_>>(), ["foo.h", "bar.h"]);
+        let second = log.get("out2.o").unwrap();
+        assert_eq!(second.mtime, 2);
+        assert_eq!(second.inputs().collect::<Vec<_>>(), ["foo.h", "bar2.h"]);
         assert_eq!(log.first_reverse_dep("foo.h"), Some("out.o"));
         assert_eq!(log.first_reverse_dep("bar.h"), Some("out.o"));
     }
@@ -477,11 +513,11 @@ mod tests {
             .collect::<Vec<_>>();
         let mut log = DepsLog::load(path.clone()).unwrap();
         log.record("out.o", 1, &inputs).unwrap();
-        assert_eq!(log.get("out.o").unwrap().inputs.len(), 100_000);
+        assert_eq!(log.get("out.o").unwrap().input_count(), 100_000);
         drop(log);
 
         let mut loaded = DepsLog::load(path.clone()).unwrap();
-        assert_eq!(loaded.get("out.o").unwrap().inputs.len(), 100_000);
+        assert_eq!(loaded.get("out.o").unwrap().input_count(), 100_000);
         let before = fs::metadata(&path).unwrap().len();
         loaded.record("out.o", 1, &inputs).unwrap();
         assert_eq!(fs::metadata(path).unwrap().len(), before);
@@ -559,12 +595,12 @@ mod tests {
         fs::write(&path, duplicate).unwrap();
         let recovered = DepsLog::load(path.clone()).unwrap();
         assert!(recovered.was_recovered());
-        assert_eq!(recovered.get("out.o").unwrap().inputs.len(), 2);
+        assert_eq!(recovered.get("out.o").unwrap().input_count(), 2);
         assert_eq!(fs::metadata(&path).unwrap().len(), original.len() as u64);
         drop(recovered);
         let clean = DepsLog::load(path).unwrap();
         assert!(!clean.was_recovered());
-        assert_eq!(clean.get("out.o").unwrap().inputs.len(), 2);
+        assert_eq!(clean.get("out.o").unwrap().input_count(), 2);
     }
 
     #[test]
@@ -580,7 +616,10 @@ mod tests {
         let before = fs::metadata(&path).unwrap().len();
 
         log.recompact_retain(|output| output == "out.o").unwrap();
-        assert_eq!(log.get("out.o").unwrap().inputs, ["foo.h"]);
+        assert_eq!(
+            log.get("out.o").unwrap().inputs().collect::<Vec<_>>(),
+            ["foo.h"]
+        );
         assert!(log.get("other_out.o").is_none());
         assert!(fs::metadata(&path).unwrap().len() < before);
 

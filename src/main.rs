@@ -11,7 +11,7 @@ use knight_build::ensure_process_tree_cleanup;
 use knight_build::{
     BuildOptions, Diagnostic, Edge, Manifest, apply_dyndep_files, canonicalize_path,
     install_interrupt_handler, last_build_exit_code, load_manifest, program_name,
-    resolve_target_path, run_build, run_build_owned, spellcheck,
+    resolve_target_path, run_build_from_state, run_build_owned, run_build_reusable, spellcheck,
 };
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::{HashMapExt, HashSetExt};
@@ -501,22 +501,25 @@ fn run() -> Result<(), String> {
             });
             let mut regeneration_options = cli.options.clone();
             regeneration_options.quiet_no_work = true;
-            let outcome = run_build(
+            let (outcome, reusable) = run_build_reusable(
                 &manifest,
                 std::slice::from_ref(&manifest_target),
                 &regeneration_options,
             )?;
-            if outcome.commands_run == 0 || cli.options.dry_run {
-                break;
-            }
-            if prior_mtime.is_some_and(|prior| {
+            let manifest_unchanged = prior_mtime.is_some_and(|prior| {
                 prior
                     == fs::metadata(&cli.manifest)
                         .ok()
                         .map(|metadata| log_mtime(&metadata))
-            }) {
+            });
+            if outcome.commands_run == 0 || cli.options.dry_run || manifest_unchanged {
+                if let Some(reusable) = reusable {
+                    return run_build_from_state(&manifest, &cli.targets, &cli.options, reusable)
+                        .map(|_| ());
+                }
                 break;
             }
+            drop(reusable);
             regeneration_count += 1;
             let reload_start = Instant::now();
             manifest = load_manifest(&cli.manifest).map_err(format_manifest_diagnostic)?;
@@ -1438,11 +1441,11 @@ fn tool_deps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
         };
         println!(
             "{output}: #deps {}, deps mtime {} ({})",
-            entry.inputs.len(),
+            entry.input_count(),
             entry.mtime,
             if status { "VALID" } else { "STALE" }
         );
-        for input in &entry.inputs {
+        for input in entry.inputs() {
             println!("    {input}");
         }
         println!();
@@ -3131,7 +3134,7 @@ fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), Strin
         } else {
             for output in edge.outputs() {
                 if let Some(entry) = log.get(output) {
-                    discovered.extend(entry.inputs.iter().cloned());
+                    discovered.extend(entry.inputs().map(str::to_owned));
                 }
             }
         }
