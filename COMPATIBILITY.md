@@ -164,7 +164,8 @@ This is an evidence ledger, not a claim of full compatibility.
   the actual process code page rather than a fixed label, with Unicode paths
   beyond `MAX_PATH` covered differentially. Unknown tools, target modes,
   targets, debug settings, and warning flags provide Ninja-compatible spelling
-  suggestions.
+  suggestions. Ninja's four-case edit-distance corpus is mapped directly,
+  including bounded distance and replacement-disabled behavior.
   `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
   `multi-inputs` short/long options, including bundled short flags and attached
   delimiters, have differential coverage. Missing arguments and attached
@@ -189,7 +190,9 @@ This is an evidence ledger, not a claim of full compatibility.
   Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
   phony-edge filtering behavior. Compilation databases use Ninja's exact
   pretty-printed JSON shape, platform newline bytes, and JSON control-character
-  escapes. Response-file expansion also preserves Ninja's legacy first-marker
+  escapes. All four upstream JSON encoder cases are mapped directly, including
+  standard escapes, arbitrary C0 controls, and unescaped UTF-8. Response-file
+  expansion also preserves Ninja's legacy first-marker
   behavior. `compdb-targets` rejects input-only nodes as non-targets instead of
   silently returning an empty database. Edges used only for validation are
   excluded, while an output used as both a validation and a regular input

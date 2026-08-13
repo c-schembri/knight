@@ -2932,7 +2932,20 @@ fn json_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_short_option_clusters, parse_failure_count, parse_load_average};
+    use super::{
+        expand_short_option_clusters, json_escape, parse_failure_count, parse_load_average,
+    };
+
+    #[test]
+    fn upstream_json_encoder_corpus() {
+        assert_eq!(json_escape("foo bar"), "foo bar");
+        assert_eq!(
+            json_escape("\"\\\u{0008}\u{000c}\n\r\t"),
+            "\\\"\\\\\\b\\f\\n\\r\\t"
+        );
+        assert_eq!(json_escape("\u{0001}\u{001f}"), "\\u0001\\u001f");
+        assert_eq!(json_escape("你好"), "你好");
+    }
 
     #[test]
     fn expands_getopt_style_short_option_clusters() {

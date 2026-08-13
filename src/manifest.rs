@@ -1691,6 +1691,15 @@ pub fn spellcheck<'a>(
 }
 
 fn edit_distance(left: &[u8], right: &[u8], maximum: usize) -> usize {
+    edit_distance_with_replacements(left, right, true, maximum)
+}
+
+fn edit_distance_with_replacements(
+    left: &[u8],
+    right: &[u8],
+    allow_replacements: bool,
+    maximum: usize,
+) -> usize {
     let mut row = (0..=right.len()).collect::<Vec<_>>();
     for (left_index, left_byte) in left.iter().enumerate() {
         let mut previous = left_index;
@@ -1698,13 +1707,19 @@ fn edit_distance(left: &[u8], right: &[u8], maximum: usize) -> usize {
         let mut best = row[0];
         for (right_index, right_byte) in right.iter().enumerate() {
             let old = row[right_index + 1];
-            row[right_index + 1] = (previous + usize::from(left_byte != right_byte))
-                .min(row[right_index].min(old) + 1);
+            let replacement = if left_byte == right_byte {
+                previous
+            } else if allow_replacements {
+                previous + 1
+            } else {
+                maximum.saturating_add(1)
+            };
+            row[right_index + 1] = replacement.min(row[right_index].min(old) + 1);
             previous = old;
             best = best.min(row[right_index + 1]);
         }
         if best > maximum {
-            return maximum + 1;
+            return maximum.saturating_add(1);
         }
     }
     row[right.len()]
@@ -2255,5 +2270,40 @@ default obj/foo$ bar.o
 
         let comment_eof = parse_manifest("# comment", "build.ninja").unwrap_err();
         assert_eq!(comment_eof.message, "unexpected EOF");
+    }
+
+    #[test]
+    fn upstream_edit_distance_corpus() {
+        assert_eq!(edit_distance(b"", b"ninja", usize::MAX), 5);
+        assert_eq!(edit_distance(b"ninja", b"", usize::MAX), 5);
+        assert_eq!(edit_distance(b"", b"", usize::MAX), 0);
+        for maximum in 1..7 {
+            assert_eq!(
+                edit_distance(b"abcdefghijklmnop", b"ponmlkjihgfedcba", maximum),
+                maximum + 1
+            );
+        }
+        assert_eq!(edit_distance(b"ninja", b"njnja", usize::MAX), 1);
+        assert_eq!(edit_distance(b"njnja", b"ninja", usize::MAX), 1);
+        assert_eq!(
+            edit_distance_with_replacements(b"ninja", b"njnja", false, usize::MAX),
+            2
+        );
+        assert_eq!(
+            edit_distance_with_replacements(b"njnja", b"ninja", false, usize::MAX),
+            2
+        );
+        assert_eq!(
+            edit_distance(b"browser_tests", b"browser_tests", usize::MAX),
+            0
+        );
+        assert_eq!(
+            edit_distance(b"browser_test", b"browser_tests", usize::MAX),
+            1
+        );
+        assert_eq!(
+            edit_distance(b"browser_tests", b"browser_test", usize::MAX),
+            1
+        );
     }
 }
