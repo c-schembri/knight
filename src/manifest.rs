@@ -2231,4 +2231,29 @@ default obj/foo$ bar.o
             .is_ok()
         );
     }
+
+    #[test]
+    fn upstream_lexer_value_identifier_and_escape_corpus() {
+        let manifest = parse_manifest(
+            concat!(
+                "var = lower\n",
+                "VaR = mixed\n",
+                "x = braced\n",
+                "plain = plain text $var $VaR ${x}\n",
+                "escaped = $ $$ab c$: $\n",
+                " cde\n",
+                "foo.dots = dotted\n",
+                "bar = base\n",
+                "dot-expansion = $bar.dots ${foo.dots}\n",
+            ),
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(manifest.variables["plain"], "plain text lower mixed braced");
+        assert_eq!(manifest.variables["escaped"], " $ab c: cde");
+        assert_eq!(manifest.variables["dot-expansion"], "base.dots dotted");
+
+        let comment_eof = parse_manifest("# comment", "build.ninja").unwrap_err();
+        assert_eq!(comment_eof.message, "unexpected EOF");
+    }
 }

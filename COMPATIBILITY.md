@@ -31,6 +31,10 @@ This is an evidence ledger, not a claim of full compatibility.
   retains its richer line-and-column diagnostic format.
   Missing or malformed root, `include`, and `subninja` manifests also match the
   alias's platform-specific diagnostic bytes and parent-directive locations.
+  All eight upstream core-lexer cases are mapped to executable coverage,
+  including variable-value serialization, escaped continuations, dashed and
+  dotted identifiers, unbraced expansion boundaries, bad escapes, comments at
+  EOF, tabs, and the version-gated `$^` escape.
   Knight detects direct, indirect, and hard-link include cycles; this remains an
   intentional robustness improvement over the observed Windows Ninja crash.
   `ninja_required_version` follows Ninja's major/minor
