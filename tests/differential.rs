@@ -1204,7 +1204,7 @@ fn subprocess_closes_stdin_for_non_console_commands() {
 #[cfg(unix)]
 #[test]
 #[cfg_attr(
-    target_os = "netbsd",
+    any(target_os = "dragonfly", target_os = "netbsd"),
     ignore = "run separately so the 1,025 processes cannot starve parallel tests"
 )]
 fn subprocess_set_supports_more_than_1024_parallel_processes() {
@@ -1241,7 +1241,7 @@ fn subprocess_set_supports_more_than_1024_parallel_processes() {
         assert_eq!(actual.stdout, expected.stdout);
         assert_eq!(actual.stderr, expected.stderr);
     } else {
-        #[cfg(not(any(target_os = "macos", target_os = "netbsd")))]
+        #[cfg(not(any(target_os = "dragonfly", target_os = "macos", target_os = "netbsd")))]
         panic!(
             "Ninja failed: stdout={} stderr={}",
             String::from_utf8_lossy(&expected.stdout),
