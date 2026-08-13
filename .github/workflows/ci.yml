@@ -62,7 +62,7 @@ jobs:
           release: "7.8"
           usesh: true
           envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
-          prepare: pkg_add rust git cmake python
+          prepare: pkg_add rust rust-clippy git cmake python
           run: |
             git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
             git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
