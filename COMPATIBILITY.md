@@ -87,6 +87,10 @@ This is an evidence ledger, not a claim of full compatibility.
   from concurrent ordinary work, default/custom pool
   limits (including zero-depth meaning unlimited), and Ninja-compatible
   ready-edge pool reservations, including multi-output notification order.
+  Clean phonies are collapsed before the initial pool frontier is ranked by
+  critical path. Once scheduling begins, an already-delayed edge claims a
+  newly released pool slot before dependents made ready by that same
+  completion, matching Ninja's temporal reservation semantics.
   Response files, including Windows text-mode newline conversion, inherited
   and child-forwarded GNU/Cargo jobservers,
   load limiting,
@@ -155,10 +159,11 @@ This is an evidence ledger, not a claim of full compatibility.
 - A deterministic generated-DAG differential corpus combines multi-output and
   phony edges with explicit, implicit, order-only, and validation inputs, plus
   bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
-  fresh plus incremental real builds. Both materialized-source and
-  missing-source corpora match Ninja on 1,000 Windows seeds (66,000 tool-mode
-  comparisons and 4,000 real build phases) and 500 Linux seeds (33,000
-  tool-mode comparisons and 2,000 real build phases). The harness runs
+  fresh plus incremental real builds. Materialized-source graphs match Ninja
+  on 3,000 Windows seeds and missing-source graphs on 1,000, totaling 132,000
+  tool-mode comparisons and 8,000 real build phases. Both corpora also match
+  on 500 Linux seeds each (33,000 tool-mode comparisons and 2,000 real build
+  phases). The harness runs
   independent reference/candidate processes concurrently while preserving
   deterministic result order. This audit found and now covers exact
   empty-compdb JSON, missing regular phony inputs, phony-specific missing
@@ -233,8 +238,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 64
-  library, 2 CLI, and 106 differential tests; Linux-under-WSL passes 63 library,
-  2 CLI, and 79 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 108 differential tests; Linux-under-WSL passes 63 library,
+  2 CLI, and 81 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

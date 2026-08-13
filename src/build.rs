@@ -1953,6 +1953,7 @@ fn run_build_prepared<'a>(
     let mut pool_usage = HashMap::<String, usize>::new();
     let mut pool_waiting = HashMap::<String, BinaryHeap<(usize, Reverse<usize>)>>::new();
     let mut pool_reserved = vec![false; manifest.edges.len()];
+    let mut pool_queue_initialized = false;
     let mut outcome = BuildOutcome::default();
     let mut failures = Vec::new();
     let mut stop_starting = false;
@@ -2082,41 +2083,78 @@ fn run_build_prepared<'a>(
     while finished_count < closure.len() {
         let mut made_progress = false;
         if let Some(dirty) = initially_dirty.as_deref() {
-            reserve_new_pool_edges(
-                manifest,
-                &mut newly_ready,
-                &mut pool_reserved,
-                &mut pool_usage,
-                dirty,
-            );
-            let completed = finish_ready_clean_phonies(
-                manifest,
-                dirty,
-                &mut finished,
-                &mut failed_prerequisite,
-                &dependents,
-                &mut pending,
-                &mut ready,
-                &mut newly_ready,
-                &critical_path,
-            );
-            finished_count += completed;
-            made_progress |= completed != 0;
-            reserve_new_pool_edges(
-                manifest,
-                &mut newly_ready,
-                &mut pool_reserved,
-                &mut pool_usage,
-                dirty,
-            );
-            admit_pool_edges(
-                manifest,
-                &mut ready,
-                &mut pool_waiting,
-                &mut pool_reserved,
-                &mut pool_usage,
-                dirty,
-            );
+            if !pool_queue_initialized {
+                let completed = finish_ready_clean_phonies(
+                    manifest,
+                    dirty,
+                    &mut finished,
+                    &mut failed_prerequisite,
+                    &dependents,
+                    &mut pending,
+                    &mut ready,
+                    &mut newly_ready,
+                    &critical_path,
+                );
+                finished_count += completed;
+                made_progress |= completed != 0;
+                // Ninja resolves clean phony edges before constructing its
+                // initial pool queue, so every resulting candidate competes
+                // by critical-path priority rather than notification time.
+                newly_ready.clear();
+                admit_pool_edges(
+                    manifest,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                    dirty,
+                );
+                pool_queue_initialized = true;
+            } else {
+                reserve_new_pool_edges(
+                    manifest,
+                    &mut newly_ready,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                    dirty,
+                );
+                admit_pool_edges(
+                    manifest,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                    dirty,
+                );
+                let completed = finish_ready_clean_phonies(
+                    manifest,
+                    dirty,
+                    &mut finished,
+                    &mut failed_prerequisite,
+                    &dependents,
+                    &mut pending,
+                    &mut ready,
+                    &mut newly_ready,
+                    &critical_path,
+                );
+                finished_count += completed;
+                made_progress |= completed != 0;
+                reserve_new_pool_edges(
+                    manifest,
+                    &mut newly_ready,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                    dirty,
+                );
+                admit_pool_edges(
+                    manifest,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                    dirty,
+                );
+            }
         }
         let mut ready_count = if options.dry_run {
             usize::MAX
@@ -2152,7 +2190,14 @@ fn run_build_prepared<'a>(
                 continue;
             }
             if failed_prerequisite[edge_id] {
-                release_pool_edge(manifest, edge_id, &mut pool_reserved, &mut pool_usage);
+                release_pool_edge(
+                    manifest,
+                    edge_id,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                );
                 if finish_edge(
                     edge_id,
                     false,
@@ -2178,7 +2223,14 @@ fn run_build_prepared<'a>(
                         return Err(format!("input '{input}' is missing"));
                     }
                 }
-                release_pool_edge(manifest, edge_id, &mut pool_reserved, &mut pool_usage);
+                release_pool_edge(
+                    manifest,
+                    edge_id,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                );
                 if finish_edge(
                     edge_id,
                     true,
@@ -2220,7 +2272,14 @@ fn run_build_prepared<'a>(
                         status.remove_edge(build_log.previous_elapsed(edge));
                     }
                 }
-                release_pool_edge(manifest, edge_id, &mut pool_reserved, &mut pool_usage);
+                release_pool_edge(
+                    manifest,
+                    edge_id,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                );
                 if finish_edge(
                     edge_id,
                     true,
@@ -2423,7 +2482,14 @@ fn run_build_prepared<'a>(
 
         if options.dry_run {
             if let Some(edge_id) = dry_run_pending.pop_front() {
-                release_pool_edge(manifest, edge_id, &mut pool_reserved, &mut pool_usage);
+                release_pool_edge(
+                    manifest,
+                    edge_id,
+                    &mut ready,
+                    &mut pool_waiting,
+                    &mut pool_reserved,
+                    &mut pool_usage,
+                );
                 stat_cache.mark_edge(&manifest.edges[edge_id], u128::MAX);
                 if finish_edge(
                     edge_id,
@@ -2487,6 +2553,8 @@ fn run_build_prepared<'a>(
         release_pool_edge(
             manifest,
             completion.edge,
+            &mut ready,
+            &mut pool_waiting,
             &mut pool_reserved,
             &mut pool_usage,
         );
@@ -4231,6 +4299,17 @@ fn admit_pool_edges(
         waiting.entry(pool).or_default().push(candidate);
     }
 
+    admit_waiting_pool_edges(manifest, ready, waiting, reserved, usage);
+    ready.extend(admitted);
+}
+
+fn admit_waiting_pool_edges(
+    manifest: &Manifest,
+    ready: &mut BinaryHeap<(usize, Reverse<usize>)>,
+    waiting: &mut HashMap<String, BinaryHeap<(usize, Reverse<usize>)>>,
+    reserved: &mut [bool],
+    usage: &mut HashMap<String, usize>,
+) {
     for (pool, edges) in waiting.iter_mut() {
         let limit = pool_limit(manifest, Some(pool), usize::MAX);
         let count = usage.entry(pool.clone()).or_default();
@@ -4240,10 +4319,9 @@ fn admit_pool_edges(
             };
             reserved[edge_id] = true;
             *count += 1;
-            admitted.push(candidate);
+            ready.push(candidate);
         }
     }
-    ready.extend(admitted);
 }
 
 fn reserve_new_pool_edges(
@@ -4271,6 +4349,8 @@ fn reserve_new_pool_edges(
 fn release_pool_edge(
     manifest: &Manifest,
     edge_id: usize,
+    ready: &mut BinaryHeap<(usize, Reverse<usize>)>,
+    waiting: &mut HashMap<String, BinaryHeap<(usize, Reverse<usize>)>>,
     reserved: &mut [bool],
     usage: &mut HashMap<String, usize>,
 ) {
@@ -4283,6 +4363,9 @@ fn release_pool_edge(
     {
         *count = count.saturating_sub(1);
     }
+    // Ninja admits already-delayed pool work before finishing this edge can
+    // make newer dependents ready. Preserve that temporal reservation order.
+    admit_waiting_pool_edges(manifest, ready, waiting, reserved, usage);
 }
 
 fn critical_path_weights(

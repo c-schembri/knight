@@ -207,3 +207,28 @@ individual missing-child stats and measured about 37.6 ms median on the
 edges, so larger sizes are robustness rather than comparative evidence.
 Knight completed a 100,000-edge chain in 181.161 ms median across ten samples
 (176.589 ms minimum, 194.787 ms P95).
+
+## Bounded-pool planning
+
+`scripts/benchmark-pools.ps1` measures quiet dry-run planning for independent
+three-edge chains whose final two edges share a depth-one pool. Root
+completions fill the delayed queue, and each pooled completion both frees a
+slot and reveals a newer same-pool dependent. This stresses critical-path
+ranking, initial clean-frontier construction, and Ninja's temporal reservation
+order without launching child commands. Output and exit status are checked before
+the alternating timed samples.
+
+| Chains | Edges | Samples | Tool | Median | Minimum | P95 |
+| ---: | ---: | ---: | :--- | ---: | ---: | ---: |
+| 1,000 | 3,000 | 100 | Ninja | 89.402 ms | 85.630 ms | 185.228 ms |
+| 1,000 | 3,000 | 100 | Knight | 19.896 ms | 18.312 ms | 66.984 ms |
+| 3,000 | 9,000 | 30 | Ninja | 240.462 ms | 235.908 ms | 338.845 ms |
+| 3,000 | 9,000 | 30 | Knight | 35.824 ms | 33.816 ms | 81.684 ms |
+| 10,000 | 30,000 | 20 | Ninja | 832.032 ms | 819.452 ms | 882.834 ms |
+| 10,000 | 30,000 | 20 | Knight | 106.229 ms | 103.210 ms | 153.709 ms |
+
+Knight is 4.5x, 6.7x, and 7.8x faster by median as the corpus grows, with
+2.8x-5.7x lower P95. Instrumentation on the 30,000-edge case attributes about
+19.3 ms to manifest parsing, 9.7 ms to filesystem stat, 7.5 ms to scheduler-
+graph construction, and 56.1 ms to edge evaluation. This path is approaching,
+but has not reached, the project-wide 10x requirement.

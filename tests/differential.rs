@@ -771,6 +771,93 @@ fn bounded_pools_reserve_ready_work_like_ninja() {
 }
 
 #[test]
+fn delayed_pool_work_keeps_its_reservation_before_new_dependents() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule run\n  command = unused\n  description = DO $out\n",
+            "pool serial\n  depth = 1\n",
+            "build a: run source\n",
+            "build b: run a\n  pool = serial\n",
+            "build c: run source\n  pool = serial\n",
+            "build d: run a c\n  pool = serial\n",
+            "build e: run d\n",
+            "build all: phony b e\n",
+            "default all\n",
+        ),
+    )
+    .unwrap();
+    fs::write(temp.path().join("source"), "source").unwrap();
+
+    let arguments = ["-n", "-j1"];
+    let actual = run(knight, temp.path(), &arguments);
+    assert!(actual.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "[1/5] DO a",
+            "[2/5] DO c",
+            "[3/5] DO b",
+            "[4/5] DO d",
+            "[5/5] DO e",
+        ]
+    );
+    if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    }
+}
+
+#[test]
+fn initial_pool_frontier_includes_clean_phony_dependents() {
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let arguments = ["-n", "-j1"];
+    let prefix = concat!(
+        "rule run\n  command = unused\n  description = DO $out\n",
+        "pool serial\n  depth = 1\n",
+        "build ready: run source\n  pool = serial\n",
+        "build ph: phony source\n",
+        "build later: run ph\n  pool = serial\n",
+    );
+    let cases = [
+        (
+            format!("{prefix}build after: run ready\nbuild all: phony later after\ndefault all\n"),
+            ["[1/3] DO ready", "[2/3] DO later", "[3/3] DO after"],
+        ),
+        (
+            format!("{prefix}build after: run later\nbuild all: phony ready after\ndefault all\n"),
+            ["[1/3] DO later", "[2/3] DO ready", "[3/3] DO after"],
+        ),
+    ];
+
+    for (manifest, order) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        fs::write(temp.path().join("source"), "source").unwrap();
+        let actual = run(knight, temp.path(), &arguments);
+        assert!(actual.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            order
+        );
+        if let Some(ninja) = std::env::var_os("KNIGHT_NINJA") {
+            let expected = run(Path::new(&ninja), temp.path(), &arguments);
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout);
+            assert_eq!(actual.stderr, expected.stderr);
+        }
+    }
+}
+
+#[test]
 fn multi_output_notifications_reserve_pools_in_ninja_order() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let command = if cfg!(windows) {
