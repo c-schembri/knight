@@ -2590,6 +2590,41 @@ fn phony_self_reference_policy_matches_ninja_tools() {
 }
 
 #[test]
+fn multi_output_edges_retain_real_self_cycles_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let cases = [
+        "build a b: phony a\ndefault b\n",
+        "build b a: phony a\ndefault b\n",
+        "build a b: phony c\nbuild c: phony a\ndefault b\n",
+        concat!(
+            "build d: phony c\n",
+            "build c: phony b\n",
+            "build b: phony a\n",
+            "build a e: phony d\n",
+            "build f: phony e\n",
+            "default f\n",
+        ),
+    ];
+
+    for manifest in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let expected = run(ninja, temp.path(), &["-n"]);
+        let actual = run(knight, temp.path(), &["-n"]);
+        assert_eq!(actual.status.code(), expected.status.code(), "{manifest}");
+        assert_eq!(actual.stdout, expected.stdout, "{manifest}");
+        let expected_error = String::from_utf8_lossy(&expected.stderr).replace("ninja:", "tool:");
+        let actual_error = String::from_utf8_lossy(&actual.stderr).replace("knight:", "tool:");
+        assert_eq!(actual_error, expected_error, "{manifest}");
+    }
+}
+
+#[test]
 fn declaration_order_and_default_lookup_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -3534,10 +3569,12 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
         &["-t", "clean", "-x"][..],
         &["-t", "inputs", "-x"][..],
         &["-t", "inputs", "--bogus"][..],
+        &["-t", "inputs", "--definitely-invalid"][..],
         &["-t", "inputs", "--help=ignored"][..],
         &["-t", "inputs", "--print0=ignored"][..],
         &["-t", "multi-inputs", "-x"][..],
         &["-t", "multi-inputs", "--bogus"][..],
+        &["-t", "multi-inputs", "--definitely-invalid"][..],
         &["-t", "multi-inputs", "--delimiter="][..],
         &["-t", "multi-inputs", "--delimiter"][..],
         &["-t", "multi-inputs", "-d"][..],

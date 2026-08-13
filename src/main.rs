@@ -1816,6 +1816,17 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
         };
         #[allow(unused_mut)]
         let mut argument = resolve_long_option(&args[index], long_options)?;
+        #[cfg(windows)]
+        if parse_options && argument.starts_with("--") {
+            let name = argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(name, _)| name);
+            if !long_options.contains(&name) {
+                // Ninja's bundled Windows getopt_long falls back to parsing an
+                // unknown --word as the short-option cluster -word.
+                argument.remove(0);
+            }
+        }
         if parse_options && let Some((_, value)) = args[index].split_once('=') {
             let option = argument
                 .split_once('=')

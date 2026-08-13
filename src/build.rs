@@ -399,11 +399,20 @@ impl<'a> StatCache<'a> {
                 }
                 continue;
             }
-            let Some(entries) = directory_mtimes(directory) else {
-                for path in paths {
-                    mtimes.insert(path, checked_modified_ns(Path::new(path))?);
+            let entries = match directory_mtimes(directory) {
+                DirectoryMtimes::Entries(entries) => entries,
+                DirectoryMtimes::Missing => {
+                    for path in paths {
+                        mtimes.insert(path, None);
+                    }
+                    continue;
                 }
-                continue;
+                DirectoryMtimes::Unavailable => {
+                    for path in paths {
+                        mtimes.insert(path, checked_modified_ns(Path::new(path))?);
+                    }
+                    continue;
+                }
             };
             for path in paths {
                 let path_ref = Path::new(path);
@@ -469,6 +478,12 @@ impl<'a> StatCache<'a> {
     }
 }
 
+enum DirectoryMtimes {
+    Entries(HashMap<OsString, u128>),
+    Missing,
+    Unavailable,
+}
+
 #[cfg(windows)]
 fn directory_entry_key(name: &std::ffi::OsStr) -> OsString {
     name.to_string_lossy().to_lowercase().into()
@@ -480,9 +495,12 @@ fn directory_entry_key(name: &std::ffi::OsStr) -> OsString {
 }
 
 #[cfg(windows)]
-fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
+fn directory_mtimes(directory: &Path) -> DirectoryMtimes {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Foundation::{
+        ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError,
+        INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch,
         FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
@@ -517,7 +535,16 @@ fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
         };
     }
     if handle == INVALID_HANDLE_VALUE {
-        return None;
+        // SAFETY: GetLastError reads the calling thread's last-error slot.
+        let error = unsafe { GetLastError() };
+        return if matches!(
+            error,
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_DIRECTORY
+        ) {
+            DirectoryMtimes::Missing
+        } else {
+            DirectoryMtimes::Unavailable
+        };
     }
 
     let mut entries = HashMap::new();
@@ -543,20 +570,32 @@ fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
     }
     // SAFETY: the enumeration handle is valid and closed exactly once.
     unsafe { FindClose(handle) };
-    Some(entries)
+    DirectoryMtimes::Entries(entries)
 }
 
 #[cfg(not(windows))]
-fn directory_mtimes(directory: &Path) -> Option<HashMap<OsString, u128>> {
+fn directory_mtimes(directory: &Path) -> DirectoryMtimes {
     let mut entries = HashMap::new();
-    for entry in fs::read_dir(directory).ok()?.flatten() {
+    let directory = match fs::read_dir(directory) {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return DirectoryMtimes::Missing;
+        }
+        Err(_) => return DirectoryMtimes::Unavailable,
+    };
+    for entry in directory.flatten() {
         if let Ok(metadata) = entry.metadata()
             && let Some(mtime) = metadata_modified(&metadata)
         {
             entries.insert(directory_entry_key(&entry.file_name()), mtime);
         }
     }
-    Some(entries)
+    DirectoryMtimes::Entries(entries)
 }
 
 #[derive(Debug)]
@@ -1769,8 +1808,10 @@ fn run_build_prepared<'a>(
                 };
                 if !in_closure[producer]
                     || (producer == edge_id
-                        && manifest.edges[edge_id].rule == "phony"
-                        && !options.phony_cycle_error)
+                        && tolerates_phony_self_reference(
+                            &manifest.edges[edge_id],
+                            options.phony_cycle_error,
+                        ))
                 {
                     continue;
                 }
@@ -1804,8 +1845,10 @@ fn run_build_prepared<'a>(
                     && seen.insert(producer)
                 {
                     if producer == edge_id
-                        && manifest.edges[edge_id].rule == "phony"
-                        && !options.phony_cycle_error
+                        && tolerates_phony_self_reference(
+                            &manifest.edges[edge_id],
+                            options.phony_cycle_error,
+                        )
                     {
                         continue;
                     }
@@ -3561,7 +3604,7 @@ fn dependency_closure(
             let Some(&producer) = outputs.get(input) else {
                 continue;
             };
-            if producer == edge_id && edge.rule == "phony" && !phony_cycle_error {
+            if producer == edge_id && tolerates_phony_self_reference(edge, phony_cycle_error) {
                 continue;
             }
             match state[producer] {
@@ -3624,6 +3667,14 @@ fn dependency_closure(
         }
     }
     Ok(result)
+}
+
+fn tolerates_phony_self_reference(edge: &Edge, phony_cycle_error: bool) -> bool {
+    !phony_cycle_error
+        && edge.rule == "phony"
+        && edge.explicit_outputs.len() == 1
+        && edge.implicit_outputs.is_empty()
+        && edge.implicit_inputs.is_empty()
 }
 
 fn extract_dependencies(
@@ -4786,6 +4837,18 @@ mod tests {
     fn zero_depth_pool_is_unlimited() {
         let manifest = parse_manifest("pool p\n  depth = 0\n", "build.ninja").unwrap();
         assert_eq!(pool_limit(&manifest, Some("p"), 12), usize::MAX);
+    }
+
+    #[test]
+    fn missing_or_non_directory_parents_authoritatively_have_no_entries() {
+        let temp = tempdir().unwrap();
+        assert!(matches!(
+            directory_mtimes(&temp.path().join("missing")),
+            DirectoryMtimes::Missing
+        ));
+        let file = temp.path().join("file");
+        fs::write(&file, "not a directory").unwrap();
+        assert!(matches!(directory_mtimes(&file), DirectoryMtimes::Missing));
     }
 
     #[test]

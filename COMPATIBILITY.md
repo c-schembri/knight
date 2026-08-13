@@ -104,7 +104,9 @@ This is an evidence ledger, not a claim of full compatibility.
   `multi-inputs`, and `restat`.
 - Debug modes `explain`, `keepdepfile`, `keeprsp`, and `nostatcache`, plus the
   `phonycycle` warning policy, including the legacy self-reference behavior
-  exposed by graph tools. `-d stats` reports manifest, metadata, closure,
+  exposed by graph tools. The compatibility exception is restricted to
+  Ninja's exact single-output phony shape; same-edge references on multi-output
+  phonies remain real dependency cycles. `-d stats` reports manifest, metadata, closure,
   scheduler, log, filesystem, and edge-evaluation timings.
 - Tools: `targets`, `commands`, `clean`, `query`, `compdb`, `compdb-targets`,
   `rules`, `recompact`, `restat`, `deps`, `inputs`, `multi-inputs`, `graph`,
@@ -125,7 +127,9 @@ This is an evidence ledger, not a claim of full compatibility.
   delimiters, have differential coverage. Missing arguments and attached
   values follow the platform `getopt` split for `inputs`, `multi-inputs`, and
   `restat`; the deprecated Windows `msvc` helper follows its getopt/usage exit
-  behavior as well. `inputs` uses a single collector
+  behavior as well. Unknown Windows `getopt_long` words preserve its unusual
+  fallback to a short-option cluster, including an initially valid `d` option.
+  `inputs` uses a single collector
   across all requested targets, matching Ninja's shared-input deduplication,
   and sorts rendered shell-escaped paths rather than their raw spellings.
   Cleaning loads valid dyndeps while tolerating malformed ones, honors
@@ -170,7 +174,10 @@ This is an evidence ledger, not a claim of full compatibility.
   failures, while post-command failures during restat, generator, or dependency
   recording stop the build in Ninja's corresponding phase. POSIX epoch-zero
   timestamps are normalized to one nanosecond in dependency metadata, matching
-  Ninja's reserved-zero convention.
+  Ninja's reserved-zero convention. Batched stat-cache groups treat a missing
+  or non-directory parent as authoritative evidence that all requested children
+  are absent, avoiding redundant per-child probes while retaining fallback for
+  permission and other enumeration failures.
 - `graph` emits Ninja-shaped Graphviz output with implicit root selection,
   direct single-input/single-output edges, rule nodes for fan-in/fan-out, and
   dotted order-only edges. It loads only dyndeps reachable from the displayed
@@ -225,9 +232,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 105 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 78 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 64
+  library, 2 CLI, and 106 differential tests; Linux-under-WSL passes 63 library,
+  2 CLI, and 79 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

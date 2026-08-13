@@ -192,13 +192,18 @@ producer-backed inputs, avoiding recursive rescans.
 
 | Edges | Samples | Tool | Median | Minimum | P95 |
 | ---: | ---: | :--- | ---: | ---: | ---: |
-| 1,000 | 200 | Ninja | 13.296 ms | 11.639 ms | 56.768 ms |
-| 1,000 | 200 | Knight | 12.809 ms | 11.872 ms | 56.904 ms |
-| 2,000 | 100 | Ninja | 14.657 ms | 13.333 ms | 59.539 ms |
-| 2,000 | 100 | Knight | 14.291 ms | 13.291 ms | 58.794 ms |
+| 1,000 | 200 | Ninja | 12.917 ms | 11.378 ms | 62.089 ms |
+| 1,000 | 200 | Knight | 12.979 ms | 12.034 ms | 61.033 ms |
+| 2,000 | 100 | Ninja | 14.184 ms | 12.282 ms | 101.237 ms |
+| 2,000 | 100 | Knight | 13.890 ms | 13.093 ms | 61.787 ms |
 
-Knight leads the median by 3.7% and 2.5% respectively. The Windows Ninja
-reference crashes with status `0xC0000005` at 10,000 phony
+Knight is within 0.5% of Ninja's median at 1,000 edges and leads by 2.1% at
+2,000; its P95 is lower in both rows and 39.0% lower at 2,000. A missing or
+non-directory parent is now authoritative for every requested child in the
+same stat-cache group. Before that fix, Knight redundantly issued 2,000
+individual missing-child stats and measured about 37.6 ms median on the
+2,000-edge corpus. The Windows Ninja reference crashes with status
+`0xC0000005` at 10,000 phony
 edges, so larger sizes are robustness rather than comparative evidence.
 Knight completed a 100,000-edge chain in 181.161 ms median across ten samples
 (176.589 ms minimum, 194.787 ms P95).
