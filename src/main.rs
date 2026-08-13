@@ -786,6 +786,16 @@ fn posixly_correct() -> bool {
     env::var_os("POSIXLY_CORRECT").is_some()
 }
 
+const fn system_getopt_requires_order() -> bool {
+    cfg!(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))
+}
+
 fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
     let mut expanded = Vec::with_capacity(args.len());
     let mut parse_options = true;
@@ -1697,7 +1707,7 @@ fn tool_commands(manifest: &Manifest, args: &[String]) -> Result<(), String> {
             }
         } else {
             targets.push(argument.clone());
-            if posixly_correct() {
+            if posixly_correct() || system_getopt_requires_order() {
                 parse_options = false;
             }
         }
@@ -1920,7 +1930,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
             }
         } else {
             operands.push(arg.clone());
-            if posixly_correct() {
+            if posixly_correct() || system_getopt_requires_order() {
                 parse_options = false;
             }
         }
@@ -2826,7 +2836,7 @@ fn parse_compdb_args(args: &[String], for_targets: bool) -> Result<(bool, Vec<St
             }
         } else {
             operands.push(arg.clone());
-            if posixly_correct() {
+            if posixly_correct() || system_getopt_requires_order() {
                 parse_options = false;
             }
         }
@@ -2997,7 +3007,7 @@ fn tool_rules(manifest: &Manifest, args: &[String]) -> Result<(), String> {
                     }
                 }
             }
-        } else if posixly_correct() {
+        } else if posixly_correct() || system_getopt_requires_order() {
             parse_options = false;
         }
     }
