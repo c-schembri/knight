@@ -97,6 +97,27 @@ jobs:
             cargo test --test differential subprocess_set_supports_more_than_1024_parallel_processes -- --exact --ignored --test-threads=1
             cargo build --release
 
+  dragonflybsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test on DragonFly BSD
+        uses: vmactions/dragonflybsd-vm@bc8ccbaa091ce3624c93f2dc328ae48129b07580 # v1.3.1
+        with:
+          release: "6.4.2"
+          envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
+          prepare: pkg install -y rust git cmake python3
+          run: |
+            git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
+            git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
+            cmake --build ninja-reference/build --parallel 2
+            export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
+            ulimit -n 4096
+            cargo test --all-targets
+            cargo clippy --all-targets -- -D warnings
+            cargo build --release
+
   unix:
     strategy:
       fail-fast: false

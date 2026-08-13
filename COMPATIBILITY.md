@@ -361,12 +361,14 @@ This is an evidence ledger, not a claim of full compatibility.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
   library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
   6 CLI, and 131 differential tests. Native CI passes on Windows, Ubuntu,
-  macOS, FreeBSD, and OpenBSD; the three BSD/macOS gates each run 90 library,
-  6 CLI, and 128 differential tests. Release builds and clippy pass on all
-  five.
+  macOS, FreeBSD, OpenBSD, and NetBSD. The macOS, FreeBSD, and OpenBSD gates
+  each run 90 library, 6 CLI, and 128 differential tests. NetBSD runs the same
+  90 library and 6 CLI tests plus 127 parallel-safe differentials and the
+  1,025-process differential separately. Release builds pass on all six;
+  clippy passes on the five platforms whose packaged Rust toolchain provides it.
   Cross-target CI checks also pass for FreeBSD, NetBSD, illumos, Solaris, and
-  MinGW, but NetBSD, illumos, Solaris, MinGW, DragonFly BSD, and AIX do not yet
-  have native runtime differentials here.
+  MinGW, but illumos, Solaris, MinGW, DragonFly BSD, and AIX do not yet have
+  native runtime differentials here.
   All 478 executable cases at pinned Ninja commit `b51a1e37`, all 20 tool
   entry points, and all 15 top-level option families are mapped on the audited
   Windows and Linux platforms. Ninja's own POSIX `misc/output_test.py` passes
@@ -388,6 +390,9 @@ This is an evidence ledger, not a claim of full compatibility.
   own timestamp.
   OpenBSD's native matrix additionally covers its distinct `getopt` wording,
   portable nanosecond timestamps, and more than 1,024 simultaneous processes.
+  NetBSD's native matrix covers its own `getopt` wording, signal delivery, and
+  the same process-set workload; that stress case runs alone so its 1,025
+  children cannot exhaust the VM's process allowance for unrelated tests.
   The complete upstream MAKEFLAGS parser corpus also maps byte-for-byte,
   including invalid/unsupported-mode warnings, mode announcement,
   initialization errors, quiet/dry-run policy, and MAKEFLAGS precedence. Native
@@ -399,5 +404,5 @@ This is an evidence ledger, not a claim of full compatibility.
 
 Case-level closure is tracked in `UPSTREAM_TESTS.md`. The pinned executable and
 named CLI/tool surfaces are closed on Windows and Linux, with the full native
-differential matrix also passing on macOS, FreeBSD, and OpenBSD. Other Unix
-runtime validation remains outstanding.
+differential matrix also passing on macOS, FreeBSD, OpenBSD, and NetBSD. Other
+Unix runtime validation remains outstanding.
