@@ -201,6 +201,10 @@ This is an evidence ledger, not a claim of full compatibility.
   targets, debug settings, and warning flags provide Ninja-compatible spelling
   suggestions. Ninja's four-case edit-distance corpus is mapped directly,
   including bounded distance and replacement-disabled behavior.
+  All 14 upstream utility cases are mapped as well: generic and Windows path
+  samples, slash-bit tracking, bounded/non-NUL input spans, 219 path components,
+  parent and absolute paths, Windows/POSIX torture quoting and sensible-path
+  fast paths, plus truncated and colored ANSI escape removal.
   `commands`, `clean`, `compdb`, `rules`, `targets`, `inputs`, and
   `multi-inputs` short/long options, including bundled short flags and attached
   delimiters, have differential coverage. Missing arguments and attached
@@ -348,8 +352,8 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 90
-  library, 6 CLI, and 128 differential tests; Linux-under-WSL passes 85 library,
+- Broader cross-platform runtime validation. The current Windows gates pass 93
+  library, 6 CLI, and 128 differential tests; Linux-under-WSL passes 88 library,
   5 CLI, and 102 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.

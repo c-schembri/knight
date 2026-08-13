@@ -2461,6 +2461,33 @@ default obj/foo$ bar.o
         }
     }
 
+    #[test]
+    fn upstream_canonicalize_path_length_and_component_corpus() {
+        let source = "foo/. bar/.";
+        assert_eq!(canonicalize_path(&source[..5]), "foo");
+        assert_eq!(source, "foo/. bar/.");
+        let source = "foo/../file bar/.";
+        assert_eq!(canonicalize_path(&source[..11]), "file");
+        assert_eq!(source, "foo/../file bar/.");
+
+        let many = std::iter::repeat_n("a", 219)
+            .chain(["x", "y.h"])
+            .collect::<Vec<_>>()
+            .join(if cfg!(windows) { r"\" } else { "/" });
+        let canonical = canonicalize_path(&many);
+        assert_eq!(canonical.matches('/').count(), 220);
+        assert!(canonical.ends_with("x/y.h"));
+
+        let dotted = std::iter::repeat_n(["a", "."], 32)
+            .flatten()
+            .chain(["x.h"])
+            .collect::<Vec<_>>()
+            .join(if cfg!(windows) { r"\" } else { "/" });
+        let canonical = canonicalize_path(&dotted);
+        assert_eq!(canonical.matches('/').count(), 32);
+        assert!(canonical.ends_with("a/x.h"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn upstream_windows_slash_tracking_corpus() {

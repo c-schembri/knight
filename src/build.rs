@@ -5775,6 +5775,54 @@ mod tests {
     }
 
     #[test]
+    fn upstream_path_escaping_corpus() {
+        let sensible = if cfg!(windows) {
+            r"some\sensible\path\without\crazy\characters.c++"
+        } else {
+            "some/sensible/path/without/crazy/characters.c++"
+        };
+        assert_eq!(shell_escape_path(sensible), sensible);
+
+        #[cfg(windows)]
+        {
+            let input = ["foo bar", "\\", "\"", "'$@d!st!c'", "\\", "path'", "\\"].concat();
+            let expected = [
+                "\"",
+                "foo bar",
+                "\\\\\\",
+                "\"",
+                "'$@d!st!c'",
+                "\\",
+                "path'",
+                "\\\\",
+                "\"",
+            ]
+            .concat();
+            assert_eq!(shell_escape_path(&input), expected);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            shell_escape_path("foo bar\"/'$@d!st!c'/path'"),
+            r#"'foo bar"/'\''$@d!st!c'\''/path'\'''"#
+        );
+    }
+
+    #[test]
+    fn upstream_strip_ansi_escape_codes_corpus() {
+        assert_eq!(strip_ansi_escapes::strip(b"foo\x1b"), b"foo");
+        assert_eq!(strip_ansi_escapes::strip(b"foo\x1b["), b"foo");
+        let input = concat!(
+            "\x1b[1maffixmgr.cxx:286:15: \x1b[0m",
+            "\x1b[0;1;35mwarning: \x1b[0m",
+            "\x1b[1musing the result... [-Wparentheses]\x1b[0m",
+        );
+        assert_eq!(
+            strip_ansi_escapes::strip(input.as_bytes()),
+            b"affixmgr.cxx:286:15: warning: using the result... [-Wparentheses]"
+        );
+    }
+
+    #[test]
     fn expands_all_ninja_status_placeholders() {
         let mut status = StatusFormatter::new(2);
         let rendered = status

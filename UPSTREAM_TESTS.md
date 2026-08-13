@@ -43,7 +43,7 @@ Status meanings:
 | `string_piece_test` | 2 | Implementation-specific | C++ container API, no executable contract |
 | `string_piece_util_test` | 5 | Implementation-specific | C++ helper API, no executable contract |
 | `subprocess_test` | 14 | Mapped | Command failures; child/parent INT, TERM, HUP; console TTYs; single/multi/lots; stdin; jobserver |
-| `util_test` | 14 | Partial | Canonical paths, slash tracking, spellcheck, shell escaping, and platform utilities |
+| `util_test` | 14 | Mapped | Generic/Windows canonicalization, slash tracking, bounded buffers, 219 components, parent/absolute paths, shell escaping, and ANSI stripping |
 
 The inventory contains 448 C++ cases. A **Partial** row remains an explicit
 parity blocker regardless of how many adjacent Knight tests pass.
