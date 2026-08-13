@@ -887,7 +887,7 @@ fn parse_count(option: &str, value: &str, allow_zero: bool) -> Result<usize, Str
             format!("invalid value for {option}: '{value}'")
         }
     };
-    let (negative, magnitude) = parse_strtol(value).ok_or_else(&error)?;
+    let (negative, magnitude) = parse_strtol(value).ok_or_else(error)?;
     if negative && magnitude != 0 {
         return Err(error());
     }
