@@ -23,6 +23,7 @@ The differential benchmark runner expects an upstream `ninja` executable:
 ```powershell
 powershell -NoProfile -File scripts\benchmark.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-dyndep.ps1 -Ninja C:\path\to\ninja.exe
+powershell -NoProfile -File scripts\benchmark-dyndep-parse.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-inputs.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-status.ps1 -Ninja C:\path\to\ninja.exe
 powershell -NoProfile -File scripts\benchmark-compdb.ps1 -Ninja C:\path\to\ninja.exe

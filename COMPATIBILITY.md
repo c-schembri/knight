@@ -95,6 +95,13 @@ This is an evidence ledger, not a claim of full compatibility.
   planning, while batches of independent files are read and parsed on two
   workers with deterministic file-order validation. `-d stats` reports dyndep
   graph, prebuild, and load/apply time separately.
+  All 42 upstream dyndep-parser cases are now represented directly: 19
+  accepted layouts and 23 rejected layouts cover version syntax, LF/CRLF,
+  empty implicit lists, multiple edges, graph-aware output identity, EOF
+  distinctions, bindings, and positioned diagnostics. The `ninja` alias
+  matches the rejection corpus byte-for-byte, while native Knight retains
+  richer line-and-column diagnostics. As in Ninja, every nonempty `restat`
+  value, including `0`, enables restat behavior.
 - Parallel command execution, longest-remaining-path scheduling with stable
   declaration-order ties, depth-one/live console pools with buffered output
   from concurrent ordinary work, default/custom pool

@@ -8,6 +8,7 @@ use crate::program_name;
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::v1::rapidhash_v1 as hash;
 use rapidhash::{HashMapExt, HashSetExt};
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 use std::ffi::OsString;
@@ -1072,13 +1073,29 @@ pub fn run_build(
     requested_targets: &[String],
     options: &BuildOptions,
 ) -> Result<BuildOutcome, String> {
+    run_build_impl(Cow::Borrowed(manifest), requested_targets, options)
+}
+
+pub fn run_build_owned(
+    manifest: Manifest,
+    requested_targets: &[String],
+    options: &BuildOptions,
+) -> Result<BuildOutcome, String> {
+    run_build_impl(Cow::Owned(manifest), requested_targets, options)
+}
+
+fn run_build_impl(
+    manifest: Cow<'_, Manifest>,
+    requested_targets: &[String],
+    options: &BuildOptions,
+) -> Result<BuildOutcome, String> {
     LAST_BUILD_EXIT_CODE.with(|code| code.set(0));
-    ensure_build_directory(manifest, options.dry_run)?;
+    ensure_build_directory(&manifest, options.dry_run)?;
     let phase = Instant::now();
-    let initial_output_map = output_map(manifest);
+    let initial_output_map = output_map(&manifest);
     let output_map_time = phase.elapsed();
     let phase = Instant::now();
-    let initial_build_log_path = build_log_path(manifest);
+    let initial_build_log_path = build_log_path(&manifest);
     let build_log =
         BuildLog::load(initial_build_log_path.clone(), &initial_output_map).map_err(|error| {
             format!(
@@ -1091,17 +1108,17 @@ pub fn run_build(
     }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(manifest, &initial_output_map, &build_log)?;
+    let discovered = DiscoveredDeps::load_for_build(&manifest, &initial_output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(
-        manifest,
+        &manifest,
         requested_targets,
         &initial_output_map,
         &discovered.log,
     )?;
     let closure = dependency_closure(
-        manifest,
+        &manifest,
         &targets,
         &initial_output_map,
         &discovered,
@@ -1112,7 +1129,7 @@ pub fn run_build(
     let mut unique_dyndep_files = HashSet::new();
     for &edge_id in &closure {
         let edge = &manifest.edges[edge_id];
-        let dyndep = evaluate_unescaped_binding(manifest, edge, "dyndep");
+        let dyndep = evaluate_unescaped_binding(&manifest, edge, "dyndep");
         if dyndep.is_empty() {
             continue;
         }
@@ -1128,7 +1145,7 @@ pub fn run_build(
     }
     if dyndep_files.is_empty() {
         return run_build_prepared(
-            manifest,
+            &manifest,
             options,
             PreparedBuild {
                 output_map: initial_output_map,
@@ -1149,7 +1166,7 @@ pub fn run_build(
     let mut prebuild_options = options.clone();
     prebuild_options.quiet_no_work = true;
     prebuild_options.quiet = true;
-    let mut expanded = manifest.clone();
+    let mut expanded = manifest.into_owned();
     let mut seen_dyndeps = HashSet::<String>::new();
     let mut loaded_dyndeps = Vec::new();
     let mut prebuild = BuildOutcome::default();
@@ -1243,21 +1260,24 @@ pub fn run_build(
             dyndep_prebuild_time += dyndep_phase.elapsed();
             pass
         };
-        let known_dyndeps = expanded
-            .edges
-            .iter()
-            .filter_map(|edge| {
-                let path = evaluate_unescaped_binding(&expanded, edge, "dyndep");
-                (!path.is_empty()).then_some(path)
-            })
-            .collect::<HashSet<_>>();
-        let mut apply_files = pass
-            .ran_edges
-            .iter()
-            .flat_map(|edge| expanded.edges[*edge].outputs())
-            .filter(|output| known_dyndeps.contains(*output))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let mut apply_files = Vec::new();
+        if !pass.ran_edges.is_empty() {
+            let known_dyndeps = expanded
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    let path = evaluate_unescaped_binding(&expanded, edge, "dyndep");
+                    (!path.is_empty()).then_some(path)
+                })
+                .collect::<HashSet<_>>();
+            apply_files.extend(
+                pass.ran_edges
+                    .iter()
+                    .flat_map(|edge| expanded.edges[*edge].outputs())
+                    .filter(|output| known_dyndeps.contains(*output))
+                    .map(str::to_owned),
+            );
+        }
         apply_files.extend(dyndep_files);
         apply_files.retain(|file| seen_dyndeps.insert(file.clone()));
         loaded_dyndeps.extend(apply_files.iter().cloned());
@@ -1267,15 +1287,21 @@ pub fn run_build(
         prebuild.edges_clean += pass.edges_clean;
         prebuild.ran_edges.extend(pass.ran_edges);
         let dyndep_phase = Instant::now();
-        if let Err(error) = apply_dyndep_files(&mut expanded, &apply_files) {
-            let total = current_closure
-                .iter()
-                .filter(|edge| expanded.edges[**edge].rule != "phony")
-                .count();
-            print_prior_statuses(&expanded, options, &prebuild.ran_edges, total)?;
-            return Err(error);
-        }
+        let another_pass = match apply_dyndep_files_inner(&mut expanded, &apply_files) {
+            Ok(another_pass) => another_pass,
+            Err(error) => {
+                let total = current_closure
+                    .iter()
+                    .filter(|edge| expanded.edges[**edge].rule != "phony")
+                    .count();
+                print_prior_statuses(&expanded, options, &prebuild.ran_edges, total)?;
+                return Err(error);
+            }
+        };
         dyndep_load_time += dyndep_phase.elapsed();
+        if !another_pass {
+            break;
+        }
     }
     if options.stats {
         eprintln!(
@@ -1459,6 +1485,10 @@ fn print_prior_statuses(
 }
 
 pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(), String> {
+    apply_dyndep_files_inner(manifest, files).map(|_| ())
+}
+
+fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result<bool, String> {
     let mut outputs = output_map(manifest)
         .into_iter()
         .map(|(path, edge)| (path.to_owned(), edge))
@@ -1475,6 +1505,7 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
         }
     }
     let parsed_files = load_dyndep_records(files);
+    let mut discovered_input_ranges = Vec::new();
     for (file, records) in files.iter().zip(parsed_files) {
         let canonical_file = canonicalize_owned_path(file.clone());
         let records = records?;
@@ -1490,13 +1521,14 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
                 *path = canonicalize_owned_path(std::mem::take(path));
             }
             let edge_id = outputs.get(&record.output).copied().ok_or_else(|| {
-                format!("{file}: no build statement exists for '{}'", record.output)
+                record
+                    .origin
+                    .error(format!("no build statement exists for '{}'", record.output))
             })?;
             if !seen_edges.insert(edge_id) {
-                return Err(format!(
-                    "{file}: multiple statements for '{}'",
-                    record.output
-                ));
+                return Err(record
+                    .origin
+                    .error(format!("multiple statements for '{}'", record.output)));
             }
             normalized_records.push((edge_id, record));
         }
@@ -1526,10 +1558,14 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
                 ));
             }
             let edge = &mut manifest.edges[edge_id];
+            let first_discovered_input = edge.implicit_inputs.len();
             for input in record.implicit_inputs {
                 if !edge.implicit_inputs.contains(&input) {
                     edge.implicit_inputs.push(input);
                 }
+            }
+            if edge.implicit_inputs.len() != first_discovered_input {
+                discovered_input_ranges.push((edge_id, first_discovered_input));
             }
             for output in record.implicit_outputs {
                 if outputs.contains_key(&output) {
@@ -1545,7 +1581,11 @@ pub fn apply_dyndep_files(manifest: &mut Manifest, files: &[String]) -> Result<(
             }
         }
     }
-    Ok(())
+    Ok(discovered_input_ranges.iter().any(|(edge_id, start)| {
+        manifest.edges[*edge_id].implicit_inputs[*start..]
+            .iter()
+            .any(|input| outputs.contains_key(input))
+    }))
 }
 
 fn load_dyndep_records(files: &[String]) -> Vec<Result<Vec<DyndepRecord>, String>> {

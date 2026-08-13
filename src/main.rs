@@ -10,7 +10,7 @@ use knight_build::ensure_process_tree_cleanup;
 use knight_build::{
     BuildOptions, Diagnostic, Edge, Manifest, apply_dyndep_files, canonicalize_path,
     install_interrupt_handler, last_build_exit_code, load_manifest, program_name,
-    resolve_target_path, run_build, spellcheck,
+    resolve_target_path, run_build, run_build_owned, spellcheck,
 };
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::{HashMapExt, HashSetExt};
@@ -363,7 +363,7 @@ fn run() -> Result<(), String> {
                 cli.manifest.display()
             ));
         }
-        run_build(&manifest, &cli.targets, &cli.options).map(|_| ())
+        run_build_owned(manifest, &cli.targets, &cli.options).map(|_| ())
     }
 }
 

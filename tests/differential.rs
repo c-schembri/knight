@@ -3546,7 +3546,7 @@ fn edge_bindings_can_name_edge_paths_like_ninja() {
 }
 
 #[test]
-fn dyndep_version_and_edge_identity_match_ninja() {
+fn dyndep_parser_rejection_corpus_matches_ninja_byte_for_byte() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
         return;
@@ -3554,49 +3554,91 @@ fn dyndep_version_and_edge_identity_match_ninja() {
     let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
     let ninja = Path::new(&ninja);
     let temp = tempdir().unwrap();
+    let alias = temp
+        .path()
+        .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+    fs::copy(knight, &alias).unwrap();
     fs::write(
         temp.path().join("build.ninja"),
         concat!(
-            "rule touch\n  command = echo\n",
+            "rule touch\n  command = echo built > $out\n",
             "build out otherout: touch || deps.dd\n  dyndep = deps.dd\n",
+            "build out2: touch || deps.dd\n  dyndep = deps.dd\n",
+            "default out out2\n",
         ),
     )
     .unwrap();
 
     let cases = [
+        ("empty", ""),
+        ("version unexpected EOF", "ninja_dyndep_version = 1.0"),
+        ("unsupported version 0", "ninja_dyndep_version = 0\n"),
+        ("unsupported version 1.1", "ninja_dyndep_version = 1.1\n"),
         (
-            "version suffix",
-            "ninja_dyndep_version = 1.0-extra\nbuild otherout: dyndep\n",
+            "duplicate version",
+            "ninja_dyndep_version = 1\nninja_dyndep_version = 1\n",
         ),
         (
-            "same edge twice",
+            "missing version other variable",
+            "not_ninja_dyndep_version = 1\n",
+        ),
+        ("missing version build", "build out: dyndep\n"),
+        ("unexpected equals", "= 1\n"),
+        ("unexpected indent", " = 1\n"),
+        (
+            "duplicate output",
+            "ninja_dyndep_version = 1\nbuild out: dyndep\nbuild out: dyndep\n",
+        ),
+        (
+            "duplicate edge through other output",
             "ninja_dyndep_version = 1\nbuild out: dyndep\nbuild otherout: dyndep\n",
         ),
+        ("build EOF", "ninja_dyndep_version = 1\nbuild"),
+        ("missing output", "ninja_dyndep_version = 1\nbuild :\n"),
         (
-            "missing newline",
+            "output without build statement",
+            "ninja_dyndep_version = 1\nbuild missing: dyndep\n",
+        ),
+        ("output EOF", "ninja_dyndep_version = 1\nbuild out"),
+        ("missing rule", "ninja_dyndep_version = 1\nbuild out:"),
+        ("wrong rule", "ninja_dyndep_version = 1\nbuild out: touch"),
+        (
+            "statement EOF",
             "ninja_dyndep_version = 1\nbuild out: dyndep",
         ),
         (
+            "explicit output",
+            "ninja_dyndep_version = 1\nbuild out exp: dyndep\n",
+        ),
+        (
             "explicit input",
-            "ninja_dyndep_version = 1\nbuild out: dyndep explicit\n",
+            "ninja_dyndep_version = 1\nbuild out: dyndep exp\n",
+        ),
+        (
+            "order-only input",
+            "ninja_dyndep_version = 1\nbuild out: dyndep ||\n",
         ),
         (
             "validation input",
             "ninja_dyndep_version = 1\nbuild out: dyndep |@ validation\n",
         ),
+        (
+            "wrong binding",
+            "ninja_dyndep_version = 1\nbuild out: dyndep\n  not_restat = 1\n",
+        ),
+        (
+            "second binding",
+            "ninja_dyndep_version = 1\nbuild out: dyndep\n  restat = 1\n  restat = 1\n",
+        ),
     ];
     for (name, dyndep) in cases {
         fs::write(temp.path().join("deps.dd"), dyndep).unwrap();
-        let arguments = ["-t", "query", "out"];
+        let arguments = ["-n"];
         let expected = run(ninja, temp.path(), &arguments);
-        let actual = run(knight, temp.path(), &arguments);
-        assert_eq!(
-            actual.status.code(),
-            expected.status.code(),
-            "case={name} actual={} expected={}",
-            String::from_utf8_lossy(&actual.stderr),
-            String::from_utf8_lossy(&expected.stderr)
-        );
+        let actual = run(&alias, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
     }
 }
 

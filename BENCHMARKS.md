@@ -127,6 +127,32 @@ faster at 5,000. Its P95 is lower by 30.7-76.4% across all three sizes. This is
 a substantial reversal of the discovered regression, though not an
 order-of-magnitude result.
 
+After the byte-exact dyndep-parser work, a 100-sample 1,000-file regression
+sweep measured Ninja at 47.681 ms median versus Knight at 37.877 ms. Knight
+remained 20.6% faster by median, with 42.066 ms P95 versus Ninja's 115.116 ms.
+
+## Single-file dyndep parsing
+
+`scripts/benchmark-dyndep-parse.ps1` measures a warm quiet no-op graph whose
+10,000 edges share one ready dyndep containing 10,000 statements. This exposed
+an initially quadratic diagnostic-location implementation: Criterion measured
+the first byte-exact parser at roughly 496.32 ms for 10,000 records. Indexing
+physical line starts once, sharing the file path across records, and scanning
+plain path runs in batches reduced the estimate to 6.379 ms, a 98.7% reduction.
+The same parser measured 36.650 us at 100 records and 349.37 us at 1,000.
+
+The 100-sample process comparison produced:
+
+| Records | Tool | Median | Minimum | P95 |
+| ---: | :--- | ---: | ---: | ---: |
+| 10,000 | Ninja | 25.218 ms | 22.467 ms | 97.799 ms |
+| 10,000 | Knight | 39.472 ms | 34.798 ms | 45.082 ms |
+
+Knight's P95 is 53.9% lower, but its median trails Ninja by 56.5%. Avoiding a
+deep manifest clone on the final build and skipping redundant fixed-point work
+when discovered inputs have no producers substantially reduced the initial
+gap. This single-large-file shape remains an explicit optimization target.
+
 ## Inputs tool
 
 `scripts/benchmark-inputs.ps1` validates byte-equivalent `-t inputs all`

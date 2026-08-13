@@ -19,7 +19,7 @@ pub fn program_name() -> &'static str {
 pub use build::{
     BuildOptions, BuildOutcome, apply_dyndep_files, ensure_process_tree_cleanup,
     install_interrupt_handler, last_build_exit_code, manifest_with_existing_dyndeps,
-    render_unescaped_binding, resolve_target_path, run_build,
+    render_unescaped_binding, resolve_target_path, run_build, run_build_owned,
 };
 pub use manifest::{
     Diagnostic, Edge, Manifest, Pool, Rule, canonicalize_owned_path, canonicalize_path,
