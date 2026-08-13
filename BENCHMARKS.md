@@ -28,6 +28,15 @@ faster at 10,000 independent edges, while its median trails Ninja by 2.7% at
 lower in all three sweeps by 18.1-36.9%. Its warm 10,000-edge manifest load is
 about 4.2-4.6 ms under `-d stats` instrumentation.
 
+The byte-exact parser-diagnostic work was benchmarked repeatedly while its
+source-position representation was refined. A first positioned-token design
+regressed the 10,000-edge parser to roughly 15.75 ms and was discarded. The
+final design keeps accepted-build tokens compact and reconstructs continued-
+line locations only on errors. Criterion measured 5.615 ms (95% estimate
+5.584-5.649 ms) at 10,000 edges, with no statistically significant change at
+100 or 1,000 edges and a small improvement within the noise threshold at
+10,000 compared with the immediately preceding optimized baseline.
+
 Manifests with no `deps` or `depfile` bindings now bypass per-edge dependency
 binding evaluation. On the 10,000-edge independent corpus, the instrumented
 `dependency metadata` phase fell from 0.585 ms to 0.145 ms. Subsequent

@@ -24,7 +24,12 @@ This is an evidence ledger, not a claim of full compatibility.
   unknown rule/pool, and dependency-cycle diagnostics.
   Tab indentation is rejected with Ninja's spaces-only policy. An upstream-
   derived differential corpus currently covers 18 accepted and more than 30
-  rejected parser cases. `ninja_required_version` follows Ninja's major/minor
+  rejected parser cases. When invoked as `ninja`, a 47-case rejection corpus
+  additionally matches Ninja byte-for-byte across LF/CRLF input, physical
+  locations after continuations, EOF distinctions, separator ordering,
+  duplicate outputs, pools, defaults, and response-file pairs. Native Knight
+  retains its richer line-and-column diagnostic format.
+  `ninja_required_version` follows Ninja's major/minor
   compatibility comparison and older-major warning policy, including patch
   suffixes and nonnumeric values. The `$^` newline escape is gated by those
   parsed major/minor components rather than loose string parsing.
@@ -174,8 +179,8 @@ This is an evidence ledger, not a claim of full compatibility.
   phony edges with explicit, implicit, order-only, and validation inputs, plus
   bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
   fresh plus incremental real builds. Materialized-source and missing-source
-  graphs each match Ninja on 3,200 Windows seeds, totaling 211,200 tool-mode
-  comparisons and 12,800 real build phases. Both corpora also match
+  graphs each match Ninja on 3,400 Windows seeds, totaling 224,400 tool-mode
+  comparisons and 13,600 real build phases. Both corpora also match
   on 500 Linux seeds each (33,000 tool-mode comparisons and 2,000 real build
   phases). The harness runs
   independent reference/candidate processes concurrently while preserving
@@ -252,8 +257,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 65
-  library, 2 CLI, and 112 differential tests; Linux-under-WSL passes 64 library,
-  2 CLI, and 85 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 113 differential tests; Linux-under-WSL passes 64 library,
+  2 CLI, and 86 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

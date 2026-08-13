@@ -3171,6 +3171,145 @@ fn upstream_manifest_parser_rejection_corpus_matches_ninja() {
 }
 
 #[test]
+fn manifest_diagnostics_match_ninja_when_invoked_as_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let cases = [
+        ("bare identifier at EOF", "foobar"),
+        ("bare identifier", "foobar\n"),
+        ("short identifier at EOF", "subn"),
+        ("bad assignment", "x 3\n"),
+        ("bad assignment at EOF", "x 3"),
+        ("assignment at EOF", "x = 3"),
+        ("bad dollar at EOF", "x = $"),
+        ("continued at EOF", "x = $\n"),
+        ("bad continued escape", "x = $\n $[\n"),
+        ("bad continued CRLF escape", "x = $\r\n $[\r\n"),
+        ("multiple continuations at EOF", "x = a$\n b$\n $\n"),
+        ("build without path", "build\n"),
+        ("unknown rule", "build x: unknown z\n"),
+        ("unknown rule with CRLF", "build x: unknown z\r\n"),
+        ("double colon", "build x:: unknown z\n"),
+        (
+            "continued colon",
+            "rule cat\n  command = cat ok\nbuild x: cat $\n :\n",
+        ),
+        ("missing command", "rule cat\n"),
+        (
+            "duplicate rule",
+            "rule cat\n  command = echo\nrule cat\n  command = echo\n",
+        ),
+        (
+            "response-file pair",
+            "rule cat\n  command = echo\n  rspfile = cat.rsp\n",
+        ),
+        ("bad rule name", "rule %foo\n"),
+        (
+            "unterminated variable",
+            "rule cat\n  command = ${broken\nfoo = bar\n",
+        ),
+        (
+            "bad path escape",
+            "rule cat\n  command = cat\nbuild $.: cat foo\n",
+        ),
+        (
+            "escaped output colon",
+            "rule cat\n  command = cat\nbuild $: cat foo\n",
+        ),
+        (
+            "unknown rule binding",
+            "rule cc\n  command = foo\n  othervar = bar\n",
+        ),
+        (
+            "bad indented binding",
+            "rule cc\n  command = foo\n  && bar\n",
+        ),
+        (
+            "tab indentation",
+            "rule cc\n\tcommand = echo\nbuild out: cc\n",
+        ),
+        ("default without target", "default\n"),
+        ("unknown default", "default nonexistent\n"),
+        (
+            "junk after default",
+            "rule r\n  command = r\nbuild b: r\ndefault b:\n",
+        ),
+        ("empty default path", "default $a\n"),
+        (
+            "empty build path",
+            "rule r\n  command = r\nbuild $a: r $c\n",
+        ),
+        (
+            "indent after blank",
+            "rule r\n  command = r\n  \n  generator = 1\n",
+        ),
+        ("pool without name", "pool\n"),
+        ("pool without depth", "pool foo\n"),
+        (
+            "duplicate pool",
+            "pool foo\n  depth = 4\npool foo\n  depth = 2\n",
+        ),
+        ("negative pool", "pool foo\n  depth = -1\n"),
+        ("nonnumeric pool", "pool foo\n  depth = foo\n"),
+        ("unknown pool binding", "pool foo\n  bar = 1\n"),
+        (
+            "unknown pool reference",
+            "rule run\n  command = echo\n  pool = absent\nbuild out: run in\n",
+        ),
+        (
+            "duplicate implicit output",
+            "rule cat\n  command = cat\nbuild foo baz | foo baq foo: cat bar\n",
+        ),
+        (
+            "dyndep not input",
+            "rule touch\n  command = touch $out\nbuild result: touch\n  dyndep = notin\n",
+        ),
+        (
+            "order-only output separator",
+            "rule r\n  command = r\nbuild x || y: r\n",
+        ),
+        (
+            "implicit after order-only input",
+            "rule r\n  command = r\nbuild x: r y || z | q\n",
+        ),
+        (
+            "repeated implicit separator",
+            "rule r\n  command = r\nbuild x: r y | z | q\n",
+        ),
+        (
+            "repeated order-only separator",
+            "rule r\n  command = r\nbuild x: r y || z || q\n",
+        ),
+        (
+            "order-only after validation",
+            "rule r\n  command = r\nbuild x: r y |@ z || q\n",
+        ),
+        (
+            "colon in input list",
+            "rule r\n  command = r\nbuild x: r y : q\n",
+        ),
+    ];
+
+    for (name, manifest) in cases {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+        let alias = temp
+            .path()
+            .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+        fs::copy(knight, &alias).unwrap();
+        let arguments = ["-t", "targets", "all"];
+        let expected = run(Path::new(&ninja), temp.path(), &arguments);
+        let actual = run(&alias, temp.path(), &arguments);
+        assert_eq!(actual.status.code(), expected.status.code(), "case={name}");
+        assert_eq!(actual.stdout, expected.stdout, "case={name}");
+        assert_eq!(actual.stderr, expected.stderr, "case={name}");
+    }
+}
+
+#[test]
 fn required_version_uses_ninja_major_minor_compatibility() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");

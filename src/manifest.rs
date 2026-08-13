@@ -162,6 +162,36 @@ impl Diagnostic {
         self.source_line = Some(source.to_owned());
         self
     }
+
+    pub fn ninja_message(&self) -> String {
+        let mut message = format!("{}:{}: {}", self.path.display(), self.line, self.message);
+        if let Some(line) = &self.source_line {
+            let disk_source = fs::read_to_string(&self.path).ok();
+            let line = disk_source
+                .as_deref()
+                .and_then(|source| {
+                    source
+                        .split_terminator('\n')
+                        .nth(self.line.saturating_sub(1))
+                })
+                .unwrap_or(line);
+            message.push('\n');
+            message.push_str(line);
+            if cfg!(windows) && line.ends_with('\r') {
+                // Ninja's Windows CRT translates the newline it emits after
+                // a source line even when that line retained its CR byte.
+                message.push('\r');
+            }
+            message.push('\n');
+            message.extend(std::iter::repeat_n(' ', self.column.saturating_sub(1)));
+            message.push_str("^ near here");
+        } else {
+            // Ninja's lexer diagnostics without source context retain their
+            // terminating newline before the CLI adds its own.
+            message.push('\n');
+        }
+        message
+    }
 }
 
 impl fmt::Display for Diagnostic {
@@ -439,6 +469,7 @@ fn parse_source_into_with_loader(
     let mut current_edge: Option<usize> = None;
     let mut current_pool: Option<String> = None;
     let mut deferred_paths: Option<DeferredPaths> = None;
+    let ninja_compat = crate::program_name() == "ninja";
 
     for (line_no, raw_line) in logical_lines {
         let without_comment = strip_comment(&raw_line);
@@ -461,7 +492,8 @@ fn parse_source_into_with_loader(
             }
             continue;
         }
-        if !raw_line.trim_start().starts_with('#')
+        if !ninja_compat
+            && !raw_line.trim_start().starts_with('#')
             && raw_line
                 .chars()
                 .take_while(|character| matches!(character, ' ' | '\t'))
@@ -473,8 +505,25 @@ fn parse_source_into_with_loader(
                     .with_source(&raw_line),
             );
         }
-        let indented = without_comment.starts_with([' ', '\t']);
+        let indented = if ninja_compat {
+            without_comment.starts_with(' ')
+        } else {
+            without_comment.starts_with([' ', '\t'])
+        };
         let line = without_comment.trim_end();
+        if source.ends_with('\n')
+            && raw_line
+                .as_bytes()
+                .iter()
+                .rev()
+                .take_while(|byte| **byte == b'$')
+                .count()
+                % 2
+                == 1
+        {
+            let eof_line = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
+            return Err(Diagnostic::new(path, eof_line, 1, "unexpected EOF"));
+        }
         let (invalid_escape, newline_escape) = dollar_escape_issues(line);
         let newline_allowed = newline_escape.is_none()
             || manifest
@@ -488,7 +537,7 @@ fn parse_source_into_with_loader(
             (None, None) => None,
         };
         if let Some((column, newline)) = issue {
-            return Err(Diagnostic::new(
+            return Err(diagnostic_for_logical_line(
                 path,
                 line_no,
                 column + 1,
@@ -497,14 +546,16 @@ fn parse_source_into_with_loader(
                 } else {
                     "bad $-escape (literal $ must be written as $$)"
                 },
-            )
-            .with_source(&raw_line));
+                &raw_line,
+                source,
+            ));
         }
 
         if indented {
             let binding = line.trim_start();
             let (key, value) = parse_binding(binding).ok_or_else(|| {
-                Diagnostic::new(path, line_no, 1, "expected variable assignment")
+                let column = raw_line.len() - raw_line.trim_start().len() + 1;
+                Diagnostic::new(path, line_no, column, "expected variable name")
                     .with_source(&raw_line)
             })?;
             manifest.has_pool_binding |= key == "pool";
@@ -529,7 +580,7 @@ fn parse_source_into_with_loader(
                         return Err(Diagnostic::new(
                             path,
                             line_no,
-                            1,
+                            line_end_column(&raw_line),
                             format!("unexpected variable '{key}'"),
                         )
                         .with_source(&raw_line));
@@ -550,11 +601,16 @@ fn parse_source_into_with_loader(
                 }
                 Some(Parent::Pool) => {
                     if key != "depth" {
+                        let message = if ninja_compat {
+                            format!("unexpected variable '{key}'")
+                        } else {
+                            format!("unexpected pool variable '{key}'")
+                        };
                         return Err(Diagnostic::new(
                             path,
                             line_no,
-                            1,
-                            format!("unexpected pool variable '{key}'"),
+                            line_end_column(&raw_line),
+                            message,
                         )
                         .with_source(&raw_line));
                     }
@@ -562,8 +618,13 @@ fn parse_source_into_with_loader(
                         manifest.lookup_variable(scope, name).map(str::to_owned)
                     });
                     let depth = expanded.parse::<usize>().map_err(|_| {
-                        Diagnostic::new(path, line_no, 1, "invalid pool depth")
-                            .with_source(&raw_line)
+                        Diagnostic::new(
+                            path,
+                            line_no,
+                            line_end_column(&raw_line),
+                            "invalid pool depth",
+                        )
+                        .with_source(&raw_line)
                     })?;
                     let pool = manifest
                         .pools
@@ -573,6 +634,9 @@ fn parse_source_into_with_loader(
                     pool.depth_specified = true;
                 }
                 None => {
+                    if ninja_compat {
+                        return Err(Diagnostic::new(path, line_no, 1, "unexpected indent"));
+                    }
                     return Err(Diagnostic::new(path, line_no, 1, "unexpected indentation")
                         .with_source(&raw_line));
                 }
@@ -604,10 +668,13 @@ fn parse_source_into_with_loader(
                 );
             }
             if manifest.scopes[scope].rules.contains_key(name) {
-                return Err(
-                    Diagnostic::new(path, line_no, 6, format!("duplicate rule '{name}'"))
-                        .with_source(&raw_line),
-                );
+                return Err(Diagnostic::new(
+                    path,
+                    line_no,
+                    line_end_column(&raw_line),
+                    format!("duplicate rule '{name}'"),
+                )
+                .with_source(&raw_line));
             }
             manifest.scopes[scope].rules.insert(
                 name.to_owned(),
@@ -628,10 +695,13 @@ fn parse_source_into_with_loader(
                 );
             }
             if manifest.pools.contains_key(name) {
-                return Err(
-                    Diagnostic::new(path, line_no, 6, format!("duplicate pool '{name}'"))
-                        .with_source(&raw_line),
-                );
+                return Err(Diagnostic::new(
+                    path,
+                    line_no,
+                    line_end_column(&raw_line),
+                    format!("duplicate pool '{name}'"),
+                )
+                .with_source(&raw_line));
             }
             manifest.pools.insert(
                 name.to_owned(),
@@ -647,15 +717,17 @@ fn parse_source_into_with_loader(
             current_pool = Some(name.to_owned());
         } else if let Some(rest) = line.strip_prefix("build ") {
             let (mut edge, deferred) = parse_edge(rest, &source_path, line_no)
-                .map_err(|diagnostic| diagnostic.with_source(&raw_line))?;
+                .map_err(|diagnostic| remap_logical_diagnostic(diagnostic, &raw_line, source))?;
             if edge.rule != "phony" && manifest.lookup_rule(scope, &edge.rule).is_none() {
-                return Err(Diagnostic::new(
+                let column = build_rule_column(&raw_line).unwrap_or(1);
+                return Err(diagnostic_for_logical_line(
                     path,
                     line_no,
-                    1,
+                    column,
                     format!("unknown build rule '{}'", edge.rule),
-                )
-                .with_source(&raw_line));
+                    &raw_line,
+                    source,
+                ));
             }
             edge.scope = scope;
             manifest.edges.push(edge);
@@ -663,13 +735,28 @@ fn parse_source_into_with_loader(
             deferred_paths = Some(deferred);
             parent = Some(Parent::Edge);
         } else if let Some(rest) = line.strip_prefix("default ") {
+            if let Some(position) = first_unescaped_colon(rest) {
+                return Err(Diagnostic::new(
+                    path,
+                    line_no,
+                    "default ".len() + position + 1,
+                    "expected newline, got ':'",
+                )
+                .with_source(&raw_line));
+            }
             let mut words = expand_path_words(rest, manifest, scope);
             if words.is_empty() {
                 return Err(Diagnostic::new(path, line_no, 9, "expected target name")
                     .with_source(&raw_line));
             }
             if words.iter().any(String::is_empty) {
-                return Err(Diagnostic::new(path, line_no, 1, "empty path").with_source(&raw_line));
+                return Err(Diagnostic::new(
+                    path,
+                    line_no,
+                    line_end_column(&raw_line),
+                    "empty path",
+                )
+                .with_source(&raw_line));
             }
             for word in &mut words {
                 *word = canonicalize_owned_path(std::mem::take(word));
@@ -683,13 +770,27 @@ fn parse_source_into_with_loader(
                     return Err(Diagnostic::new(
                         path,
                         line_no,
-                        1,
+                        line_end_column(&raw_line),
                         format!("unknown target '{word}'"),
                     )
                     .with_source(&raw_line));
                 }
             }
             manifest.defaults.extend(words);
+        } else if line == "rule" {
+            return Err(
+                Diagnostic::new(path, line_no, 5, "expected rule name").with_source(&raw_line)
+            );
+        } else if line == "pool" {
+            return Err(
+                Diagnostic::new(path, line_no, 5, "expected pool name").with_source(&raw_line)
+            );
+        } else if line == "build" {
+            return Err(Diagnostic::new(path, line_no, 6, "expected path").with_source(&raw_line));
+        } else if line == "default" {
+            return Err(
+                Diagnostic::new(path, line_no, 8, "expected target name").with_source(&raw_line)
+            );
         } else if let Some(rest) = line.strip_prefix("include ") {
             let include = expand(rest.trim(), |name| {
                 manifest.lookup_variable(scope, name).map(str::to_owned)
@@ -728,6 +829,18 @@ fn parse_source_into_with_loader(
                 .insert(key.to_owned(), expanded);
             manifest.has_pool_binding |= key == "pool";
             manifest.has_dyndep_binding |= key == "dyndep";
+        } else if let Some((column, token)) = expected_equals_diagnostic(
+            line,
+            missing_final_newline
+                && line_no == source.bytes().filter(|byte| *byte == b'\n').count() + 1,
+        ) {
+            return Err(Diagnostic::new(
+                path,
+                line_no,
+                column,
+                format!("expected '=', got {token}"),
+            )
+            .with_source(&raw_line));
         } else {
             return Err(
                 Diagnostic::new(path, line_no, 1, "expected a declaration").with_source(&raw_line)
@@ -760,6 +873,55 @@ fn parse_source_into_with_loader(
     Ok(())
 }
 
+fn build_rule_column(line: &str) -> Option<usize> {
+    let colon = line.find(':')?;
+    let suffix = &line[colon + 1..];
+    let whitespace = suffix.len() - suffix.trim_start().len();
+    Some(colon + whitespace + 2)
+}
+
+fn line_end_column(line: &str) -> usize {
+    line.strip_suffix('\r').unwrap_or(line).chars().count() + 1
+}
+
+fn expected_equals_diagnostic(line: &str, at_eof: bool) -> Option<(usize, &'static str)> {
+    let name_end = line
+        .bytes()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .unwrap_or(line.len());
+    if name_end == 0 || !valid_variable_name(&line[..name_end]) {
+        return None;
+    }
+    let remainder = &line[name_end..];
+    let whitespace = remainder.len() - remainder.trim_start().len();
+    let token_start = name_end + whitespace;
+    if token_start == line.len() {
+        Some((
+            line.chars().count() + 1,
+            if at_eof { "eof" } else { "newline" },
+        ))
+    } else if line.as_bytes()[token_start].is_ascii_alphanumeric() {
+        Some((token_start + 1, "identifier"))
+    } else {
+        None
+    }
+}
+
+fn first_unescaped_colon(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'$' && index + 1 < bytes.len() {
+            index += 2;
+        } else if bytes[index] == b':' {
+            return Some(index);
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
 fn validate(manifest: &Manifest) -> Result<(), Diagnostic> {
     if let Some(required) = manifest.variables.get("ninja_required_version")
         && required_version_incompatible(required, SUPPORTED_SYNTAX_VERSION)
@@ -775,6 +937,19 @@ fn validate(manifest: &Manifest) -> Result<(), Diagnostic> {
     for edge in &manifest.edges {
         for output in edge.outputs() {
             if let Some(previous) = outputs.insert(output, edge) {
+                if crate::program_name() == "ninja" {
+                    let message = if std::ptr::eq(previous, edge) {
+                        format!("{output} is defined as an output multiple times")
+                    } else {
+                        format!("multiple rules generate {output}")
+                    };
+                    return Err(Diagnostic::new(
+                        edge.source.as_path(),
+                        edge.line + edge.bindings.len() + 1,
+                        1,
+                        message,
+                    ));
+                }
                 return Err(Diagnostic::new(
                     edge.source.as_path(),
                     edge.line,
@@ -977,16 +1152,17 @@ fn lex_build(input: &str) -> Vec<BuildToken<'_>> {
                 continue;
             }
             b'|' => {
-                if bytes.get(index + 1) == Some(&b'|') {
-                    tokens.push(BuildToken::Pipe2);
+                let token = if bytes.get(index + 1) == Some(&b'|') {
                     index += 2;
+                    BuildToken::Pipe2
                 } else if bytes.get(index + 1) == Some(&b'@') {
-                    tokens.push(BuildToken::Validation);
                     index += 2;
+                    BuildToken::Validation
                 } else {
-                    tokens.push(BuildToken::Pipe);
                     index += 1;
-                }
+                    BuildToken::Pipe
+                };
+                tokens.push(token);
                 continue;
             }
             _ => {}
@@ -1009,6 +1185,39 @@ fn lex_build(input: &str) -> Vec<BuildToken<'_>> {
     tokens
 }
 
+fn build_token_offset(input: &str, target: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut token = 0;
+    while index < bytes.len() {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            index += 1;
+        }
+        if index == bytes.len() || token == target {
+            return index;
+        }
+        token += 1;
+        match bytes[index] {
+            b':' => index += 1,
+            b'|' if matches!(bytes.get(index + 1), Some(b'|' | b'@')) => index += 2,
+            b'|' => index += 1,
+            _ => {
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'$' if index + 1 < bytes.len() => index += 2,
+                        b' ' | b'\t' | b':' | b'|' => break,
+                        _ => index += 1,
+                    }
+                }
+            }
+        }
+    }
+    input.len()
+}
+
 fn path_needs_canonicalization(path: &str) -> bool {
     (cfg!(windows) && path.as_bytes().contains(&b'\\'))
         || path.ends_with('/')
@@ -1027,7 +1236,14 @@ fn parse_edge(
     let colon = tokens
         .iter()
         .position(|token| *token == BuildToken::Colon)
-        .ok_or_else(|| Diagnostic::new(path, line, 1, "expected ':' in build statement"))?;
+        .ok_or_else(|| {
+            Diagnostic::new(
+                path,
+                line,
+                6 + input.chars().count() + 1,
+                "expected ':', got newline ($ also escapes ':')",
+            )
+        })?;
     let mut edge = Edge {
         source: Arc::clone(path),
         line,
@@ -1035,7 +1251,7 @@ fn parse_edge(
     };
     let mut deferred = DeferredPaths::default();
     let mut implicit = false;
-    for token in &tokens[..colon] {
+    for (token_index, token) in tokens[..colon].iter().enumerate() {
         match token {
             BuildToken::Pipe if !implicit => implicit = true,
             BuildToken::Word(word, needs_canonicalization) => {
@@ -1060,18 +1276,37 @@ fn parse_edge(
                     }
                 }
             }
-            _ => return Err(Diagnostic::new(path, line, 1, "invalid output list")),
+            other => {
+                let symbol = match other {
+                    BuildToken::Pipe => "'|'",
+                    BuildToken::Pipe2 => "'||'",
+                    BuildToken::Validation => "'|@'",
+                    BuildToken::Colon => "':'",
+                    BuildToken::Word(..) => "identifier",
+                };
+                return Err(Diagnostic::new(
+                    path,
+                    line,
+                    6 + build_token_offset(input, token_index) + 1,
+                    format!("expected ':', got {symbol} ($ also escapes ':')"),
+                ));
+            }
         }
     }
     if edge.explicit_outputs.is_empty() && edge.implicit_outputs.is_empty() {
         return Err(Diagnostic::new(path, line, 1, "build edge has no outputs"));
     }
     let Some(BuildToken::Word(rule, _)) = tokens.get(colon + 1) else {
+        let offset = build_token_offset(input, colon + 1);
         return Err(Diagnostic::new(
             path,
             line,
-            1,
-            "expected build rule after ':'",
+            6 + offset + 1,
+            if crate::program_name() == "ninja" {
+                "expected build command name"
+            } else {
+                "expected build rule after ':'"
+            },
         ));
     };
     edge.rule = (*rule).to_owned();
@@ -1084,23 +1319,39 @@ fn parse_edge(
         Validation,
     }
     let mut kind = InputKind::Explicit;
-    for token in &tokens[colon + 2..] {
+    for (relative_index, token) in tokens[colon + 2..].iter().enumerate() {
+        let token_index = colon + 2 + relative_index;
         match token {
             BuildToken::Pipe => {
                 if kind >= InputKind::Implicit {
-                    return Err(Diagnostic::new(path, line, 1, "unexpected '|'"));
+                    return Err(Diagnostic::new(
+                        path,
+                        line,
+                        6 + build_token_offset(input, token_index) + 1,
+                        "expected newline, got '|'",
+                    ));
                 }
                 kind = InputKind::Implicit;
             }
             BuildToken::Pipe2 => {
                 if kind >= InputKind::OrderOnly {
-                    return Err(Diagnostic::new(path, line, 1, "unexpected '||'"));
+                    return Err(Diagnostic::new(
+                        path,
+                        line,
+                        6 + build_token_offset(input, token_index) + 1,
+                        "expected newline, got '||'",
+                    ));
                 }
                 kind = InputKind::OrderOnly;
             }
             BuildToken::Validation => {
                 if kind >= InputKind::Validation {
-                    return Err(Diagnostic::new(path, line, 1, "unexpected '|@'"));
+                    return Err(Diagnostic::new(
+                        path,
+                        line,
+                        6 + build_token_offset(input, token_index) + 1,
+                        "expected newline, got '|@'",
+                    ));
                 }
                 kind = InputKind::Validation;
             }
@@ -1147,8 +1398,8 @@ fn parse_edge(
                 return Err(Diagnostic::new(
                     path,
                     line,
-                    1,
-                    "unexpected ':' in input list",
+                    6 + build_token_offset(input, token_index) + 1,
+                    "expected newline, got ':'",
                 ));
             }
         }
@@ -1465,8 +1716,8 @@ impl<'a> Iterator for LogicalLines<'a> {
         let mut continued_at_eof = true;
         for line in self.lines.by_ref() {
             self.next_line += 1;
-            let line = line.trim_start();
-            buffer.push_str(line);
+            let trimmed = line.trim_start();
+            buffer.push_str(trimmed);
             let continued = buffer
                 .as_bytes()
                 .iter()
@@ -1487,6 +1738,62 @@ impl<'a> Iterator for LogicalLines<'a> {
         }
         Some((start_line, Cow::Owned(buffer)))
     }
+}
+
+fn diagnostic_for_logical_line(
+    path: &Path,
+    line: usize,
+    column: usize,
+    message: impl Into<String>,
+    logical_source: &str,
+    complete_source: &str,
+) -> Diagnostic {
+    remap_logical_diagnostic(
+        Diagnostic::new(path, line, column, message),
+        logical_source,
+        complete_source,
+    )
+}
+
+fn remap_logical_diagnostic(
+    mut diagnostic: Diagnostic,
+    logical_source: &str,
+    complete_source: &str,
+) -> Diagnostic {
+    let logical_offset = diagnostic.column.saturating_sub(1);
+    let mut logical_start = 0;
+    for (physical_index, physical_source) in complete_source
+        .split_terminator('\n')
+        .skip(diagnostic.line.saturating_sub(1))
+        .enumerate()
+    {
+        let source = physical_source
+            .strip_suffix('\r')
+            .unwrap_or(physical_source);
+        let source_start = if physical_index == 0 {
+            0
+        } else {
+            source.len() - source.trim_start().len()
+        };
+        let content = &source[source_start..];
+        let continued = content
+            .as_bytes()
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'$')
+            .count()
+            % 2
+            == 1;
+        let logical_end = logical_start + content.len().saturating_sub(usize::from(continued));
+        if logical_offset < logical_end || !continued {
+            diagnostic.line += physical_index;
+            diagnostic.column = source_start + logical_offset - logical_start + 1;
+            diagnostic.source_line = Some(physical_source.to_owned());
+            return diagnostic;
+        }
+        logical_start = logical_end;
+    }
+    diagnostic.with_source(logical_source)
 }
 
 fn strip_comment(line: &str) -> &str {

@@ -8,8 +8,9 @@ use knight_build::deps_log::{DepsLog, deps_log_path};
 #[cfg(windows)]
 use knight_build::ensure_process_tree_cleanup;
 use knight_build::{
-    BuildOptions, Edge, Manifest, apply_dyndep_files, canonicalize_path, install_interrupt_handler,
-    last_build_exit_code, load_manifest, program_name, resolve_target_path, run_build, spellcheck,
+    BuildOptions, Diagnostic, Edge, Manifest, apply_dyndep_files, canonicalize_path,
+    install_interrupt_handler, last_build_exit_code, load_manifest, program_name,
+    resolve_target_path, run_build, spellcheck,
 };
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::{HashMapExt, HashSetExt};
@@ -209,6 +210,14 @@ fn ninja_compat_build_error(error: &str) -> Option<String> {
     Some(format!("build stopped: multiple rules generate {output}."))
 }
 
+fn format_manifest_diagnostic(error: Diagnostic) -> String {
+    if program_name() == "ninja" {
+        error.ninja_message()
+    } else {
+        error.to_string()
+    }
+}
+
 fn run() -> Result<(), String> {
     install_interrupt_handler()?;
     let mut cli = parse_cli(env::args().skip(1).collect())?;
@@ -280,7 +289,7 @@ fn run() -> Result<(), String> {
         }
     }
     let manifest_start = Instant::now();
-    let mut manifest = load_manifest(&cli.manifest).map_err(|error| error.to_string())?;
+    let mut manifest = load_manifest(&cli.manifest).map_err(format_manifest_diagnostic)?;
     print_manifest_warnings(&manifest);
     filter_phony_self_references(&mut manifest, &cli.options);
     if cli.options.stats {
@@ -335,7 +344,7 @@ fn run() -> Result<(), String> {
             }
             regeneration_count += 1;
             let reload_start = Instant::now();
-            manifest = load_manifest(&cli.manifest).map_err(|error| error.to_string())?;
+            manifest = load_manifest(&cli.manifest).map_err(format_manifest_diagnostic)?;
             print_manifest_warnings(&manifest);
             filter_phony_self_references(&mut manifest, &cli.options);
             if cli.options.stats {
