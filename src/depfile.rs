@@ -305,4 +305,202 @@ mod tests {
         assert_eq!(parsed.outputs, ["foo1\\"]);
         assert_eq!(parsed.inputs, ["x"]);
     }
+
+    #[test]
+    fn upstream_depfile_parser_corpus() {
+        let cases: &[(&str, &str, &[&str], &[&str])] = &[
+            (
+                "Basic",
+                "build/ninja.o: ninja.cc ninja.h eval_env.h manifest_parser.h\n",
+                &["build/ninja.o"],
+                &["ninja.cc", "ninja.h", "eval_env.h", "manifest_parser.h"],
+            ),
+            (
+                "EarlyNewlineAndWhitespace",
+                " \\\n  out: in\n",
+                &["out"],
+                &["in"],
+            ),
+            (
+                "Continuation",
+                "foo.o: \\\n  bar.h baz.h\n",
+                &["foo.o"],
+                &["bar.h", "baz.h"],
+            ),
+            (
+                "WindowsDrivePaths",
+                "foo.o: //?/c:/bar.h\n",
+                &["foo.o"],
+                &["//?/c:/bar.h"],
+            ),
+            (
+                "AmpersandsAndQuotes",
+                "foo&bar.o foo'bar.o foo\"bar.o: foo&bar.h foo'bar.h foo\"bar.h\n",
+                &["foo&bar.o", "foo'bar.o", "foo\"bar.o"],
+                &["foo&bar.h", "foo'bar.h", "foo\"bar.h"],
+            ),
+            (
+                "CarriageReturnContinuation",
+                "foo.o: \\\r\n  bar.h baz.h\r\n",
+                &["foo.o"],
+                &["bar.h", "baz.h"],
+            ),
+            (
+                "BackSlashes",
+                concat!(
+                    "Project\\Dir\\Build\\Release8\\Foo\\Foo.res : \\\n",
+                    "  Dir\\Library\\Foo.rc \\\n",
+                    "  Dir\\Library\\Version\\Bar.h \\\n",
+                    "  Dir\\Library\\Foo.ico \\\n",
+                    "  Project\\Thing\\Bar.tlb \\\n",
+                ),
+                &["Project\\Dir\\Build\\Release8\\Foo\\Foo.res"],
+                &[
+                    "Dir\\Library\\Foo.rc",
+                    "Dir\\Library\\Version\\Bar.h",
+                    "Dir\\Library\\Foo.ico",
+                    "Project\\Thing\\Bar.tlb",
+                ],
+            ),
+            (
+                "Spaces",
+                "a\\ bc\\ def:   a\\ b c d",
+                &["a bc def"],
+                &["a b", "c", "d"],
+            ),
+            (
+                "MultipleBackslashes",
+                r"a\ b\#c.h: \\\\\  \\\\ \\share\info\\#1",
+                &["a b#c.h"],
+                &[r"\\ ", r"\\\\", r"\\share\info\#1"],
+            ),
+            (
+                "Escapes",
+                r"\!\@\#$$\%\^\&\[\]\\:",
+                &[r"\!\@#$\%\^\&\[\]\\"],
+                &[],
+            ),
+            (
+                "EscapedColons",
+                "c\\:\\gcc\\x86_64-w64-mingw32\\include\\stddef.o: \\\n c:\\gcc\\x86_64-w64-mingw32\\include\\stddef.h \n",
+                &["c:\\gcc\\x86_64-w64-mingw32\\include\\stddef.o"],
+                &["c:\\gcc\\x86_64-w64-mingw32\\include\\stddef.h"],
+            ),
+            (
+                "EscapedTargetColon",
+                "foo1\\: x\nfoo1\\:\nfoo1\\:\r\nfoo1\\:\t\nfoo1\\:",
+                &["foo1\\"],
+                &["x"],
+            ),
+            (
+                "SpecialChars",
+                concat!(
+                    "C:/Program\\ Files\\ (x86)/Microsoft\\ crtdefs.h: \\\n",
+                    " en@quot.header~ t+t-x!=1 \\\n",
+                    " openldap/slapd.d/cn=config/cn=schema/cn={0}core.ldif\\\n",
+                    " F\u{e4}ball\\\n",
+                    " a[1]b@2%c",
+                ),
+                &["C:/Program Files (x86)/Microsoft crtdefs.h"],
+                &[
+                    "en@quot.header~",
+                    "t+t-x!=1",
+                    "openldap/slapd.d/cn=config/cn=schema/cn={0}core.ldif",
+                    "F\u{e4}ball",
+                    "a[1]b@2%c",
+                ],
+            ),
+            (
+                "UnifyMultipleOutputs",
+                "foo foo: x y z",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "MultipleDifferentOutputs",
+                "foo bar: x y z",
+                &["foo", "bar"],
+                &["x", "y", "z"],
+            ),
+            (
+                "MultipleEmptyRules",
+                "foo: x\nfoo: \nfoo:\n",
+                &["foo"],
+                &["x"],
+            ),
+            (
+                "UnifyMultipleRulesLF",
+                "foo: x\nfoo: y\nfoo \\\nfoo: z\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "UnifyMultipleRulesCRLF",
+                "foo: x\r\nfoo: y\r\nfoo \\\r\nfoo: z\r\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "UnifyMixedRulesLF",
+                "foo: x\\\n     y\nfoo \\\nfoo: z\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "UnifyMixedRulesCRLF",
+                "foo: x\\\r\n     y\r\nfoo \\\r\nfoo: z\r\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "IndentedRulesLF",
+                " foo: x\n foo: y\n foo: z\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "IndentedRulesCRLF",
+                " foo: x\r\n foo: y\r\n foo: z\r\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "TolerateMP",
+                "foo: x y z\nx:\ny:\nz:\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "MultipleRulesTolerateMP",
+                "foo: x\nx:\nfoo: y\ny:\nfoo: z\nz:\n",
+                &["foo"],
+                &["x", "y", "z"],
+            ),
+            (
+                "MultipleRulesDifferentOutputs",
+                "foo: x y\nbar: y z\n",
+                &["foo", "bar"],
+                &["x", "y", "z"],
+            ),
+            ("EmptyFile", "", &[], &[]),
+            ("EmptyLines", "\n\n", &[], &[]),
+        ];
+        assert_eq!(cases.len(), 27);
+        for (name, source, outputs, inputs) in cases {
+            let parsed = parse_depfile(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(&parsed.outputs, outputs, "{name} outputs");
+            assert_eq!(&parsed.inputs, inputs, "{name} inputs");
+        }
+
+        for (name, source, error) in [
+            (
+                "BuggyMP",
+                "foo: x y z\nx: alsoin\ny:\nz:\n",
+                "inputs may not also have inputs",
+            ),
+            ("MissingColon", "foo.o foo.c\n", "expected ':' in depfile"),
+        ] {
+            assert_eq!(parse_depfile(source).unwrap_err(), error, "{name}");
+        }
+    }
 }

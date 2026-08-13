@@ -49,6 +49,10 @@ This is an evidence ledger, not a claim of full compatibility.
 - Incremental timestamp planning, `restat`, manifest regeneration/reload,
   Make-style GCC depfiles (multiple rules/outputs and Ninja-compatible escapes),
   MSVC `/showIncludes`, and Ninja v7 build-log command hashes.
+  All 29 cases in Ninja's upstream depfile-parser suite are mapped directly,
+  including LF/CRLF continuations, Windows drive paths, odd/even backslash
+  runs, quotes and punctuation, UTF-8 paths, duplicate outputs and rules,
+  compiler `-MP` layouts, poisoned inputs, and empty files.
   Missing depfile-discovered inputs correctly dirty their consumer instead of
   becoming fatal graph errors. Deps-log freshness and multi-output lookup use
   Ninja's output-timestamp and first-output rules. Discovered dependencies are
@@ -319,8 +323,8 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 76
-  library, 6 CLI, and 121 differential tests; Linux-under-WSL passes 71 library,
+- Broader cross-platform runtime validation. The current Windows gates pass 77
+  library, 6 CLI, and 121 differential tests; Linux-under-WSL passes 72 library,
   5 CLI, and 96 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
