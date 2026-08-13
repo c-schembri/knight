@@ -165,6 +165,15 @@ not regress the optimized paths. A subsequent 100-sample sweep measured the
 single-file case at 36.861 ms for Knight versus 23.322 ms for Ninja, and the
 1,000-ready-file case at 36.783 ms for Knight versus 47.903 ms for Ninja.
 
+Ready source dyndeps now enter parsing directly from the initial target
+closure instead of rebuilding the same output index, build log, dependency
+state, and closure before the first load. A 50-sample 10,000-record sweep after
+this change measured a 34.685 ms Knight median (30.852 ms minimum, 45.666 ms
+P95) versus Ninja's 24.150 ms median (22.156 ms minimum, 97.677 ms P95). The
+instrumented redundant `dyndep graph` phase fell from about 4.7 ms to zero.
+Knight still trails Ninja's median by 43.6% on this shape, but improved its
+median by 16.4% from the immediately preceding 41.473 ms 30-sample baseline.
+
 ## Inputs tool
 
 `scripts/benchmark-inputs.ps1` validates byte-equivalent `-t inputs all`
