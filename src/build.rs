@@ -461,8 +461,8 @@ impl<'a> DeclaredStatCache<'a> {
         let mut paths = HashSet::new();
         for edge in &manifest.edges {
             paths.extend(edge.outputs());
-            paths.extend(edge.explicit_inputs.iter().map(String::as_str));
-            paths.extend(edge.implicit_inputs.iter().map(String::as_str));
+            paths.extend(edge.explicit_inputs());
+            paths.extend(edge.implicit_inputs());
         }
         let mut groups = HashMap::<&Path, Vec<&str>>::new();
         for path in paths {
@@ -862,7 +862,7 @@ struct DependencySpec {
 
 impl DependencySpec {
     fn evaluate(manifest: &Manifest, edge: &Edge) -> Self {
-        let rule = manifest.lookup_rule(edge.scope, &edge.rule);
+        let rule = manifest.lookup_rule(edge.scope, edge.rule());
         let has_binding = |name: &str| {
             edge.bindings.contains_key(name)
                 || rule.is_some_and(|rule| rule.bindings.contains_key(name))
@@ -1289,15 +1289,15 @@ fn declared_dirty_edges<'a>(
         }
         let edge_id = outputs.get(path).copied()?;
         let edge = &manifest.edges[edge_id];
-        if edge.rule != "phony" || !visiting.insert(edge_id) {
+        if edge.rule() != "phony" || !visiting.insert(edge_id) {
             return None;
         }
-        if edge.inputs().next().is_none() && edge.validations.is_empty() {
+        if edge.inputs().next().is_none() && edge.validations().next().is_none() {
             visiting.remove(&edge_id);
             return Some(u128::MAX);
         }
         let mut newest = 0;
-        for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
+        for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
             newest = newest.max(path_mtime(input, manifest, outputs, visiting, stat_cache)?);
         }
         visiting.remove(&edge_id);
@@ -1317,10 +1317,10 @@ fn declared_dirty_edges<'a>(
             _ => state[edge_id] = 1,
         }
         let edge = &context.manifest.edges[edge_id];
-        let mut dirty = edge.rule == "phony" && edge.inputs().next().is_none();
+        let mut dirty = edge.rule() == "phony" && edge.inputs().next().is_none();
         let mut oldest_output = u128::MAX;
         let mut newest_input = 0;
-        if edge.rule != "phony" {
+        if edge.rule() != "phony" {
             for output in edge.outputs() {
                 let Some(mtime) = stat_cache.get(output) else {
                     dirty = true;
@@ -1330,8 +1330,8 @@ fn declared_dirty_edges<'a>(
             }
         }
 
-        for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-            if let Some(producer) = context.outputs.get(input.as_str()).copied() {
+        for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
+            if let Some(producer) = context.outputs.get(input).copied() {
                 if visit(producer, context, state, result, stat_cache) {
                     dirty = true;
                 }
@@ -1349,7 +1349,7 @@ fn declared_dirty_edges<'a>(
             newest_input = newest_input.max(mtime);
         }
 
-        if edge.rule != "phony" {
+        if edge.rule() != "phony" {
             let use_restat = context.specs[edge_id].restat
                 && edge
                     .outputs()
@@ -1790,7 +1790,7 @@ fn run_build_impl(
             Err(error) => {
                 let total = current_closure
                     .iter()
-                    .filter(|edge| expanded.edges[**edge].rule != "phony")
+                    .filter(|edge| expanded.edges[**edge].rule() != "phony")
                     .count();
                 print_prior_statuses(&expanded, options, &prebuild.ran_edges, total)?;
                 return Err(error);
@@ -1887,8 +1887,8 @@ fn dyndep_prebuild_targets(
                 }
             }
         }
-        for validation in &edge.validations {
-            if let Some(validation_edge) = outputs.get(validation.as_str()).copied() {
+        for validation in edge.validations() {
+            if let Some(validation_edge) = outputs.get(validation).copied() {
                 if in_closure[validation_edge] {
                     // Selecting the consumer would also select its validation.
                     dependents[validation_edge].push(consumer);
@@ -1927,7 +1927,7 @@ fn dyndep_prebuild_targets(
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
         let safe_to_prebuild = !unsafe_edge[edge_id]
-            && edge.rule != "phony"
+            && edge.rule() != "phony"
             && !edge
                 .inputs()
                 .any(|input| !outputs.contains_key(input) && !Path::new(input).exists());
@@ -2004,7 +2004,7 @@ fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result
         outputs.get(output.as_str()).copied()
     };
     let parsed_files = load_dyndep_records(files, &resolve_output);
-    let mut discovered_input_ranges = Vec::new();
+    let mut discovered_inputs = Vec::new();
     for (file, records) in files.iter().zip(parsed_files) {
         let canonical_file = canonicalize_owned_path(file.clone());
         let records = records?;
@@ -2057,21 +2057,22 @@ fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result
                 ));
             }
             let edge = &mut manifest.edges[edge_id];
-            let first_discovered_input = edge.implicit_inputs.len();
+            let mut added_inputs = Vec::new();
             for input in record.implicit_inputs {
-                if !edge.implicit_inputs.contains(&input) {
-                    edge.implicit_inputs.push(input);
+                if !edge.implicit_inputs().any(|known| known == input) {
+                    added_inputs.push(input.clone());
+                    edge.push_implicit_input(input);
                 }
             }
-            if edge.implicit_inputs.len() != first_discovered_input {
-                discovered_input_ranges.push((edge_id, first_discovered_input));
+            if !added_inputs.is_empty() {
+                discovered_inputs.push(added_inputs);
             }
             for output in record.implicit_outputs {
                 if outputs.contains_key(&output) {
                     return Err(format!("multiple rules generate {output}"));
                 }
-                if !edge.implicit_outputs.contains(&output) {
-                    edge.implicit_outputs.push(output.clone());
+                if !edge.implicit_outputs().any(|known| known == output) {
+                    edge.push_implicit_output(output.clone());
                 }
                 outputs.insert(output, edge_id);
             }
@@ -2080,11 +2081,10 @@ fn apply_dyndep_files_inner(manifest: &mut Manifest, files: &[String]) -> Result
             }
         }
     }
-    Ok(discovered_input_ranges.iter().any(|(edge_id, start)| {
-        manifest.edges[*edge_id].implicit_inputs[*start..]
-            .iter()
-            .any(|input| outputs.contains_key(input))
-    }))
+    Ok(discovered_inputs
+        .iter()
+        .flatten()
+        .any(|input| outputs.contains_key(input)))
 }
 
 fn load_dyndep_records(
@@ -2461,21 +2461,17 @@ fn run_build_prepared_reusable<'a>(
         let mut deferred_phony_order_only = Vec::new();
         for &edge_id in &closure {
             let edge = &manifest.edges[edge_id];
-            for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-                if !output_map.contains_key(input.as_str())
-                    && stat_cache.checked_get(input)?.is_none()
-                {
+            for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
+                if !output_map.contains_key(input) && stat_cache.checked_get(input)?.is_none() {
                     return Err(format!(
                         "'{input}', needed by '{}', missing and no known rule to make it",
                         edge.outputs().next().unwrap_or(input)
                     ));
                 }
             }
-            for input in &edge.order_only_inputs {
-                if !output_map.contains_key(input.as_str())
-                    && stat_cache.checked_get(input)?.is_none()
-                {
-                    if edge.rule == "phony" {
+            for input in edge.order_only_inputs() {
+                if !output_map.contains_key(input) && stat_cache.checked_get(input)?.is_none() {
+                    if edge.rule() == "phony" {
                         deferred_phony_order_only.push((edge_id, input));
                     } else {
                         return Err(format!(
@@ -2559,7 +2555,7 @@ fn run_build_prepared_reusable<'a>(
     let mut initially_dirty = None;
     let mut status_total = closure
         .iter()
-        .filter(|edge| manifest.edges[**edge].rule != "phony")
+        .filter(|edge| manifest.edges[**edge].rule() != "phony")
         .count();
     let has_limited_pool = manifest.has_pool_bindings()
         && closure
@@ -2579,7 +2575,7 @@ fn run_build_prepared_reusable<'a>(
             + closure
                 .iter()
                 .filter(|edge| dirty[**edge] && !progress.completed_edges.contains(edge))
-                .filter(|edge| manifest.edges[**edge].rule != "phony")
+                .filter(|edge| manifest.edges[**edge].rule() != "phony")
                 .count();
         initially_dirty = Some(dirty);
     }
@@ -2589,7 +2585,7 @@ fn run_build_prepared_reusable<'a>(
                 options.jobs,
                 closure
                     .iter()
-                    .filter(|edge| manifest.edges[**edge].rule != "phony")
+                    .filter(|edge| manifest.edges[**edge].rule() != "phony")
                     .map(|edge| build_log.previous_elapsed(&manifest.edges[*edge])),
             )
         } else {
@@ -2659,7 +2655,7 @@ fn run_build_prepared_reusable<'a>(
         if program_name() == "ninja" && !progress.loaded_dyndeps.is_empty() {
             for &edge_id in &closure {
                 let edge = &manifest.edges[edge_id];
-                if edge.rule != "phony"
+                if edge.rule() != "phony"
                     && !evaluate_unescaped_binding(manifest, edge, "dyndep").is_empty()
                 {
                     if let Some(output) = edge
@@ -2811,7 +2807,7 @@ fn run_build_prepared_reusable<'a>(
                 continue;
             }
             let edge = &manifest.edges[edge_id];
-            if edge.rule == "phony" {
+            if edge.rule() == "phony" {
                 if !options.dry_run
                     && launch_capacity == 0
                     && initially_dirty.as_ref().is_none_or(|dirty| dirty[edge_id])
@@ -2819,10 +2815,8 @@ fn run_build_prepared_reusable<'a>(
                     ready.push((critical_path[edge_id], Reverse(edge_id)));
                     continue;
                 }
-                for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-                    if !output_map.contains_key(input.as_str())
-                        && stat_cache.checked_get(input)?.is_none()
-                    {
+                for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
+                    if !output_map.contains_key(input) && stat_cache.checked_get(input)?.is_none() {
                         return Err(format!("input '{input}' is missing"));
                     }
                 }
@@ -2946,7 +2940,7 @@ fn run_build_prepared_reusable<'a>(
                     + closure
                         .iter()
                         .filter(|edge| dirty[**edge] && !progress.completed_edges.contains(edge))
-                        .filter(|edge| manifest.edges[**edge].rule != "phony")
+                        .filter(|edge| manifest.edges[**edge].rule() != "phony")
                         .count();
                 initially_dirty = Some(dirty);
             }
@@ -3560,19 +3554,18 @@ fn initially_dirty_edges(
     let restat_cleaned_outputs = HashSet::new();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
-        if edge.rule == "phony" {
+        if edge.rule() == "phony" {
             if track_phony {
-                dirty[edge_id] = edge
-                    .explicit_inputs
-                    .iter()
-                    .chain(&edge.implicit_inputs)
-                    .any(|input| {
-                        output_map
-                            .get(input.as_str())
-                            .is_some_and(|producer| dirty[*producer])
-                            || (!output_map.contains_key(input.as_str())
-                                && stat_cache.get(input).is_none())
-                    });
+                dirty[edge_id] =
+                    edge.explicit_inputs()
+                        .chain(edge.implicit_inputs())
+                        .any(|input| {
+                            output_map
+                                .get(input)
+                                .is_some_and(|producer| dirty[*producer])
+                                || (!output_map.contains_key(input)
+                                    && stat_cache.get(input).is_none())
+                        });
             }
             continue;
         }
@@ -4149,7 +4142,7 @@ fn finish_ready_clean_phonies(
         let edge_id = candidate.1.0;
         let edge = &manifest.edges[edge_id];
         let inputless = edge.inputs().next().is_none();
-        if edge.rule == "phony"
+        if edge.rule() == "phony"
             && !failed_prerequisite[edge_id]
             && (!initially_dirty[edge_id] || inputless)
         {
@@ -4294,10 +4287,7 @@ fn select_targets(
     let known_inputs = manifest
         .edges
         .iter()
-        .flat_map(|edge| {
-            edge.inputs()
-                .chain(edge.validations.iter().map(String::as_str))
-        })
+        .flat_map(|edge| edge.inputs().chain(edge.validations()))
         .collect::<HashSet<_>>();
     for name in names {
         if let Some(edge) = outputs.get(name.as_str()) {
@@ -4333,7 +4323,7 @@ pub fn resolve_target_path(
         manifest.edges.iter().any(|edge| {
             edge.outputs()
                 .chain(edge.inputs())
-                .chain(edge.validations.iter().map(String::as_str))
+                .chain(edge.validations())
                 .any(|node| node == candidate)
         })
     };
@@ -4389,16 +4379,11 @@ fn dependency_closure(
         index: usize,
     ) -> Option<&'a str> {
         let mut index = index;
-        for inputs in [
-            &edge.explicit_inputs,
-            &edge.implicit_inputs,
-            &edge.order_only_inputs,
-        ] {
-            if index < inputs.len() {
-                return Some(&inputs[index]);
-            }
-            index -= inputs.len();
+        let declared = edge.input_count();
+        if index < declared {
+            return edge.input_at(index);
         }
+        index -= declared;
         discovered.input_at(edge_id, index)
     }
 
@@ -4486,8 +4471,8 @@ fn dependency_closure(
     while index < result.len() {
         let edge_id = result[index];
         index += 1;
-        for validation in &manifest.edges[edge_id].validations {
-            if let Some(validation_edge) = outputs.get(validation.as_str()) {
+        for validation in manifest.edges[edge_id].validations() {
+            if let Some(validation_edge) = outputs.get(validation) {
                 visit_iterative(
                     *validation_edge,
                     manifest,
@@ -4505,10 +4490,10 @@ fn dependency_closure(
 
 fn tolerates_phony_self_reference(edge: &Edge, phony_cycle_error: bool) -> bool {
     !phony_cycle_error
-        && edge.rule == "phony"
-        && edge.explicit_outputs.len() == 1
-        && edge.implicit_outputs.is_empty()
-        && edge.implicit_inputs.is_empty()
+        && edge.rule() == "phony"
+        && edge.explicit_outputs().count() == 1
+        && edge.implicit_outputs().next().is_none()
+        && edge.implicit_inputs().next().is_none()
 }
 
 fn dry_dependency_configuration_error(spec: &DependencySpec) -> Option<String> {
@@ -4839,11 +4824,11 @@ fn evaluate_edge(
         && edge
             .outputs()
             .all(|output| context.build_log.has_entry(output));
-    for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
+    for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
         let mtime = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
         newest_input = newest_input.max(mtime);
-        let producer_is_dirty = output_map.get(input.as_str()).is_some_and(|producer| {
-            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input.as_str())
+        let producer_is_dirty = output_map.get(input).is_some_and(|producer| {
+            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input)
         });
         if producer_is_dirty || mtime == u128::MAX {
             dirty = true;
@@ -4874,7 +4859,7 @@ fn evaluate_edge(
             reason = format!("discovered input {input} is newer than the oldest output");
         }
     }
-    for input in &edge.order_only_inputs {
+    for input in edge.order_only_inputs() {
         let _ = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
     }
     let mut command_evaluated = false;
@@ -4977,22 +4962,18 @@ fn virtual_mtime(
         return Err(format!("input '{path}' is missing"));
     };
     let edge = &manifest.edges[edge_id];
-    if edge.rule != "phony" {
+    if edge.rule() != "phony" {
         return Err(format!("output '{path}' was not created by its command"));
     }
     if !visiting.insert(edge_id) {
         return Err(format!("phony cycle involving '{path}'"));
     }
-    if edge.explicit_inputs.is_empty()
-        && edge.implicit_inputs.is_empty()
-        && edge.order_only_inputs.is_empty()
-        && edge.validations.is_empty()
-    {
+    if edge.inputs().next().is_none() && edge.validations().next().is_none() {
         visiting.remove(&edge_id);
         return Ok(u128::MAX);
     }
     let mut newest = 0;
-    for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
+    for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
         newest = newest.max(virtual_mtime(
             manifest, input, output_map, visiting, stat_cache,
         )?);
@@ -5035,7 +5016,7 @@ fn evaluate_binding_into(
             "in" => {
                 append_path_list(
                     output,
-                    &edge.explicit_inputs,
+                    edge.explicit_inputs(),
                     manifest.explicit_input_slash_bits(edge),
                     ' ',
                     escape_paths,
@@ -5045,7 +5026,7 @@ fn evaluate_binding_into(
             "in_newline" => {
                 append_path_list(
                     output,
-                    &edge.explicit_inputs,
+                    edge.explicit_inputs(),
                     manifest.explicit_input_slash_bits(edge),
                     '\n',
                     escape_paths,
@@ -5055,7 +5036,7 @@ fn evaluate_binding_into(
             "out" => {
                 append_path_list(
                     output,
-                    &edge.explicit_outputs,
+                    edge.explicit_outputs(),
                     manifest.explicit_output_slash_bits(edge),
                     ' ',
                     escape_paths,
@@ -5069,7 +5050,7 @@ fn evaluate_binding_into(
             return;
         }
         if let Some(raw) = manifest
-            .lookup_rule(edge.scope, &edge.rule)
+            .lookup_rule(edge.scope, edge.rule())
             .and_then(|rule| rule.bindings.get(name))
         {
             expand_eval(raw, manifest, edge, depth, escape_paths, output);
@@ -5166,14 +5147,14 @@ pub fn render_unescaped_binding(manifest: &Manifest, edge: &Edge, name: &str) ->
     evaluate_unescaped_binding(manifest, edge, name)
 }
 
-fn append_path_list(
+fn append_path_list<'a>(
     output: &mut String,
-    paths: &[String],
+    paths: impl Iterator<Item = &'a str>,
     slash_bits: &[u64],
     separator: char,
     escape: bool,
 ) {
-    for (index, path) in paths.iter().enumerate() {
+    for (index, path) in paths.enumerate() {
         if index != 0 {
             output.push(separator);
         }
@@ -5362,7 +5343,7 @@ fn critical_path_weights(
     discovered: &DiscoveredDeps,
 ) -> Vec<usize> {
     fn edge_weight(edge: &Edge) -> usize {
-        usize::from(edge.rule != "phony")
+        usize::from(edge.rule() != "phony")
     }
 
     let mut weights = vec![0; manifest.edges.len()];
@@ -6928,18 +6909,15 @@ mod tests {
     #[test]
     fn resolves_deep_dependency_chains_without_using_the_call_stack() {
         let count = 50_000;
-        let mut manifest = Manifest::default();
-        manifest.edges.reserve(count);
+        let mut source = String::with_capacity(count * 32);
         for index in 0..count {
-            let mut edge = Edge {
-                explicit_outputs: vec![format!("out/{index}")],
-                ..Edge::default()
-            };
-            if index != 0 {
-                edge.explicit_inputs.push(format!("out/{}", index - 1));
+            if index == 0 {
+                source.push_str("build out/0: phony\n");
+            } else {
+                source.push_str(&format!("build out/{index}: phony out/{}\n", index - 1));
             }
-            manifest.edges.push(edge);
         }
+        let manifest = parse_manifest(&source, "build.ninja").unwrap();
         let outputs = output_map(&manifest);
         let discovered = DiscoveredDeps {
             inputs: std::iter::repeat_with(DiscoveredInputs::default)

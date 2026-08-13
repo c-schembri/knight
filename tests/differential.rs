@@ -5589,7 +5589,7 @@ fn inputs_tool_deduplicates_shared_inputs_across_targets() {
         temp.path().join("build.ninja"),
         concat!(
             "rule cc\n  command = cc $in -o $out\n",
-            "build a: cc shared source-a path$ with$ space\n",
+            "build a: cc shared source-a path$ with$ space source/1 source/10$ with$ space\n",
             "build b: cc shared source-b\n",
         ),
     )

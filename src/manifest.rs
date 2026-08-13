@@ -1,4 +1,5 @@
 use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
+use rapidhash::v3::rapidhash_v3;
 use rapidhash::{HashMapExt, HashSetExt};
 use std::borrow::Cow;
 use std::fmt;
@@ -32,14 +33,171 @@ pub struct Pool {
 }
 
 #[derive(Clone, Debug, Default)]
+struct ParsedEdge {
+    explicit_outputs: Vec<StringId>,
+    implicit_outputs: Vec<StringId>,
+    rule: StringId,
+    explicit_inputs: Vec<StringId>,
+    implicit_inputs: Vec<StringId>,
+    order_only_inputs: Vec<StringId>,
+    validations: Vec<StringId>,
+    pub bindings: HashMap<String, String>,
+    pub source: Arc<PathBuf>,
+    pub line: usize,
+    pub scope: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+struct StringId(u32);
+
+#[derive(Clone, Debug)]
+struct ArenaEntry {
+    chunk: u32,
+    start: u32,
+    len: u32,
+    collision: Option<StringId>,
+}
+
+#[derive(Clone, Debug)]
+struct StringArena {
+    chunks: Vec<Vec<u8>>,
+    entries: Vec<ArenaEntry>,
+    hashes: HashMap<u64, StringId>,
+}
+
+impl Default for StringArena {
+    fn default() -> Self {
+        Self {
+            chunks: Vec::new(),
+            entries: Vec::new(),
+            hashes: HashMap::new(),
+        }
+    }
+}
+
+impl StringArena {
+    const CHUNK_SIZE: usize = 64 * 1024;
+
+    fn reserve(&mut self, strings: usize, bytes: usize) {
+        self.chunks.reserve(bytes.div_ceil(Self::CHUNK_SIZE).max(1));
+        self.entries.reserve(strings);
+        self.hashes.reserve(strings);
+    }
+
+    fn intern(&mut self, value: &str) -> StringId {
+        let hash = rapidhash_v3(value.as_bytes());
+        if let Some(id) = self.find_hashed(value, hash) {
+            return id;
+        }
+        let head = self.hashes.get(&hash).copied();
+
+        let needs_chunk = self
+            .chunks
+            .last()
+            .is_none_or(|chunk| chunk.capacity() - chunk.len() < value.len());
+        if needs_chunk {
+            self.chunks
+                .push(Vec::with_capacity(Self::CHUNK_SIZE.max(value.len())));
+        }
+        let chunk = self.chunks.len() - 1;
+        let start = self.chunks[chunk].len();
+        self.chunks[chunk].extend_from_slice(value.as_bytes());
+        let id = StringId(
+            self.entries
+                .len()
+                .try_into()
+                .expect("too many manifest strings"),
+        );
+        self.entries.push(ArenaEntry {
+            chunk: chunk.try_into().expect("too many manifest string chunks"),
+            start: start
+                .try_into()
+                .expect("manifest string chunk is too large"),
+            len: value
+                .len()
+                .try_into()
+                .expect("manifest string is too large"),
+            collision: head,
+        });
+        self.hashes.insert(hash, id);
+        id
+    }
+
+    fn find(&self, value: &str) -> Option<StringId> {
+        self.find_hashed(value, rapidhash_v3(value.as_bytes()))
+    }
+
+    fn find_hashed(&self, value: &str, hash: u64) -> Option<StringId> {
+        let mut candidate = self.hashes.get(&hash).copied();
+        while let Some(id) = candidate {
+            if self.resolve(id) == value {
+                return Some(id);
+            }
+            candidate = self.entries[id.0 as usize].collision;
+        }
+        None
+    }
+
+    fn resolve(&self, id: StringId) -> &str {
+        let entry = &self.entries[id.0 as usize];
+        let start = entry.start as usize;
+        let end = start + entry.len as usize;
+        // Strings enter the arena through `&str`, and entries always retain
+        // the exact byte range appended for that string.
+        unsafe { std::str::from_utf8_unchecked(&self.chunks[entry.chunk as usize][start..end]) }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PathRange {
+    start: u32,
+    len: u32,
+}
+
+impl PathRange {
+    fn new(start: usize, end: usize) -> Self {
+        Self {
+            start: start.try_into().expect("too many manifest paths"),
+            len: end
+                .checked_sub(start)
+                .expect("invalid manifest path range")
+                .try_into()
+                .expect("too many paths on one edge"),
+        }
+    }
+
+    fn indexes(self) -> std::ops::Range<usize> {
+        let start = self.start as usize;
+        start..start + self.len as usize
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GraphStorage {
+    // Parsed paths live in bump-allocated byte chunks and edges retain only
+    // compact IDs into one contiguous path array.
+    strings: StringArena,
+    paths: Vec<StringId>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DynamicPaths {
+    implicit_outputs: Vec<String>,
+    implicit_inputs: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Edge {
-    pub explicit_outputs: Vec<String>,
-    pub implicit_outputs: Vec<String>,
-    pub rule: String,
-    pub explicit_inputs: Vec<String>,
-    pub implicit_inputs: Vec<String>,
-    pub order_only_inputs: Vec<String>,
-    pub validations: Vec<String>,
+    storage: Arc<GraphStorage>,
+    explicit_outputs: PathRange,
+    implicit_outputs: PathRange,
+    explicit_inputs: PathRange,
+    implicit_inputs: PathRange,
+    order_only_inputs: PathRange,
+    validations: PathRange,
+    dynamic_paths: Option<Box<DynamicPaths>>,
+    suppressed_self_input: Option<StringId>,
+    rule: StringId,
     pub bindings: HashMap<String, String>,
     pub source: Arc<PathBuf>,
     pub line: usize,
@@ -49,24 +207,167 @@ pub struct Edge {
 #[derive(Clone, Debug, Default)]
 pub struct Scope {
     parent: Option<usize>,
-    variables: HashMap<String, String>,
+    variables: HashMap<StringId, String>,
     rules: HashMap<String, Rule>,
 }
 
-impl Edge {
-    pub fn outputs(&self) -> impl Iterator<Item = &str> {
+impl ParsedEdge {
+    fn output_ids(&self) -> impl Iterator<Item = StringId> + '_ {
         self.explicit_outputs
             .iter()
             .chain(&self.implicit_outputs)
-            .map(String::as_str)
+            .copied()
     }
 
-    pub fn inputs(&self) -> impl Iterator<Item = &str> {
+    fn input_ids(&self) -> impl Iterator<Item = StringId> + '_ {
         self.explicit_inputs
             .iter()
             .chain(&self.implicit_inputs)
             .chain(&self.order_only_inputs)
-            .map(String::as_str)
+            .copied()
+    }
+}
+
+impl Edge {
+    fn static_paths(&self, range: PathRange) -> impl Iterator<Item = (StringId, &str)> {
+        range.indexes().map(|index| {
+            let id = self.storage.paths[index];
+            (id, self.storage.strings.resolve(id))
+        })
+    }
+
+    pub fn explicit_outputs(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.explicit_outputs)
+            .map(|(_, path)| path)
+    }
+
+    pub fn implicit_outputs(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.implicit_outputs)
+            .map(|(_, path)| path)
+            .chain(
+                self.dynamic_paths
+                    .iter()
+                    .flat_map(|paths| paths.implicit_outputs.iter().map(String::as_str)),
+            )
+    }
+
+    pub fn explicit_inputs(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.explicit_inputs)
+            .filter(|(id, _)| Some(*id) != self.suppressed_self_input)
+            .map(|(_, path)| path)
+    }
+
+    pub fn implicit_inputs(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.implicit_inputs)
+            .filter(|(id, _)| Some(*id) != self.suppressed_self_input)
+            .map(|(_, path)| path)
+            .chain(
+                self.dynamic_paths
+                    .iter()
+                    .flat_map(|paths| paths.implicit_inputs.iter().map(String::as_str)),
+            )
+    }
+
+    pub fn order_only_inputs(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.order_only_inputs)
+            .filter(|(id, _)| Some(*id) != self.suppressed_self_input)
+            .map(|(_, path)| path)
+    }
+
+    pub fn validations(&self) -> impl Iterator<Item = &str> {
+        self.static_paths(self.validations).map(|(_, path)| path)
+    }
+
+    pub fn outputs(&self) -> impl Iterator<Item = &str> {
+        self.explicit_outputs().chain(self.implicit_outputs())
+    }
+
+    pub fn inputs(&self) -> impl Iterator<Item = &str> {
+        self.explicit_inputs()
+            .chain(self.implicit_inputs())
+            .chain(self.order_only_inputs())
+    }
+
+    pub fn rule(&self) -> &str {
+        self.storage.strings.resolve(self.rule)
+    }
+
+    pub(crate) fn input_at(&self, mut index: usize) -> Option<&str> {
+        if self.suppressed_self_input.is_some() {
+            return self.inputs().nth(index);
+        }
+        let static_path = |range: PathRange, offset: usize| {
+            let id = self.storage.paths[range.start as usize + offset];
+            self.storage.strings.resolve(id)
+        };
+        if index < self.explicit_inputs.len as usize {
+            return Some(static_path(self.explicit_inputs, index));
+        }
+        index -= self.explicit_inputs.len as usize;
+        if index < self.implicit_inputs.len as usize {
+            return Some(static_path(self.implicit_inputs, index));
+        }
+        index -= self.implicit_inputs.len as usize;
+        let dynamic = self
+            .dynamic_paths
+            .as_deref()
+            .map_or(&[][..], |paths| paths.implicit_inputs.as_slice());
+        if index < dynamic.len() {
+            return Some(&dynamic[index]);
+        }
+        index -= dynamic.len();
+        if index < self.order_only_inputs.len as usize {
+            return Some(static_path(self.order_only_inputs, index));
+        }
+        None
+    }
+
+    pub(crate) fn input_count(&self) -> usize {
+        if self.suppressed_self_input.is_some() {
+            return self.inputs().count();
+        }
+        self.explicit_inputs.len as usize
+            + self.implicit_inputs.len as usize
+            + self.order_only_inputs.len as usize
+            + self
+                .dynamic_paths
+                .as_deref()
+                .map_or(0, |paths| paths.implicit_inputs.len())
+    }
+
+    pub fn suppress_phony_self_input(&mut self) -> Option<String> {
+        if self.rule() != "phony"
+            || self.explicit_outputs.len != 1
+            || self.implicit_outputs.len != 0
+            || self.implicit_inputs.len != 0
+            || self.dynamic_paths.is_some()
+        {
+            return None;
+        }
+        let output = self.storage.paths[self.explicit_outputs.start as usize];
+        let present = self
+            .static_paths(self.explicit_inputs)
+            .chain(self.static_paths(self.order_only_inputs))
+            .any(|(id, _)| id == output);
+        if !present {
+            return None;
+        }
+        self.suppressed_self_input = Some(output);
+        Some(self.storage.strings.resolve(output).to_owned())
+    }
+
+    pub(crate) fn push_implicit_input(&mut self, path: String) {
+        self.dynamic_paths
+            .get_or_insert_with(Default::default)
+            .implicit_inputs
+            .push(path);
+    }
+
+    pub(crate) fn push_implicit_output(&mut self, path: String) {
+        self.dynamic_paths
+            .get_or_insert_with(Default::default)
+            .implicit_outputs
+            .push(path);
     }
 }
 
@@ -76,6 +377,9 @@ pub struct Manifest {
     pub rules: HashMap<String, Rule>,
     pub pools: HashMap<String, Pool>,
     pub edges: Vec<Edge>,
+    parsed_edges: Vec<ParsedEdge>,
+    parsed_strings: StringArena,
+    storage: Option<Arc<GraphStorage>>,
     pub defaults: Vec<String>,
     pub phony_self_references: Vec<String>,
     pub warnings: Vec<String>,
@@ -101,9 +405,10 @@ impl Manifest {
     }
 
     pub fn lookup_variable(&self, mut scope: usize, name: &str) -> Option<&str> {
+        let id = self.strings().find(name)?;
         loop {
             let current = self.scopes.get(scope)?;
-            if let Some(value) = current.variables.get(name) {
+            if let Some(value) = current.variables.get(&id) {
                 return Some(value);
             }
             scope = current.parent?;
@@ -142,13 +447,31 @@ impl Manifest {
         self.has_pool_binding
     }
 
+    fn parsed_outputs<'a>(&'a self, edge: &'a ParsedEdge) -> impl Iterator<Item = &'a str> {
+        edge.output_ids().map(|id| self.parsed_strings.resolve(id))
+    }
+
+    fn parsed_inputs<'a>(&'a self, edge: &'a ParsedEdge) -> impl Iterator<Item = &'a str> {
+        edge.input_ids().map(|id| self.parsed_strings.resolve(id))
+    }
+
+    fn parsed_validations<'a>(&'a self, edge: &'a ParsedEdge) -> impl Iterator<Item = &'a str> {
+        edge.validations
+            .iter()
+            .map(|id| self.parsed_strings.resolve(*id))
+    }
+
+    fn parsed_rule<'a>(&'a self, edge: &ParsedEdge) -> &'a str {
+        self.parsed_strings.resolve(edge.rule)
+    }
+
     pub(crate) fn explicit_output_slash_bits(&self, edge: &Edge) -> &[u64] {
         #[cfg(windows)]
         {
             self.edge_slash_bits
                 .as_ref()
-                .and_then(|edges| edges.get(&edge_slash_key(edge)))
-                .and_then(|bits| bits.get(..edge.explicit_outputs.len()))
+                .and_then(|edges| edges.get(&edge_slash_key(&edge.source, edge.line)))
+                .and_then(|bits| bits.get(..edge.explicit_outputs.len as usize))
                 .unwrap_or(&[])
         }
         #[cfg(not(windows))]
@@ -163,7 +486,39 @@ impl Manifest {
         {
             self.edge_slash_bits
                 .as_ref()
-                .and_then(|edges| edges.get(&edge_slash_key(edge)))
+                .and_then(|edges| edges.get(&edge_slash_key(&edge.source, edge.line)))
+                .and_then(|bits| bits.get(edge.explicit_outputs.len as usize..))
+                .unwrap_or(&[])
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = edge;
+            &[]
+        }
+    }
+
+    fn parsed_explicit_output_slash_bits(&self, edge: &ParsedEdge) -> &[u64] {
+        #[cfg(windows)]
+        {
+            self.edge_slash_bits
+                .as_ref()
+                .and_then(|edges| edges.get(&edge_slash_key(&edge.source, edge.line)))
+                .and_then(|bits| bits.get(..edge.explicit_outputs.len()))
+                .unwrap_or(&[])
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = edge;
+            &[]
+        }
+    }
+
+    fn parsed_explicit_input_slash_bits(&self, edge: &ParsedEdge) -> &[u64] {
+        #[cfg(windows)]
+        {
+            self.edge_slash_bits
+                .as_ref()
+                .and_then(|edges| edges.get(&edge_slash_key(&edge.source, edge.line)))
                 .and_then(|bits| bits.get(edge.explicit_outputs.len()..))
                 .unwrap_or(&[])
         }
@@ -175,14 +530,106 @@ impl Manifest {
     }
 
     fn sync_root_scope(&mut self) {
-        self.variables = self.scopes[0].variables.clone();
+        self.variables = self.scopes[0]
+            .variables
+            .iter()
+            .map(|(name, value)| (self.parsed_strings.resolve(*name).to_owned(), value.clone()))
+            .collect();
         self.rules = self.scopes[0].rules.clone();
+    }
+
+    fn strings(&self) -> &StringArena {
+        self.storage
+            .as_deref()
+            .map_or(&self.parsed_strings, |storage| &storage.strings)
+    }
+
+    fn compact_edges(&mut self) {
+        let parsed_edges = std::mem::take(&mut self.parsed_edges);
+        let path_count = parsed_edges
+            .iter()
+            .map(|edge| {
+                edge.explicit_outputs.len()
+                    + edge.implicit_outputs.len()
+                    + edge.explicit_inputs.len()
+                    + edge.implicit_inputs.len()
+                    + edge.order_only_inputs.len()
+                    + edge.validations.len()
+            })
+            .sum::<usize>();
+        let mut paths = Vec::with_capacity(path_count);
+        let mut compact = Vec::with_capacity(parsed_edges.len());
+
+        let mut append = |values: Vec<StringId>| {
+            let start = paths.len();
+            paths.extend(values);
+            PathRange::new(start, paths.len())
+        };
+        for mut edge in parsed_edges {
+            let explicit_outputs = append(std::mem::take(&mut edge.explicit_outputs));
+            let implicit_outputs = append(std::mem::take(&mut edge.implicit_outputs));
+            let explicit_inputs = append(std::mem::take(&mut edge.explicit_inputs));
+            let implicit_inputs = append(std::mem::take(&mut edge.implicit_inputs));
+            let order_only_inputs = append(std::mem::take(&mut edge.order_only_inputs));
+            let validations = append(std::mem::take(&mut edge.validations));
+            compact.push((
+                explicit_outputs,
+                implicit_outputs,
+                explicit_inputs,
+                implicit_inputs,
+                order_only_inputs,
+                validations,
+                edge,
+            ));
+        }
+        let strings = std::mem::take(&mut self.parsed_strings);
+        let storage = Arc::new(GraphStorage { strings, paths });
+        self.storage = Some(Arc::clone(&storage));
+        self.edges = compact
+            .into_iter()
+            .map(
+                |(
+                    explicit_outputs,
+                    implicit_outputs,
+                    explicit_inputs,
+                    implicit_inputs,
+                    order_only_inputs,
+                    validations,
+                    edge,
+                )| Edge {
+                    storage: Arc::clone(&storage),
+                    explicit_outputs,
+                    implicit_outputs,
+                    explicit_inputs,
+                    implicit_inputs,
+                    order_only_inputs,
+                    validations,
+                    dynamic_paths: None,
+                    suppressed_self_input: None,
+                    rule: edge.rule,
+                    bindings: edge.bindings,
+                    source: edge.source,
+                    line: edge.line,
+                    scope: edge.scope,
+                },
+            )
+            .collect();
+    }
+
+    fn reserve_source_capacity(&mut self, source_len: usize) {
+        // Most generated manifests average at least a few dozen bytes per
+        // declaration. Reserving from the byte length avoids a separate
+        // counting pass while eliminating repeated growth on large graphs.
+        let declarations = source_len / 48;
+        self.parsed_edges.reserve(declarations);
+        self.parsed_strings
+            .reserve(declarations.saturating_mul(3), source_len / 2);
     }
 }
 
 #[cfg(windows)]
-fn edge_slash_key(edge: &Edge) -> EdgeSlashKey {
-    (Arc::as_ptr(&edge.source) as usize, edge.line)
+fn edge_slash_key(source: &Arc<PathBuf>, line: usize) -> EdgeSlashKey {
+    (Arc::as_ptr(source) as usize, line)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,7 +780,7 @@ fn expand_deferred_paths(
         #[cfg(not(windows))]
         return Ok(());
     }
-    let mut edge = std::mem::take(&mut manifest.edges[edge_id]);
+    let mut edge = std::mem::take(&mut manifest.parsed_edges[edge_id]);
     let result = (|| {
         for parsed in &mut paths.0 {
             if !parsed.deferred {
@@ -342,19 +789,14 @@ fn expand_deferred_paths(
             let kind = parsed.kind;
             let index = parsed.index;
             let raw = match kind {
-                DeferredPathKind::ExplicitOutput => {
-                    std::mem::take(&mut edge.explicit_outputs[index])
-                }
-                DeferredPathKind::ImplicitOutput => {
-                    std::mem::take(&mut edge.implicit_outputs[index])
-                }
-                DeferredPathKind::ExplicitInput => std::mem::take(&mut edge.explicit_inputs[index]),
-                DeferredPathKind::ImplicitInput => std::mem::take(&mut edge.implicit_inputs[index]),
-                DeferredPathKind::OrderOnlyInput => {
-                    std::mem::take(&mut edge.order_only_inputs[index])
-                }
-                DeferredPathKind::Validation => std::mem::take(&mut edge.validations[index]),
+                DeferredPathKind::ExplicitOutput => edge.explicit_outputs[index],
+                DeferredPathKind::ImplicitOutput => edge.implicit_outputs[index],
+                DeferredPathKind::ExplicitInput => edge.explicit_inputs[index],
+                DeferredPathKind::ImplicitInput => edge.implicit_inputs[index],
+                DeferredPathKind::OrderOnlyInput => edge.order_only_inputs[index],
+                DeferredPathKind::Validation => edge.validations[index],
             };
+            let raw = manifest.parsed_strings.resolve(raw).to_owned();
             let expanded = expand(&raw, |name| {
                 edge.bindings.get(name).cloned().or_else(|| {
                     manifest
@@ -371,6 +813,7 @@ fn expand_deferred_paths(
                 ));
             }
             let (expanded, slash_bits) = canonicalize_owned_path_with_bits(expanded);
+            let expanded = manifest.parsed_strings.intern(&expanded);
             #[cfg(not(windows))]
             let _ = slash_bits;
             #[cfg(windows)]
@@ -390,7 +833,7 @@ fn expand_deferred_paths(
         register_edge_slash_bits(manifest, edge_id, &mut edge, paths);
         Ok(())
     })();
-    manifest.edges[edge_id] = edge;
+    manifest.parsed_edges[edge_id] = edge;
     result
 }
 
@@ -398,7 +841,7 @@ fn expand_deferred_paths(
 fn register_edge_slash_bits(
     manifest: &mut Manifest,
     edge_id: usize,
-    edge: &mut Edge,
+    edge: &mut ParsedEdge,
     paths: &ParsedEdgePaths,
 ) {
     if manifest.path_slash_bits.is_none() {
@@ -406,11 +849,12 @@ fn register_edge_slash_bits(
             return;
         }
         let mut registry = HashMap::with_capacity(edge_id.saturating_mul(2));
-        for previous in &manifest.edges[..edge_id] {
+        for previous in &manifest.parsed_edges[..edge_id] {
             for path in previous
-                .outputs()
-                .chain(previous.inputs())
-                .chain(previous.validations.iter().map(String::as_str))
+                .output_ids()
+                .chain(previous.input_ids())
+                .chain(previous.validations.iter().copied())
+                .map(|id| manifest.parsed_strings.resolve(id))
             {
                 registry.entry(path.to_owned()).or_insert(0);
             }
@@ -418,7 +862,7 @@ fn register_edge_slash_bits(
         manifest.path_slash_bits = Some(registry);
     }
 
-    let path_count = edge.outputs().count() + edge.inputs().count() + edge.validations.len();
+    let path_count = edge.output_ids().count() + edge.input_ids().count() + edge.validations.len();
     let mut parsed_bits = vec![0u64; path_count];
     for parsed in &paths.0 {
         parsed_bits[edge_path_index(edge, parsed.kind, parsed.index)] = parsed.slash_bits;
@@ -427,40 +871,45 @@ fn register_edge_slash_bits(
     let mut explicit_bits =
         Vec::with_capacity(edge.explicit_outputs.len() + edge.explicit_inputs.len());
     let mut bit_index = 0usize;
-    let mut register = |path: &str| {
+    let mut register = |path: StringId| {
         let parsed = parsed_bits[bit_index];
         bit_index += 1;
-        *registry.entry(path.to_owned()).or_insert(parsed)
+        *registry
+            .entry(manifest.parsed_strings.resolve(path).to_owned())
+            .or_insert(parsed)
     };
     for path in &edge.explicit_outputs {
-        explicit_bits.push(register(path));
+        explicit_bits.push(register(*path));
     }
     for path in &edge.implicit_outputs {
-        register(path);
+        register(*path);
     }
     for path in &edge.explicit_inputs {
-        explicit_bits.push(register(path));
+        explicit_bits.push(register(*path));
     }
     for path in &edge.implicit_inputs {
-        register(path);
+        register(*path);
     }
     for path in &edge.order_only_inputs {
-        register(path);
+        register(*path);
     }
     for path in &edge.validations {
-        register(path);
+        register(*path);
     }
     debug_assert_eq!(bit_index, path_count);
     if explicit_bits.iter().any(|bits| *bits != 0) {
         manifest
             .edge_slash_bits
             .get_or_insert_with(HashMap::new)
-            .insert(edge_slash_key(edge), explicit_bits.into_boxed_slice());
+            .insert(
+                edge_slash_key(&edge.source, edge.line),
+                explicit_bits.into_boxed_slice(),
+            );
     }
 }
 
 #[cfg(windows)]
-fn edge_path_index(edge: &Edge, kind: DeferredPathKind, index: usize) -> usize {
+fn edge_path_index(edge: &ParsedEdge, kind: DeferredPathKind, index: usize) -> usize {
     let outputs = edge.explicit_outputs.len() + edge.implicit_outputs.len();
     let explicit_inputs = outputs + edge.explicit_inputs.len();
     let implicit_inputs = explicit_inputs + edge.implicit_inputs.len();
@@ -516,10 +965,10 @@ fn finalize_parent(
                     "rspfile and rspfile_content need to be both specified",
                 ));
             }
-            let edge = Edge {
-                rule: rule_name.to_owned(),
+            let edge = ParsedEdge {
+                rule: manifest.parsed_strings.intern(rule_name),
                 scope,
-                ..Edge::default()
+                ..ParsedEdge::default()
             };
             if binding_cycle(manifest, &edge).is_some() {
                 manifest
@@ -542,15 +991,16 @@ fn finalize_parent(
         }
         Some(Parent::Edge) => {
             expand_deferred_paths(manifest, current_edge.unwrap(), deferred_paths.unwrap())?;
-            let edge = &manifest.edges[current_edge.unwrap()];
+            let edge = &manifest.parsed_edges[current_edge.unwrap()];
             if !manifest.cyclic_rules.is_empty() {
+                let rule = manifest.parsed_rule(edge);
                 let rule_scope = manifest
-                    .lookup_rule_scope(edge.scope, &edge.rule)
+                    .lookup_rule_scope(edge.scope, rule)
                     .unwrap_or(edge.scope);
                 let rule_is_cyclic = manifest
                     .cyclic_rules
                     .get(&rule_scope)
-                    .is_some_and(|rules| rules.contains(edge.rule.as_str()));
+                    .is_some_and(|rules| rules.contains(rule));
                 if rule_is_cyclic {
                     if let Some(cycle) = binding_cycle(manifest, edge) {
                         return Err(Diagnostic::new(
@@ -575,7 +1025,8 @@ fn finalize_parent(
             }
             if manifest.has_dyndep_binding {
                 let dyndep = evaluate_edge_binding(manifest, edge, "dyndep", 0);
-                if !dyndep.is_empty() && !edge.inputs().any(|input| input == dyndep) {
+                if !dyndep.is_empty() && !manifest.parsed_inputs(edge).any(|input| input == dyndep)
+                {
                     return Err(Diagnostic::new(
                         edge.source.as_path(),
                         edge.line + edge.bindings.len() + 1,
@@ -597,6 +1048,7 @@ pub fn load_manifest(path: impl AsRef<Path>) -> Result<Manifest, Diagnostic> {
     parse_file_into(path, &mut manifest, &mut stack, 0)?;
     manifest.sync_root_scope();
     validate(&manifest)?;
+    manifest.compact_edges();
     #[cfg(windows)]
     {
         manifest.path_slash_bits = None;
@@ -644,6 +1096,7 @@ pub fn parse_manifest(source: &str, path: impl AsRef<Path>) -> Result<Manifest, 
     parse_source_into(source, path, &mut manifest, 0)?;
     manifest.sync_root_scope();
     validate(&manifest)?;
+    manifest.compact_edges();
     #[cfg(windows)]
     {
         manifest.path_slash_bits = None;
@@ -663,7 +1116,12 @@ fn parse_file_into(
     if !stack.insert(identity.clone()) {
         return Err(Diagnostic::new(path, 1, 1, "include cycle detected"));
     }
-    let mut source = String::new();
+    let capacity = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or(0);
+    let mut source = String::with_capacity(capacity);
     file.read_to_string(&mut source)
         .map_err(|error| Diagnostic::new(path, 1, 1, format!("loading manifest: {error}")))?;
     parse_source_into_with_loader(&source, path, manifest, scope, Some(stack))?;
@@ -687,6 +1145,7 @@ fn parse_source_into_with_loader(
     scope: usize,
     mut stack: Option<&mut HashSet<FileIdentity>>,
 ) -> Result<(), Diagnostic> {
+    manifest.reserve_source_capacity(source.len());
     let missing_final_newline = !source.is_empty() && !source.ends_with('\n');
     let source_path = Arc::new(path.to_owned());
     let logical_lines = logical_lines(source);
@@ -695,6 +1154,7 @@ fn parse_source_into_with_loader(
     let mut current_edge: Option<usize> = None;
     let mut current_pool: Option<String> = None;
     let mut deferred_paths: Option<ParsedEdgePaths> = None;
+    let mut build_tokens = Vec::new();
     let ninja_compat = crate::program_name() == "ninja";
 
     for (line_no, raw_line) in logical_lines {
@@ -821,7 +1281,7 @@ fn parse_source_into_with_loader(
                     let expanded = expand(value, |name| {
                         manifest.lookup_variable(scope, name).map(str::to_owned)
                     });
-                    manifest.edges[current_edge.unwrap()]
+                    manifest.parsed_edges[current_edge.unwrap()]
                         .bindings
                         .insert(key.to_owned(), expanded);
                 }
@@ -942,22 +1402,29 @@ fn parse_source_into_with_loader(
             parent = Some(Parent::Pool);
             current_pool = Some(name.to_owned());
         } else if let Some(rest) = line.strip_prefix("build ") {
-            let (mut edge, deferred) = parse_edge(rest, &source_path, line_no)
-                .map_err(|diagnostic| remap_logical_diagnostic(diagnostic, &raw_line, source))?;
-            if edge.rule != "phony" && manifest.lookup_rule(scope, &edge.rule).is_none() {
+            let (mut edge, deferred) = parse_edge(
+                rest,
+                &source_path,
+                line_no,
+                &mut manifest.parsed_strings,
+                &mut build_tokens,
+            )
+            .map_err(|diagnostic| remap_logical_diagnostic(diagnostic, &raw_line, source))?;
+            let rule = manifest.parsed_rule(&edge);
+            if rule != "phony" && manifest.lookup_rule(scope, rule).is_none() {
                 let column = build_rule_column(&raw_line).unwrap_or(1);
                 return Err(diagnostic_for_logical_line(
                     path,
                     line_no,
                     column,
-                    format!("unknown build rule '{}'", edge.rule),
+                    format!("unknown build rule '{rule}'"),
                     &raw_line,
                     source,
                 ));
             }
             edge.scope = scope;
-            manifest.edges.push(edge);
-            current_edge = Some(manifest.edges.len() - 1);
+            manifest.parsed_edges.push(edge);
+            current_edge = Some(manifest.parsed_edges.len() - 1);
             deferred_paths = Some(deferred);
             parent = Some(Parent::Edge);
         } else if let Some(rest) = line.strip_prefix("default ") {
@@ -986,10 +1453,11 @@ fn parse_source_into_with_loader(
             }
             for word in &mut words {
                 *word = canonicalize_owned_path(std::mem::take(word));
-                let known = manifest.edges.iter().any(|edge| {
-                    edge.outputs()
-                        .chain(edge.inputs())
-                        .chain(edge.validations.iter().map(String::as_str))
+                let known = manifest.parsed_edges.iter().any(|edge| {
+                    manifest
+                        .parsed_outputs(edge)
+                        .chain(manifest.parsed_inputs(edge))
+                        .chain(manifest.parsed_validations(edge))
                         .any(|candidate| candidate == word)
                 });
                 if !known {
@@ -1060,9 +1528,8 @@ fn parse_source_into_with_loader(
                     "Knight syntax version ({SUPPORTED_SYNTAX_VERSION}) is newer than build file ninja_required_version ({expanded}); versions may be incompatible"
                 ));
             }
-            manifest.scopes[scope]
-                .variables
-                .insert(key.to_owned(), expanded);
+            let key_id = manifest.parsed_strings.intern(key);
+            manifest.scopes[scope].variables.insert(key_id, expanded);
             manifest.has_pool_binding |= key == "pool";
             manifest.has_dyndep_binding |= key == "dyndep";
         } else if let Some((column, token)) = expected_equals_diagnostic(
@@ -1206,9 +1673,9 @@ fn validate(manifest: &Manifest) -> Result<(), Diagnostic> {
             ));
         }
     }
-    let mut outputs = HashMap::<&str, &Edge>::new();
-    for edge in &manifest.edges {
-        for output in edge.outputs() {
+    let mut outputs = HashMap::<&str, &ParsedEdge>::new();
+    for edge in &manifest.parsed_edges {
+        for output in manifest.parsed_outputs(edge) {
             if let Some(previous) = outputs.insert(output, edge) {
                 if crate::program_name() == "ninja" {
                     let message = if std::ptr::eq(previous, edge) {
@@ -1269,10 +1736,10 @@ fn version_supports_newline_escape(version: &str) -> bool {
     major > 1 || (major == 1 && minor >= 14)
 }
 
-fn binding_cycle(manifest: &Manifest, edge: &Edge) -> Option<Vec<String>> {
+fn binding_cycle(manifest: &Manifest, edge: &ParsedEdge) -> Option<Vec<String>> {
     fn visit(
         manifest: &Manifest,
-        edge: &Edge,
+        edge: &ParsedEdge,
         name: &str,
         stack: &mut Vec<String>,
         resolved: &mut HashSet<String>,
@@ -1293,7 +1760,7 @@ fn binding_cycle(manifest: &Manifest, edge: &Edge) -> Option<Vec<String>> {
             return None;
         }
         let Some(raw) = manifest
-            .lookup_rule(edge.scope, &edge.rule)
+            .lookup_rule(edge.scope, manifest.parsed_rule(edge))
             .and_then(|rule| rule.bindings.get(name))
         else {
             resolved.insert(name.to_owned());
@@ -1311,7 +1778,7 @@ fn binding_cycle(manifest: &Manifest, edge: &Edge) -> Option<Vec<String>> {
     }
 
     let mut names = edge.bindings.keys().map(String::as_str).collect::<Vec<_>>();
-    if let Some(rule) = manifest.lookup_rule(edge.scope, &edge.rule) {
+    if let Some(rule) = manifest.lookup_rule(edge.scope, manifest.parsed_rule(edge)) {
         names.extend(rule.bindings.keys().map(String::as_str));
     }
     let mut resolved = HashSet::new();
@@ -1359,29 +1826,40 @@ fn variable_references(value: &str) -> Vec<&str> {
     result
 }
 
-fn evaluate_edge_binding(manifest: &Manifest, edge: &Edge, name: &str, depth: usize) -> String {
+fn evaluate_edge_binding(
+    manifest: &Manifest,
+    edge: &ParsedEdge,
+    name: &str,
+    depth: usize,
+) -> String {
     if depth > 64 {
         return String::new();
     }
     match name {
         "in" => {
             return join_decanonicalized_paths(
-                &edge.explicit_inputs,
-                manifest.explicit_input_slash_bits(edge),
+                edge.explicit_inputs
+                    .iter()
+                    .map(|id| manifest.parsed_strings.resolve(*id)),
+                manifest.parsed_explicit_input_slash_bits(edge),
                 ' ',
             );
         }
         "in_newline" => {
             return join_decanonicalized_paths(
-                &edge.explicit_inputs,
-                manifest.explicit_input_slash_bits(edge),
+                edge.explicit_inputs
+                    .iter()
+                    .map(|id| manifest.parsed_strings.resolve(*id)),
+                manifest.parsed_explicit_input_slash_bits(edge),
                 '\n',
             );
         }
         "out" => {
             return join_decanonicalized_paths(
-                &edge.explicit_outputs,
-                manifest.explicit_output_slash_bits(edge),
+                edge.explicit_outputs
+                    .iter()
+                    .map(|id| manifest.parsed_strings.resolve(*id)),
+                manifest.parsed_explicit_output_slash_bits(edge),
                 ' ',
             );
         }
@@ -1391,7 +1869,7 @@ fn evaluate_edge_binding(manifest: &Manifest, edge: &Edge, name: &str, depth: us
         return value.clone();
     }
     if let Some(raw) = manifest
-        .lookup_rule(edge.scope, &edge.rule)
+        .lookup_rule(edge.scope, manifest.parsed_rule(edge))
         .and_then(|rule| rule.bindings.get(name))
     {
         return expand(raw, |nested| {
@@ -1404,11 +1882,13 @@ fn evaluate_edge_binding(manifest: &Manifest, edge: &Edge, name: &str, depth: us
         .to_owned()
 }
 
-fn join_decanonicalized_paths(paths: &[String], slash_bits: &[u64], separator: char) -> String {
-    let capacity = paths.iter().map(String::len).sum::<usize>()
-        + paths.len().saturating_sub(1) * separator.len_utf8();
-    let mut result = String::with_capacity(capacity);
-    for (index, path) in paths.iter().enumerate() {
+fn join_decanonicalized_paths<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    slash_bits: &[u64],
+    separator: char,
+) -> String {
+    let mut result = String::new();
+    for (index, path) in paths.enumerate() {
         if index != 0 {
             result.push(separator);
         }
@@ -1430,16 +1910,21 @@ fn parse_binding(line: &str) -> Option<(&str, &str)> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum BuildToken<'a> {
-    Word(&'a str, bool),
+enum BuildToken {
+    Word {
+        start: u32,
+        end: u32,
+        needs_canonicalization: bool,
+    },
     Colon,
     Pipe,
     Pipe2,
     Validation,
 }
 
-fn lex_build(input: &str) -> Vec<BuildToken<'_>> {
-    let mut tokens = Vec::new();
+fn lex_build(input: &str, tokens: &mut Vec<BuildToken>) {
+    tokens.clear();
+    tokens.reserve(input.len() / 8 + 1);
     let bytes = input.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
@@ -1484,12 +1969,12 @@ fn lex_build(input: &str) -> Vec<BuildToken<'_>> {
             }
         }
         let word = &input[start..index];
-        tokens.push(BuildToken::Word(
-            word,
-            word.contains('$') || path_needs_canonicalization(word),
-        ));
+        tokens.push(BuildToken::Word {
+            start: start.try_into().expect("build line is too long"),
+            end: index.try_into().expect("build line is too long"),
+            needs_canonicalization: word.contains('$') || path_needs_canonicalization(word),
+        });
     }
-    tokens
 }
 
 fn build_token_offset(input: &str, target: usize) -> usize {
@@ -1538,8 +2023,10 @@ fn parse_edge(
     input: &str,
     path: &Arc<PathBuf>,
     line: usize,
-) -> Result<(Edge, ParsedEdgePaths), Diagnostic> {
-    let tokens = lex_build(input);
+    strings: &mut StringArena,
+    tokens: &mut Vec<BuildToken>,
+) -> Result<(ParsedEdge, ParsedEdgePaths), Diagnostic> {
+    lex_build(input, tokens);
     let colon = tokens
         .iter()
         .position(|token| *token == BuildToken::Colon)
@@ -1551,24 +2038,31 @@ fn parse_edge(
                 "expected ':', got newline ($ also escapes ':')",
             )
         })?;
-    let mut edge = Edge {
+    let mut edge = ParsedEdge {
         source: Arc::clone(path),
         line,
-        ..Edge::default()
+        ..ParsedEdge::default()
     };
+    let output_capacity = colon.saturating_sub(1).max(1);
+    edge.explicit_outputs.reserve(output_capacity);
     let mut deferred = ParsedEdgePaths::default();
     let mut implicit = false;
     for (token_index, token) in tokens[..colon].iter().enumerate() {
         match token {
             BuildToken::Pipe if !implicit => implicit = true,
-            BuildToken::Word(word, needs_canonicalization) => {
+            BuildToken::Word {
+                start,
+                end,
+                needs_canonicalization,
+            } => {
+                let word = &input[*start as usize..*end as usize];
                 let (value, is_deferred, slash_bits) = if word.contains('$') {
-                    ((*word).to_owned(), true, 0)
+                    (strings.intern(word), true, 0)
                 } else if *needs_canonicalization {
-                    let (path, slash_bits) = canonicalize_owned_path_with_bits((*word).to_owned());
-                    (path, false, slash_bits)
+                    let (path, slash_bits) = canonicalize_owned_path_with_bits(word.to_owned());
+                    (strings.intern(&path), false, slash_bits)
                 } else {
-                    ((*word).to_owned(), false, 0)
+                    (strings.intern(word), false, 0)
                 };
                 if implicit {
                     let index = edge.implicit_outputs.len();
@@ -1600,7 +2094,7 @@ fn parse_edge(
                     BuildToken::Pipe2 => "'||'",
                     BuildToken::Validation => "'|@'",
                     BuildToken::Colon => "':'",
-                    BuildToken::Word(..) => "identifier",
+                    BuildToken::Word { .. } => "identifier",
                 };
                 return Err(Diagnostic::new(
                     path,
@@ -1614,7 +2108,7 @@ fn parse_edge(
     if edge.explicit_outputs.is_empty() && edge.implicit_outputs.is_empty() {
         return Err(Diagnostic::new(path, line, 1, "build edge has no outputs"));
     }
-    let Some(BuildToken::Word(rule, _)) = tokens.get(colon + 1) else {
+    let Some(BuildToken::Word { start, end, .. }) = tokens.get(colon + 1) else {
         let offset = build_token_offset(input, colon + 1);
         return Err(Diagnostic::new(
             path,
@@ -1627,7 +2121,7 @@ fn parse_edge(
             },
         ));
     };
-    edge.rule = (*rule).to_owned();
+    edge.rule = strings.intern(&input[*start as usize..*end as usize]);
 
     #[derive(Clone, Copy, PartialEq, PartialOrd)]
     enum InputKind {
@@ -1673,14 +2167,19 @@ fn parse_edge(
                 }
                 kind = InputKind::Validation;
             }
-            BuildToken::Word(word, needs_canonicalization) => {
+            BuildToken::Word {
+                start,
+                end,
+                needs_canonicalization,
+            } => {
+                let word = &input[*start as usize..*end as usize];
                 let (value, is_deferred, slash_bits) = if word.contains('$') {
-                    ((*word).to_owned(), true, 0)
+                    (strings.intern(word), true, 0)
                 } else if *needs_canonicalization {
-                    let (path, slash_bits) = canonicalize_owned_path_with_bits((*word).to_owned());
-                    (path, false, slash_bits)
+                    let (path, slash_bits) = canonicalize_owned_path_with_bits(word.to_owned());
+                    (strings.intern(&path), false, slash_bits)
                 } else {
-                    ((*word).to_owned(), false, 0)
+                    (strings.intern(word), false, 0)
                 };
                 match kind {
                     InputKind::Explicit => {
@@ -1758,7 +2257,7 @@ fn expand_path_words(input: &str, manifest: &Manifest, scope: usize) -> Vec<Stri
 }
 
 fn split_words(input: &str) -> Vec<String> {
-    let mut words = Vec::new();
+    let mut words = Vec::with_capacity(input.len() / 8 + 1);
     let mut word = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1910,7 +2409,7 @@ pub fn unknown_target_message(manifest: &Manifest, target: &str) -> String {
         manifest.edges.iter().flat_map(|edge| {
             edge.outputs()
                 .chain(edge.inputs())
-                .chain(edge.validations.iter().map(String::as_str))
+                .chain(edge.validations())
         }),
     );
     if let Some(suggestion) = suggestion {
@@ -2286,7 +2785,10 @@ mod tests {
         .unwrap();
         let parsed = load_manifest(&manifest).unwrap();
         assert_eq!(parsed.variables["value"], "test content");
-        assert_eq!(parsed.edges[0].explicit_outputs, ["ok"]);
+        assert_eq!(
+            parsed.edges[0].explicit_outputs().collect::<Vec<_>>(),
+            ["ok"]
+        );
     }
 
     #[test]
@@ -2321,12 +2823,46 @@ default obj/foo$ bar.o
         );
         assert_eq!(manifest.pools["link_pool"].depth, 1);
         let edge = &manifest.edges[0];
-        assert_eq!(edge.explicit_outputs, ["obj/foo bar.o"]);
-        assert_eq!(edge.implicit_outputs, ["obj/foo.d"]);
-        assert_eq!(edge.explicit_inputs, ["src/foo bar.c"]);
-        assert_eq!(edge.implicit_inputs, ["config.h"]);
-        assert_eq!(edge.order_only_inputs, ["generated.h"]);
-        assert_eq!(edge.validations, ["lint"]);
+        assert_eq!(
+            edge.explicit_outputs().collect::<Vec<_>>(),
+            ["obj/foo bar.o"]
+        );
+        assert_eq!(edge.implicit_outputs().collect::<Vec<_>>(), ["obj/foo.d"]);
+        assert_eq!(
+            edge.explicit_inputs().collect::<Vec<_>>(),
+            ["src/foo bar.c"]
+        );
+        assert_eq!(edge.implicit_inputs().collect::<Vec<_>>(), ["config.h"]);
+        assert_eq!(
+            edge.order_only_inputs().collect::<Vec<_>>(),
+            ["generated.h"]
+        );
+        assert_eq!(edge.validations().collect::<Vec<_>>(), ["lint"]);
+    }
+
+    #[test]
+    fn compact_edge_indexing_preserves_static_dynamic_and_suppressed_inputs() {
+        let mut manifest = parse_manifest(
+            "build out: phony explicit | implicit || order\n",
+            "build.ninja",
+        )
+        .unwrap();
+        let edge = &mut manifest.edges[0];
+        edge.push_implicit_input("dynamic".to_owned());
+        assert_eq!(edge.input_count(), 4);
+        assert_eq!(
+            (0..edge.input_count())
+                .map(|index| edge.input_at(index).unwrap())
+                .collect::<Vec<_>>(),
+            ["explicit", "implicit", "dynamic", "order"]
+        );
+
+        let mut self_cycle =
+            parse_manifest("build self: phony self other self\n", "build.ninja").unwrap();
+        let edge = &mut self_cycle.edges[0];
+        assert_eq!(edge.suppress_phony_self_input().as_deref(), Some("self"));
+        assert_eq!(edge.input_count(), 1);
+        assert_eq!(edge.input_at(0), Some("other"));
     }
 
     #[test]
@@ -2352,13 +2888,16 @@ default obj/foo$ bar.o
         assert_eq!(rule.bindings.len(), 8);
         assert_eq!(rule.bindings["command"], "cat $in > $out");
         assert_eq!(rule.bindings["rspfile_content"], "$in");
-        assert_eq!(manifest.edges[0].explicit_inputs, ["in_1.cc", "in-2.O"]);
+        assert_eq!(
+            manifest.edges[0].explicit_inputs().collect::<Vec<_>>(),
+            ["in_1.cc", "in-2.O"]
+        );
 
         for (name, binding) in [("depfile", "depfile = deps.d"), ("deps", "deps = gcc")] {
             let source = format!("rule cc\n  command = cc\n  {binding}\nbuild a.o b.o: cc c.cc\n");
             let manifest = parse_manifest(&source, "build.ninja").unwrap();
             assert_eq!(
-                manifest.edges[0].explicit_outputs,
+                manifest.edges[0].explicit_outputs().collect::<Vec<_>>(),
                 ["a.o", "b.o"],
                 "case={name}"
             );
@@ -2381,12 +2920,12 @@ default obj/foo$ bar.o
         )
         .unwrap();
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[0], "command"),
             "ld one-letter-test -pthread -under -o a b c"
         );
         assert_eq!(manifest.lookup_variable(0, "nested2"), Some("1/2"));
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[1], "command", 0),
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[1], "command"),
             "ld one-letter-test 1/2/3 -under -o supernested x"
         );
 
@@ -2403,11 +2942,11 @@ default obj/foo$ bar.o
         )
         .unwrap();
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[0], "command"),
             "cmd baz a inner"
         );
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[1], "command", 0),
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[1], "command"),
             "cmd bar b outer"
         );
 
@@ -2429,9 +2968,12 @@ default obj/foo$ bar.o
         assert_eq!(manifest.variables["backslash_space"], "bar\\ baz");
         assert_eq!(manifest.variables["hash"], "not # a comment");
         assert_eq!(manifest.variables["x"], "$dollar");
-        assert_eq!(manifest.edges[0].explicit_outputs, ["$dollar"]);
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            manifest.edges[0].explicit_outputs().collect::<Vec<_>>(),
+            ["$dollar"]
+        );
+        assert_eq!(
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[0], "command"),
             "$dollarbar$baz$blah"
         );
 
@@ -2445,13 +2987,16 @@ default obj/foo$ bar.o
             "build.ninja",
         )
         .unwrap();
-        assert_eq!(manifest.edges[0].explicit_outputs, ["out/exe"]);
         assert_eq!(
-            manifest.edges[0].explicit_inputs,
+            manifest.edges[0].explicit_outputs().collect::<Vec<_>>(),
+            ["out/exe"]
+        );
+        assert_eq!(
+            manifest.edges[0].explicit_inputs().collect::<Vec<_>>(),
             ["bar/foo.cc", "second.cc"]
         );
         assert_eq!(
-            evaluate_edge_binding(&manifest, &manifest.edges[0], "command", 0),
+            crate::build::render_unescaped_binding(&manifest, &manifest.edges[0], "command"),
             "cat bar/foo.cc\nsecond.cc > out/exe"
         );
 
@@ -2466,22 +3011,30 @@ default obj/foo$ bar.o
         )
         .unwrap();
         let edge = &manifest.edges[0];
-        assert_eq!(edge.explicit_outputs, ["explicit"]);
-        assert_eq!(edge.implicit_outputs, ["implicit"]);
-        assert_eq!(edge.explicit_inputs, ["in"]);
-        assert_eq!(edge.implicit_inputs, ["implicit-in"]);
-        assert_eq!(edge.order_only_inputs, ["order"]);
-        assert_eq!(edge.validations, ["validation"]);
-        assert!(manifest.edges[1].explicit_outputs.is_empty());
-        assert_eq!(manifest.edges[1].implicit_outputs, ["only-implicit"]);
+        assert_eq!(edge.explicit_outputs().collect::<Vec<_>>(), ["explicit"]);
+        assert_eq!(edge.implicit_outputs().collect::<Vec<_>>(), ["implicit"]);
+        assert_eq!(edge.explicit_inputs().collect::<Vec<_>>(), ["in"]);
+        assert_eq!(edge.implicit_inputs().collect::<Vec<_>>(), ["implicit-in"]);
+        assert_eq!(edge.order_only_inputs().collect::<Vec<_>>(), ["order"]);
+        assert_eq!(edge.validations().collect::<Vec<_>>(), ["validation"]);
+        assert!(manifest.edges[1].explicit_outputs().next().is_none());
+        assert_eq!(
+            manifest.edges[1].implicit_outputs().collect::<Vec<_>>(),
+            ["only-implicit"]
+        );
         assert_eq!(manifest.defaults, ["explicit", "only-implicit"]);
         let empty_implicit = parse_manifest(
             "rule cat\n  command = cat\nbuild explicit | : cat\n",
             "build.ninja",
         )
         .unwrap();
-        assert_eq!(empty_implicit.edges[0].explicit_outputs, ["explicit"]);
-        assert!(empty_implicit.edges[0].implicit_outputs.is_empty());
+        assert_eq!(
+            empty_implicit.edges[0]
+                .explicit_outputs()
+                .collect::<Vec<_>>(),
+            ["explicit"]
+        );
+        assert!(empty_implicit.edges[0].implicit_outputs().next().is_none());
 
         for (name, source, expected) in [
             (
@@ -2507,14 +3060,14 @@ default obj/foo$ bar.o
         ] {
             let manifest = parse_manifest(source, "build.ninja").unwrap();
             assert_eq!(
-                evaluate_edge_binding(&manifest, &manifest.edges[0], "dyndep", 0),
+                crate::build::render_unescaped_binding(&manifest, &manifest.edges[0], "dyndep"),
                 expected,
                 "case={name}"
             );
         }
         let no_dyndep = parse_manifest("build result: phony\n", "build.ninja").unwrap();
         assert_eq!(
-            evaluate_edge_binding(&no_dyndep, &no_dyndep.edges[0], "dyndep", 0),
+            crate::build::render_unescaped_binding(&no_dyndep, &no_dyndep.edges[0], "dyndep"),
             ""
         );
 
@@ -2830,10 +3383,13 @@ default obj/foo$ bar.o
         assert_eq!(manifest.explicit_output_slash_bits(edge), &[5]);
         assert_eq!(manifest.explicit_input_slash_bits(edge), &[0]);
         assert_eq!(
-            evaluate_edge_binding(&manifest, edge, "out", 0),
+            crate::build::render_unescaped_binding(&manifest, edge, "out"),
             r"out\mixed/path\file"
         );
-        assert_eq!(evaluate_edge_binding(&manifest, edge, "in", 0), "dir/file");
+        assert_eq!(
+            crate::build::render_unescaped_binding(&manifest, edge, "in"),
+            "dir/file"
+        );
     }
 
     #[test]
@@ -2929,8 +3485,11 @@ default obj/foo$ bar.o
             "build.ninja",
         )
         .unwrap();
-        assert!(manifest.edges[0].explicit_outputs.is_empty());
-        assert_eq!(manifest.edges[0].implicit_outputs, ["implicit"]);
+        assert!(manifest.edges[0].explicit_outputs().next().is_none());
+        assert_eq!(
+            manifest.edges[0].implicit_outputs().collect::<Vec<_>>(),
+            ["implicit"]
+        );
     }
 
     #[test]

@@ -147,7 +147,7 @@ Knight supports the core Ninja language and execution model, including:
   suite.
 
 Compatibility is tested against a pinned upstream Ninja commit rather than
-inferred from similar output. The Windows gate currently runs 95 library tests,
+inferred from similar output. The Windows gate currently runs 96 library tests,
 7 CLI tests, and 155 executable differential tests. Native differential suites
 also run on Linux, macOS, FreeBSD, OpenBSD, NetBSD, and DragonFly BSD.
 

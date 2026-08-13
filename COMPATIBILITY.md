@@ -358,8 +358,8 @@ This is an evidence ledger, not a claim of full compatibility.
 
 ## Not yet complete
 
-- Broader cross-platform runtime validation. The current Windows gates pass 95
-  library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
+- Broader cross-platform runtime validation. The current Windows gates pass 96
+  library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 91 library,
   6 CLI, and 131 differential tests. Native runtime differentials pass on
   Windows, Ubuntu, macOS, FreeBSD, OpenBSD, NetBSD, and DragonFly BSD. The
   macOS, FreeBSD, and OpenBSD gates

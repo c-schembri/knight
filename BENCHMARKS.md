@@ -74,6 +74,48 @@ The suite stores every sample in
 `target/benchmark-build-lifecycle/results.json` so session noise and tails stay
 visible rather than being collapsed into a favorable ratio.
 
+## 2026-08-14, compact graph storage
+
+Knight now estimates capacity for large parser collections, reuses build-token
+scratch storage, interns paths, rule names, and variable names as 32-bit IDs,
+stores immutable strings in 64 KiB bump-allocated chunks, and flattens static
+edge paths into one contiguous ID array. Each edge holds ranges into that array;
+the uncommon generated-dyndep mutation path uses a separate sidecar.
+
+An allocation-counting system allocator wrapped `parse_manifest` while excluding
+the source buffer. Retained bytes are allocations minus deallocations at the
+point the completed manifest is returned. The baseline is commit `f19503c`:
+
+| Graph | Baseline allocations | Compact allocations | Reduction | Baseline retained | Compact retained | Reduction |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000-edge chain | 7,058 | 3,060 | 56.6% | 449,970 B | 445,081 B | 1.1% |
+| 10,001 independent edges | 60,097 | 20,081 | 66.6% | 5,363,923 B | 3,795,127 B | 29.3% |
+| 100,000-edge phony chain | 700,052 | 300,063 | 57.1% | 52,086,736 B | 37,053,302 B | 28.9% |
+
+The current and baseline release executables were then launched in alternating
+order against the same warm graphs. The small chain is effectively tied, while
+the denser representation increasingly pays off as graph size grows:
+
+| Workload | Samples | Baseline median | Compact median | Change |
+| :--- | ---: | ---: | ---: | ---: |
+| 1,000-edge chain no-op | 100 | 8.305 ms | 8.372 ms | 0.8% slower |
+| 10,000-edge independent no-op | 100 | 35.419 ms | 33.798 ms | 4.6% faster |
+| 100,000-edge phony chain | 30 | 228.346 ms | 156.068 ms | 31.7% faster |
+| Criterion 10,000-edge parse | 30-sample run | 6.522 ms | 6.117 ms | 6.2% faster |
+
+Focused comparisons with upstream Ninja on the same Windows host measured
+Knight 22.8% faster on the 100,000-edge phony chain, 64.1% faster for `-t
+inputs` over 50,000 inputs, and 43.9% faster loading 1,000 included manifests.
+Knight still trailed Ninja by 14.7% on the 10,000-edge independent no-op and
+4.5% on the 1,000-edge chain, leaving small-graph startup and traversal as the
+remaining graph-shape work.
+
+The first implementation also exposed two useful rejection criteria. Eagerly
+reserving every per-edge vector regressed the 10,000-edge parser by about 13%,
+so only graph-level collections are preallocated. An iterator fallback made a
+wide phony edge quadratic; constant-time range indexing restored the closure
+phase and now has a dedicated mixed static/dynamic input test.
+
 ## 2026-08-13, Windows x64
 
 Tools: Knight 0.1.0 release build and upstream Ninja 1.14.0.git release build.

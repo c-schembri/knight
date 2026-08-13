@@ -569,24 +569,11 @@ fn filter_phony_self_references(manifest: &mut Manifest, options: &BuildOptions)
         return;
     }
     for edge in &mut manifest.edges {
-        if edge.rule != "phony"
-            || edge.explicit_outputs.len() != 1
-            || !edge.implicit_outputs.is_empty()
-            || !edge.implicit_inputs.is_empty()
-        {
+        let Some(output) = edge.suppress_phony_self_input() else {
             continue;
-        }
-        let output = &edge.explicit_outputs[0];
-        let old_explicit = edge.explicit_inputs.len();
-        let old_order_only = edge.order_only_inputs.len();
-        edge.explicit_inputs.retain(|input| input != output);
-        edge.order_only_inputs.retain(|input| input != output);
-        let removed = edge.explicit_inputs.len() != old_explicit
-            || edge.order_only_inputs.len() != old_order_only;
-        if removed {
-            manifest.phony_self_references.push(output.clone());
-        }
-        if !options.quiet && removed {
+        };
+        manifest.phony_self_references.push(output.clone());
+        if !options.quiet {
             eprintln!(
                 "{}: warning: phony target '{output}' names itself as an input; ignoring [-w phonycycle=warn]",
                 program_name()
@@ -1598,7 +1585,7 @@ fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
         Some("all") => {
             for edge in &manifest.edges {
                 for output in edge.outputs() {
-                    println!("{output}: {}", edge.rule);
+                    println!("{output}: {}", edge.rule());
                 }
             }
             Ok(())
@@ -1607,7 +1594,7 @@ fn tool_targets(manifest: &Manifest, args: &[String]) -> Result<(), String> {
             if let Some(rule) = args.get(1).filter(|rule| !rule.is_empty()) {
                 let mut outputs = BTreeSet::new();
                 for edge in &manifest.edges {
-                    if edge.rule == *rule {
+                    if edge.rule() == rule {
                         outputs.extend(edge.outputs());
                     }
                 }
@@ -1697,7 +1684,7 @@ fn print_target_tree(
         return;
     };
     let edge = &manifest.edges[*edge_id];
-    println!(": {}", edge.rule);
+    println!(": {}", edge.rule());
     if depth > 1 || depth <= 0 {
         for input in edge.inputs() {
             print_target_tree(input, depth - 1, indent + 1, manifest, outputs);
@@ -1756,7 +1743,7 @@ fn tool_commands(manifest: &Manifest, args: &[String]) -> Result<(), String> {
     };
     for id in selected {
         let edge = &manifest.edges[id];
-        if edge.rule != "phony" {
+        if edge.rule() != "phony" {
             println!("{}", render_binding(manifest, edge, "command"));
         }
     }
@@ -1989,7 +1976,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
                 println!("Rule {rule}");
             }
             for (id, edge) in manifest.edges.iter().enumerate() {
-                if edge.rule == *rule && seen.insert(id) {
+                if edge.rule() == rule && seen.insert(id) {
                     selected.push(id);
                 }
             }
@@ -2020,7 +2007,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
             .flat_map(|edge| {
                 edge.outputs()
                     .chain(edge.inputs())
-                    .chain(edge.validations.iter().map(String::as_str))
+                    .chain(edge.validations())
             })
             .collect::<HashSet<_>>();
         for target in &operands {
@@ -2050,7 +2037,7 @@ fn tool_clean(manifest: &Manifest, args: &[String], options: &BuildOptions) -> R
     let mut attempted = HashSet::<String>::new();
     for id in selected {
         let edge = &manifest.edges[id];
-        if (edge.rule == "phony" && !rules_mode)
+        if (edge.rule() == "phony" && !rules_mode)
             || (clean_all
                 && !include_generators
                 && truthy(&render_binding(manifest, edge, "generator")))
@@ -2206,7 +2193,7 @@ fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
                     reverse.entry(input).or_default().push(output);
                 }
             }
-            for validation in &edge.validations {
+            for validation in edge.validations() {
                 validation_for
                     .entry(validation)
                     .or_default()
@@ -2222,19 +2209,19 @@ fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
         println!("{target}:");
         if let Some(id) = outputs.get(target.as_str()) {
             let edge = &manifest.edges[*id];
-            println!("  input: {}", edge.rule);
-            for input in &edge.explicit_inputs {
+            println!("  input: {}", edge.rule());
+            for input in edge.explicit_inputs() {
                 println!("    {input}");
             }
-            for input in &edge.implicit_inputs {
+            for input in edge.implicit_inputs() {
                 println!("    | {input}");
             }
-            for input in &edge.order_only_inputs {
+            for input in edge.order_only_inputs() {
                 println!("    || {input}");
             }
-            if !edge.validations.is_empty() {
+            if edge.validations().next().is_some() {
                 println!("  validations:");
-                for validation in &edge.validations {
+                for validation in edge.validations() {
                     println!("    {validation}");
                 }
             }
@@ -2449,7 +2436,13 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 );
             }
         }
-        let mut inputs = inputs
+        #[cfg(windows)]
+        if !dependency_order {
+            // Windows Ninja orders canonical paths before presentation-time
+            // shell quoting.
+            inputs.sort_unstable();
+        }
+        let inputs = inputs
             .into_iter()
             .map(|input| {
                 if shell_escape {
@@ -2459,9 +2452,11 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 }
             })
             .collect::<Vec<_>>();
+        #[cfg(not(windows))]
+        let mut inputs = inputs;
+        #[cfg(not(windows))]
         if !dependency_order {
-            // Ninja sorts the rendered output, so a leading shell quote
-            // participates in the default alphabetical ordering.
+            // POSIX Ninja includes the leading shell quote in sort order.
             inputs.sort_unstable();
         }
         let stdout = io::stdout();
@@ -2605,7 +2600,7 @@ fn collect_inputs<'a>(
     for input in manifest.edges[edge_id].inputs() {
         if let Some(producer) = outputs.get(input) {
             collect_inputs(*producer, manifest, outputs, seen_edges, seen_paths, result);
-            if manifest.edges[*producer].rule == "phony" {
+            if manifest.edges[*producer].rule() == "phony" {
                 continue;
             }
         }
@@ -2717,24 +2712,24 @@ fn graph_node<'a>(
             "\"{}\" -> \"{}\" [label=\" {}\"]",
             json_escape(inputs[0]),
             json_escape(edge_outputs[0]),
-            json_escape(&edge.rule)
+            json_escape(edge.rule())
         ));
     } else {
         let rule_id = format!("rule_{edge_id}");
         lines.push(format!(
             "\"{rule_id}\" [label=\"{}\", shape=ellipse]",
-            json_escape(&edge.rule)
+            json_escape(edge.rule())
         ));
         for output in &edge_outputs {
             lines.push(format!("\"{rule_id}\" -> \"{}\"", json_escape(output)));
         }
-        for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
+        for input in edge.explicit_inputs().chain(edge.implicit_inputs()) {
             lines.push(format!(
                 "\"{}\" -> \"{rule_id}\" [arrowhead=none]",
                 json_escape(input)
             ));
         }
-        for input in &edge.order_only_inputs {
+        for input in edge.order_only_inputs() {
             lines.push(format!(
                 "\"{}\" -> \"{rule_id}\" [arrowhead=none style=dotted]",
                 json_escape(input)
@@ -2762,7 +2757,7 @@ fn tool_compdb(manifest: &Manifest, rules: &[String]) -> Result<(), String> {
             edges.extend(
                 rules
                     .iter()
-                    .filter(|rule| **rule == edge.rule)
+                    .filter(|rule| **rule == edge.rule())
                     .map(|_| edge),
             );
         }
@@ -2795,7 +2790,7 @@ fn tool_compdb_targets(manifest: &Manifest, targets: &[String]) -> Result<(), St
         .into_iter()
         .map(|edge| &manifest.edges[edge])
         .filter(|edge| {
-            edge.rule != "phony"
+            edge.rule() != "phony"
                 && edge.inputs().next().is_some()
                 && !is_validation_only_edge(edge, &validation_outputs, &regular_inputs)
         })
@@ -2818,7 +2813,7 @@ fn compdb_validation_usage(manifest: &Manifest) -> (HashSet<&str>, HashSet<&str>
     let validation_outputs = manifest
         .edges
         .iter()
-        .flat_map(|edge| edge.validations.iter().map(String::as_str))
+        .flat_map(Edge::validations)
         .collect::<HashSet<_>>();
     let regular_inputs = if validation_outputs.is_empty() {
         HashSet::new()
@@ -3152,12 +3147,12 @@ fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), Strin
                 "Missing dep: {} uses {} (generated by {})",
                 edge.outputs().next().unwrap_or(""),
                 input,
-                manifest.edges[producer].rule
+                manifest.edges[producer].rule()
             );
             missing_nodes.insert(*edge_id);
             generated_inputs.insert(input.clone());
-            generator_rules.insert(manifest.edges[producer].rule.as_str());
-            missing_rule_paths.insert((*edge_id, manifest.edges[producer].rule.as_str()));
+            generator_rules.insert(manifest.edges[producer].rule());
+            missing_rule_paths.insert((*edge_id, manifest.edges[producer].rule()));
         }
     }
 
