@@ -360,9 +360,12 @@ This is an evidence ledger, not a claim of full compatibility.
 
 - Broader cross-platform runtime validation. The current Windows gates pass 95
   library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
-  6 CLI, and 131 differential tests. Release builds, clippy, a Windows-hosted
-  Linux target check, and a CMake no-op rebuild also pass locally; macOS and
-  other Unix variants are not yet exercised in CI here.
+  6 CLI, and 131 differential tests. Native CI passes on Windows, Ubuntu, and
+  macOS; the macOS gate runs 90 library, 6 CLI, and 128 differential tests.
+  Release builds and clippy pass on all three. Cross-target `cargo check` also
+  passes for FreeBSD, NetBSD, illumos, Solaris, and MinGW, but those targets and
+  Ninja's lower-tier OpenBSD, DragonFly BSD, and AIX targets do not yet have
+  native runtime differentials here.
   All 478 executable cases at pinned Ninja commit `b51a1e37`, all 20 tool
   entry points, and all 15 top-level option families are mapped on the audited
   Windows and Linux platforms. Ninja's own POSIX `misc/output_test.py` passes
@@ -375,6 +378,13 @@ This is an evidence ledger, not a claim of full compatibility.
   including FIFO inheritance, returned-token wakeups, token efficiency,
   MAKEFLAGS forwarding, no-jobserver scheduling, and Ninja-alias pipe warnings.
   Native Rust regressions verify both pipe token limits and cross-client wakeups.
+  Those inherited-pipe cases pass natively on both Linux and macOS; macOS uses
+  the blocking jobserver helper because changing a shared inherited descriptor
+  to nonblocking mode would affect the parent process. BSD system `getopt` and
+  `getopt_long` diagnostic identity, punctuation, and operand-order differences
+  are covered by the native macOS argument matrix. Windows reparse-point stats
+  resolve and timestamp their targets like Ninja instead of reading the link's
+  own timestamp.
   The complete upstream MAKEFLAGS parser corpus also maps byte-for-byte,
   including invalid/unsupported-mode warnings, mode announcement,
   initialization errors, quiet/dry-run policy, and MAKEFLAGS precedence. Native

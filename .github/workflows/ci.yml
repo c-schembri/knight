@@ -12,6 +12,46 @@ env:
   NINJA_REFERENCE_COMMIT: b51a1e37c2fb89bbefa600bd155e1ce13983f09d
 
 jobs:
+  cross-targets:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-freebsd
+          - x86_64-unknown-netbsd
+          - x86_64-unknown-illumos
+          - x86_64-pc-solaris
+          - x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check ${{ matrix.target }}
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo check --target "${{ matrix.target }}" --all-targets
+
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1
+        with:
+          release: "14.3"
+          usesh: true
+          envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
+          prepare: pkg install -y rust git cmake python3
+          run: |
+            git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
+            git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build ninja-reference/build --parallel 2
+            export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
+            cargo test --all-targets
+            cargo clippy --all-targets -- -D warnings
+            cargo build --release
+
   unix:
     strategy:
       fail-fast: false
