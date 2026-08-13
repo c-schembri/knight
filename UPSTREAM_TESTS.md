@@ -36,7 +36,7 @@ Status meanings:
 | `json_test` | 4 | Mapped | `main::tests::upstream_json_encoder_corpus` |
 | `lexer_test` | 8 | Mapped | `manifest::tests::upstream_lexer_value_identifier_and_escape_corpus` |
 | `manifest_parser_test` | 53 | Partial | Acceptance, rejection, and byte-exact alias diagnostic corpora |
-| `missing_deps_test` | 7 | Partial | Deps-log, depfile, default-closure, and validation coverage |
+| `missing_deps_test` | 7 | Mapped | Empty/clean graphs, direct and indirect fixes, missing/cyclic discovered deps, and graph-cycle rejection |
 | `msvc_helper_test` | 3 | Mapped | Helper depfile, raw output, environment, and stderr differentials |
 | `state_test` | 1 | Mapped | Command expansion case in `build` tests |
 | `status_test` | 2 | Mapped | Status placeholder and elapsed-time corpus |
@@ -56,6 +56,12 @@ parity blocker regardless of how many adjacent Knight tests pass.
 | `misc/jobserver_test.py` | 5 | Partial | Native Knight passes 4/5; the `ninja` alias reproduces the unsupported pipe policy |
 | `misc/ninja_syntax_test.py` | 21 | Implementation-specific | Tests Ninja's optional Python manifest-writer module, not the executable |
 | `misc/output_test.py` | 24 | Upstream pass | All 24 tests pass unchanged under WSL |
+| `tests/builddir_target/test_builddir_target.py` | 5 | Upstream pass | All five build-directory target cases pass unchanged under WSL |
+| `tests/compdb/test_compdb_validation.py` | 5 | Upstream pass | All five compilation-database validation cases pass unchanged under WSL |
+| `tests/restat/test_restat_builddir.py` | 1 | Upstream pass | The build-directory restat case passes unchanged under WSL |
+
+The Python inventory contains 66 cases. Together with the 448 C++ cases above,
+this ledger tracks all 514 upstream test cases in the pinned source tree.
 
 The next parity work should turn **Partial** executable suites into **Mapped**
 or **Upstream pass** rows. New performance work does not close this ledger.

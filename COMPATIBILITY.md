@@ -236,7 +236,10 @@ This is an evidence ledger, not a claim of full compatibility.
   even under `-n` like Ninja.
   `missingdeps` scans the default-target closure when no targets are supplied,
   reads both `.ninja_deps` entries and plain depfiles, and ignores unrelated
-  branches.
+  branches. All seven upstream missing-dependency scanner cases are mapped
+  byte-for-byte on Windows and Linux, covering empty and clean graphs, direct
+  and indirect dependency paths, a missing generated input, mutually missing
+  discovered dependencies, and a declared dependency cycle.
 - A deterministic generated-DAG differential corpus combines multi-output and
   phony edges with explicit, implicit, order-only, and validation inputs, plus
   bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
@@ -339,8 +342,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 86
-  library, 6 CLI, and 124 differential tests; Linux-under-WSL passes 81 library,
-  5 CLI, and 99 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 125 differential tests; Linux-under-WSL passes 81 library,
+  5 CLI, and 100 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

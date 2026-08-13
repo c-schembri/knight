@@ -2932,6 +2932,104 @@ fn missingdeps_scans_plain_depfiles_like_ninja() {
     assert_eq!(actual.stderr, expected.stderr);
 }
 
+#[test]
+fn upstream_missing_dependency_scanner_corpus_matches_ninja_alias() {
+    type MissingDepsCase = (
+        &'static str,
+        String,
+        &'static [(&'static str, &'static str)],
+    );
+
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let base = concat!(
+        "rule generator_rule\n  command = unused\n  deps = gcc\n",
+        "rule compile_rule\n  command = unused\n  deps = gcc\n",
+        "build generated_header: generator_rule\n",
+        "build compiled_object: compile_rule\n",
+    );
+    let cases: &[MissingDepsCase] = &[
+        ("EmptyGraph", "\n".to_owned(), &[]),
+        ("NoMissingDep", base.to_owned(), &[]),
+        (
+            "MissingDepPresent",
+            base.to_owned(),
+            &[("compiled_object", "generated_header")],
+        ),
+        (
+            "MissingDepFixedDirect",
+            base.replace(
+                "build compiled_object: compile_rule\n",
+                "build compiled_object: compile_rule generated_header\n",
+            ),
+            &[("compiled_object", "generated_header")],
+        ),
+        (
+            "MissingDepFixedIndirect",
+            base.replace(
+                "build compiled_object: compile_rule\n",
+                concat!(
+                    "build intermediate: generator_rule generated_header\n",
+                    "build compiled_object: compile_rule intermediate\n",
+                ),
+            ),
+            &[("compiled_object", "generated_header")],
+        ),
+        (
+            "CyclicMissingDep",
+            base.to_owned(),
+            &[
+                ("generated_header", "compiled_object"),
+                ("compiled_object", "generated_header"),
+            ],
+        ),
+        (
+            "CycleInGraph",
+            base.replace(
+                "build generated_header: generator_rule\nbuild compiled_object: compile_rule\n",
+                concat!(
+                    "build generated_header: generator_rule compiled_object\n",
+                    "build compiled_object: compile_rule generated_header\n",
+                ),
+            ),
+            &[],
+        ),
+    ];
+
+    for (name, manifest, dependencies) in cases {
+        let mut observed = Vec::new();
+        for candidate in [Path::new(&ninja), knight] {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join("build.ninja"), manifest).unwrap();
+            if !dependencies.is_empty() {
+                let path = temp.path().join(".ninja_deps");
+                let mut log = knight_build::deps_log::DepsLog::load(path).unwrap();
+                for (output, input) in *dependencies {
+                    log.record(output, 0, &[(*input).to_owned()]).unwrap();
+                }
+            }
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            let executable = if candidate == knight {
+                #[cfg(windows)]
+                fs::copy(knight, &alias).unwrap();
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(knight, &alias).unwrap();
+                alias.as_path()
+            } else {
+                candidate
+            };
+            let output = run(executable, temp.path(), &["-t", "missingdeps"]);
+            observed.push((output.status.code(), output.stdout, output.stderr));
+        }
+        assert_eq!(observed[1], observed[0], "{name}");
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn commands_and_compdb_options_match_ninja() {
