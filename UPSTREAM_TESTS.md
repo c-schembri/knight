@@ -71,11 +71,12 @@ Partial.
 
 This closes the pinned test-corpus ledger. Separate explicit inventories in
 `tests/differential.rs` map all 20 public/hidden tool entry points and all 15
-top-level option families on Windows, Linux, and macOS. The native CI matrix
-also covers macOS inherited-pipe jobservers, BSD `getopt` diagnostics and
+top-level option families on Windows, Linux, macOS, and FreeBSD. The native CI
+matrix also covers inherited-pipe jobservers, BSD `getopt` diagnostics and
 operand ordering, portable timestamp manipulation, and Knight's successful
 1,025-process run when the macOS Ninja reference exhausts its descriptor limit.
-FreeBSD, NetBSD, illumos, Solaris, and MinGW cross-target checks pass, but native
-runtime differentials on those and Ninja's lower-tier OpenBSD, DragonFly BSD,
-and AIX targets remain separate platform-validation work. New performance work
-does not substitute for that platform validation.
+FreeBSD's native 90 library, 6 CLI, and 128 differential tests pass. NetBSD,
+illumos, Solaris, and MinGW cross-target CI checks pass, but native runtime
+differentials on those and Ninja's lower-tier OpenBSD, DragonFly BSD, and AIX
+targets remain separate platform-validation work. New performance work does not
+substitute for that platform validation.

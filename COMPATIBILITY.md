@@ -360,12 +360,13 @@ This is an evidence ledger, not a claim of full compatibility.
 
 - Broader cross-platform runtime validation. The current Windows gates pass 95
   library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
-  6 CLI, and 131 differential tests. Native CI passes on Windows, Ubuntu, and
-  macOS; the macOS gate runs 90 library, 6 CLI, and 128 differential tests.
-  Release builds and clippy pass on all three. Cross-target `cargo check` also
-  passes for FreeBSD, NetBSD, illumos, Solaris, and MinGW, but those targets and
-  Ninja's lower-tier OpenBSD, DragonFly BSD, and AIX targets do not yet have
-  native runtime differentials here.
+  6 CLI, and 131 differential tests. Native CI passes on Windows, Ubuntu,
+  macOS, and FreeBSD; the macOS and FreeBSD gates each run 90 library, 6 CLI,
+  and 128 differential tests. Release builds and clippy pass on all four.
+  Cross-target CI checks also pass for FreeBSD, NetBSD, illumos, Solaris, and
+  MinGW, but NetBSD, illumos, Solaris, and Ninja's lower-tier OpenBSD,
+  DragonFly BSD, and AIX targets do not yet have native runtime differentials
+  here.
   All 478 executable cases at pinned Ninja commit `b51a1e37`, all 20 tool
   entry points, and all 15 top-level option families are mapped on the audited
   Windows and Linux platforms. Ninja's own POSIX `misc/output_test.py` passes

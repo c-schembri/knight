@@ -52,6 +52,27 @@ jobs:
             cargo clippy --all-targets -- -D warnings
             cargo build --release
 
+  openbsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test on OpenBSD
+        uses: vmactions/openbsd-vm@e6c68b637a12e83519688d115d57d5b0b53923cd # v1
+        with:
+          release: "7.7"
+          usesh: true
+          envs: NINJA_REFERENCE_COMMIT CARGO_TERM_COLOR
+          prepare: pkg_add rust git cmake python
+          run: |
+            git clone --filter=blob:none https://github.com/ninja-build/ninja.git ninja-reference
+            git -C ninja-reference checkout "$NINJA_REFERENCE_COMMIT"
+            cmake -S ninja-reference -B ninja-reference/build -DCMAKE_BUILD_TYPE=Release -DNINJA_PYTHON=python3
+            cmake --build ninja-reference/build --parallel 2
+            export KNIGHT_NINJA="$PWD/ninja-reference/build/ninja"
+            cargo test --all-targets
+            cargo clippy --all-targets -- -D warnings
+            cargo build --release
+
   unix:
     strategy:
       fail-fast: false
