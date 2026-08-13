@@ -451,6 +451,7 @@ struct StatCache<'a> {
 #[derive(Debug, Default)]
 struct DeclaredStatCache<'a> {
     mtimes: HashMap<&'a str, Option<u128>>,
+    reusable: HashSet<&'a str>,
 }
 
 impl<'a> DeclaredStatCache<'a> {
@@ -471,10 +472,15 @@ impl<'a> DeclaredStatCache<'a> {
         }
 
         let mut mtimes = HashMap::with_capacity(groups.values().map(Vec::len).sum::<usize>());
+        let mut reusable = HashSet::with_capacity(mtimes.capacity());
         for (directory, paths) in groups {
             if paths.len() < 8 {
                 for path in paths {
-                    mtimes.insert(path, modified_ns(Path::new(path)));
+                    let mtime = modified_ns(Path::new(path));
+                    if mtime.is_some() {
+                        reusable.insert(path);
+                    }
+                    mtimes.insert(path, mtime);
                 }
                 continue;
             }
@@ -483,12 +489,17 @@ impl<'a> DeclaredStatCache<'a> {
                 DirectoryMtimes::Missing => {
                     for path in paths {
                         mtimes.insert(path, None);
+                        reusable.insert(path);
                     }
                     continue;
                 }
                 DirectoryMtimes::Unavailable => {
                     for path in paths {
-                        mtimes.insert(path, modified_ns(Path::new(path)));
+                        let mtime = modified_ns(Path::new(path));
+                        if mtime.is_some() {
+                            reusable.insert(path);
+                        }
+                        mtimes.insert(path, mtime);
                     }
                     continue;
                 }
@@ -498,9 +509,10 @@ impl<'a> DeclaredStatCache<'a> {
                     .file_name()
                     .and_then(|name| entries.get(&directory_entry_key(name)).copied());
                 mtimes.insert(path, mtime);
+                reusable.insert(path);
             }
         }
-        Self { mtimes }
+        Self { mtimes, reusable }
     }
 
     fn get(&mut self, path: &'a str) -> Option<u128> {
@@ -508,8 +520,17 @@ impl<'a> DeclaredStatCache<'a> {
             return *mtime;
         }
         let mtime = modified_ns(Path::new(path));
+        if mtime.is_some() {
+            self.reusable.insert(path);
+        }
         self.mtimes.insert(path, mtime);
         mtime
+    }
+
+    fn reusable_mtime(&self, path: &'a str) -> Option<Option<u128>> {
+        self.reusable
+            .contains(path)
+            .then(|| self.mtimes.get(path).copied().flatten())
     }
 }
 
@@ -519,6 +540,7 @@ impl<'a> StatCache<'a> {
         closure: &[usize],
         outputs: &HashMap<&str, usize>,
         discovered: &DiscoveredDeps,
+        declared: Option<&DeclaredStatCache<'a>>,
         enabled: bool,
         check_missing_sources: bool,
     ) -> Result<Self, String> {
@@ -539,8 +561,19 @@ impl<'a> StatCache<'a> {
                     .extend(edge.inputs().filter(|input| !outputs.contains_key(*input)));
             }
         }
+        let mut mtimes = HashMap::with_capacity(paths.len());
+        if let Some(declared) = declared {
+            for &path in &paths {
+                if let Some(mtime) = declared.reusable_mtime(path) {
+                    mtimes.insert(path, mtime);
+                }
+            }
+        }
         let mut groups = HashMap::<&Path, Vec<&str>>::new();
         for path in &paths {
+            if mtimes.contains_key(path) {
+                continue;
+            }
             let parent = Path::new(path)
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -548,7 +581,6 @@ impl<'a> StatCache<'a> {
             groups.entry(parent).or_default().push(path);
         }
 
-        let mut mtimes = HashMap::with_capacity(groups.values().map(Vec::len).sum::<usize>());
         for (directory, paths) in groups {
             if paths.len() < 8 {
                 for path in paths {
@@ -599,10 +631,10 @@ impl<'a> StatCache<'a> {
         }
         let mut dynamic = HashMap::new();
         for edge_id in closure {
-            for path in &discovered.inputs[*edge_id] {
-                if !mtimes.contains_key(path.as_str()) && !dynamic.contains_key(path) {
+            for path in discovered.inputs(*edge_id) {
+                if !mtimes.contains_key(path) && !dynamic.contains_key(path) {
                     dynamic.insert(
-                        path.clone(),
+                        path.to_owned(),
                         checked_modified_ns_cached(Path::new(path), true)?,
                     );
                 }
@@ -772,11 +804,40 @@ fn directory_mtimes(directory: &Path) -> DirectoryMtimes {
 
 #[derive(Debug)]
 struct DiscoveredDeps {
-    inputs: Vec<Vec<String>>,
+    inputs: Vec<DiscoveredInputs>,
     missing: Vec<bool>,
     errors: Vec<Option<String>>,
     log: DepsLog,
     specs: Vec<DependencySpec>,
+}
+
+#[derive(Debug, Default)]
+enum DiscoveredInputs {
+    #[default]
+    None,
+    Logged(Box<[u32]>),
+    Owned(Vec<String>),
+}
+
+enum DiscoveredInputIter<'a> {
+    Empty,
+    Logged {
+        ids: std::slice::Iter<'a, u32>,
+        log: &'a DepsLog,
+    },
+    Owned(std::slice::Iter<'a, String>),
+}
+
+impl<'a> Iterator for DiscoveredInputIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::Logged { ids, log } => ids.next().and_then(|id| log.node(*id)),
+            Self::Owned(inputs) => inputs.next().map(String::as_str),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -793,6 +854,8 @@ struct DependencySpec {
     mode: DependencyMode,
     depfile: String,
     msvc_prefix: String,
+    restat: bool,
+    generator: bool,
 }
 
 impl DependencySpec {
@@ -802,8 +865,14 @@ impl DependencySpec {
             edge.bindings.contains_key(name)
                 || rule.is_some_and(|rule| rule.bindings.contains_key(name))
         };
+        let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
+        let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
         if !has_binding("deps") && !has_binding("depfile") {
-            return Self::default();
+            return Self {
+                restat,
+                generator,
+                ..Self::default()
+            };
         }
         let deps = evaluate_binding(manifest, edge, "deps");
         Self {
@@ -819,6 +888,8 @@ impl DependencySpec {
             } else {
                 String::new()
             },
+            restat,
+            generator,
         }
     }
 
@@ -828,6 +899,25 @@ impl DependencySpec {
 }
 
 impl DiscoveredDeps {
+    fn inputs(&self, edge_id: usize) -> DiscoveredInputIter<'_> {
+        match &self.inputs[edge_id] {
+            DiscoveredInputs::None => DiscoveredInputIter::Empty,
+            DiscoveredInputs::Logged(ids) => DiscoveredInputIter::Logged {
+                ids: ids.iter(),
+                log: &self.log,
+            },
+            DiscoveredInputs::Owned(inputs) => DiscoveredInputIter::Owned(inputs.iter()),
+        }
+    }
+
+    fn input_at(&self, edge_id: usize, index: usize) -> Option<&str> {
+        match &self.inputs[edge_id] {
+            DiscoveredInputs::None => None,
+            DiscoveredInputs::Logged(ids) => self.log.node(*ids.get(index)?),
+            DiscoveredInputs::Owned(inputs) => inputs.get(index).map(String::as_str),
+        }
+    }
+
     #[cfg(test)]
     fn load(manifest: &Manifest) -> Self {
         let specs = manifest
@@ -835,20 +925,30 @@ impl DiscoveredDeps {
             .iter()
             .map(|edge| DependencySpec::evaluate(manifest, edge))
             .collect();
-        Self::load_filtered(manifest, &vec![true; manifest.edges.len()], specs).unwrap()
+        let mut stat_cache = DeclaredStatCache::preload(manifest);
+        Self::load_filtered(
+            manifest,
+            &vec![true; manifest.edges.len()],
+            specs,
+            &mut stat_cache,
+        )
+        .unwrap()
     }
 
     fn load_for_build<'a>(
         manifest: &'a Manifest,
         outputs: &HashMap<&'a str, usize>,
         build_log: &BuildLog<'a>,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, DeclaredStatCache<'a>), String> {
         if !manifest.has_dependency_bindings() {
-            return Self::load_filtered(
-                manifest,
-                &[],
-                vec![DependencySpec::default(); manifest.edges.len()],
-            );
+            let mut stat_cache = DeclaredStatCache::default();
+            let specs = manifest
+                .edges
+                .iter()
+                .map(|edge| DependencySpec::evaluate(manifest, edge))
+                .collect();
+            let discovered = Self::load_filtered(manifest, &[], specs, &mut stat_cache)?;
+            return Ok((discovered, stat_cache));
         }
         let specs = manifest
             .edges
@@ -862,15 +962,19 @@ impl DiscoveredDeps {
             .into_iter()
             .map(|dirty| !dirty)
             .collect::<Vec<_>>();
-        Self::load_filtered(manifest, &load, specs)
+        let discovered = Self::load_filtered(manifest, &load, specs, &mut stat_cache)?;
+        Ok((discovered, stat_cache))
     }
 
-    fn load_filtered(
-        manifest: &Manifest,
+    fn load_filtered<'a>(
+        manifest: &'a Manifest,
         load: &[bool],
         specs: Vec<DependencySpec>,
+        stat_cache: &mut DeclaredStatCache<'a>,
     ) -> Result<Self, String> {
-        let mut inputs = vec![Vec::new(); manifest.edges.len()];
+        let mut inputs = std::iter::repeat_with(DiscoveredInputs::default)
+            .take(manifest.edges.len())
+            .collect::<Vec<_>>();
         let mut missing = vec![false; manifest.edges.len()];
         let mut errors = vec![None; manifest.edges.len()];
         let builddir = manifest.variables.get("builddir").map(String::as_str);
@@ -910,17 +1014,15 @@ impl DiscoveredDeps {
                 let entry = edge.outputs().next().and_then(|output| log.get(output));
                 let valid = edge.outputs().next().is_some_and(|output| {
                     entry.is_some_and(|entry| {
-                        modified_ns(Path::new(output))
+                        stat_cache
+                            .get(output)
                             .is_some_and(|mtime| mtime <= entry.mtime as u128)
                     })
                 });
                 if load[edge_id] && valid {
-                    inputs[edge_id] = entry
-                        .unwrap()
-                        .inputs()
-                        .map(str::to_owned)
-                        .map(canonicalize_owned_path)
-                        .collect();
+                    inputs[edge_id] = DiscoveredInputs::Logged(
+                        entry.unwrap().input_ids().to_vec().into_boxed_slice(),
+                    );
                 } else if !valid {
                     missing[edge_id] = true;
                 }
@@ -958,11 +1060,13 @@ impl DiscoveredDeps {
                             ));
                         }
                         Ok(parsed) => {
-                            inputs[edge_id] = parsed
-                                .inputs
-                                .into_iter()
-                                .map(canonicalize_owned_path)
-                                .collect();
+                            inputs[edge_id] = DiscoveredInputs::Owned(
+                                parsed
+                                    .inputs
+                                    .into_iter()
+                                    .map(canonicalize_owned_path)
+                                    .collect(),
+                            );
                         }
                         Err(error) => {
                             errors[edge_id] = Some(format!("{}: {error}", spec.depfile));
@@ -992,7 +1096,7 @@ impl DiscoveredDeps {
                 .record(output, mtime, &inputs)
                 .map_err(|error| format!("writing dependency log: {error}"))?;
         }
-        self.inputs[edge_id] = inputs;
+        self.inputs[edge_id] = DiscoveredInputs::Owned(inputs);
         self.missing[edge_id] = false;
         Ok(())
     }
@@ -1149,6 +1253,13 @@ fn declared_dirty_edges<'a>(
     specs: &[DependencySpec],
     stat_cache: &mut DeclaredStatCache<'a>,
 ) -> Vec<bool> {
+    struct DeclaredContext<'a, 'b> {
+        manifest: &'a Manifest,
+        outputs: &'b HashMap<&'a str, usize>,
+        build_log: &'b BuildLog<'a>,
+        specs: &'b [DependencySpec],
+    }
+
     fn path_mtime<'a>(
         path: &'a str,
         manifest: &'a Manifest,
@@ -1178,9 +1289,7 @@ fn declared_dirty_edges<'a>(
 
     fn visit<'a>(
         edge_id: usize,
-        manifest: &'a Manifest,
-        outputs: &HashMap<&'a str, usize>,
-        build_log: &BuildLog<'a>,
+        context: &DeclaredContext<'a, '_>,
         state: &mut [u8],
         result: &mut [bool],
         stat_cache: &mut DeclaredStatCache<'a>,
@@ -1190,7 +1299,7 @@ fn declared_dirty_edges<'a>(
             2 => return result[edge_id],
             _ => state[edge_id] = 1,
         }
-        let edge = &manifest.edges[edge_id];
+        let edge = &context.manifest.edges[edge_id];
         let mut dirty = edge.rule == "phony" && edge.inputs().next().is_none();
         let mut oldest_output = u128::MAX;
         let mut newest_input = 0;
@@ -1205,15 +1314,18 @@ fn declared_dirty_edges<'a>(
         }
 
         for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-            if let Some(producer) = outputs.get(input.as_str()).copied() {
-                if visit(
-                    producer, manifest, outputs, build_log, state, result, stat_cache,
-                ) {
+            if let Some(producer) = context.outputs.get(input.as_str()).copied() {
+                if visit(producer, context, state, result, stat_cache) {
                     dirty = true;
                 }
             }
-            let Some(mtime) = path_mtime(input, manifest, outputs, &mut HashSet::new(), stat_cache)
-            else {
+            let Some(mtime) = path_mtime(
+                input,
+                context.manifest,
+                context.outputs,
+                &mut HashSet::new(),
+                stat_cache,
+            ) else {
                 dirty = true;
                 continue;
             };
@@ -1221,21 +1333,28 @@ fn declared_dirty_edges<'a>(
         }
 
         if edge.rule != "phony" {
-            let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
-            let use_restat = restat && edge.outputs().all(|output| build_log.has_entry(output));
+            let use_restat = context.specs[edge_id].restat
+                && edge
+                    .outputs()
+                    .all(|output| context.build_log.has_entry(output));
             if !use_restat && newest_input > oldest_output {
                 dirty = true;
             }
-            let rspfile_content = evaluate_binding(manifest, edge, "rspfile_content");
-            let command = evaluate_binding(manifest, edge, "command");
+            let rspfile_content = evaluate_binding(context.manifest, edge, "rspfile_content");
+            let command = evaluate_binding(context.manifest, edge, "command");
             let log_command = if rspfile_content.is_empty() {
                 command
             } else {
                 format!("{command};rspfile={rspfile_content}")
             };
-            let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
-            if build_log.command_changed(edge, &log_command, generator)
-                || build_log.recorded_mtime_dirty(edge, newest_input).is_some()
+            if context.build_log.command_changed(
+                edge,
+                &log_command,
+                context.specs[edge_id].generator,
+            ) || context
+                .build_log
+                .recorded_mtime_dirty(edge, newest_input)
+                .is_some()
             {
                 dirty = true;
             }
@@ -1247,17 +1366,15 @@ fn declared_dirty_edges<'a>(
 
     let mut state = vec![0; manifest.edges.len()];
     let mut result = vec![false; manifest.edges.len()];
+    let context = DeclaredContext {
+        manifest,
+        outputs,
+        build_log,
+        specs,
+    };
     for (edge_id, spec) in specs.iter().enumerate() {
         if spec.has_metadata() {
-            visit(
-                edge_id,
-                manifest,
-                outputs,
-                build_log,
-                &mut state,
-                &mut result,
-                stat_cache,
-            );
+            visit(edge_id, &context, &mut state, &mut result, stat_cache);
         }
     }
     result
@@ -1330,7 +1447,8 @@ pub fn run_build_reusable<'a>(
     }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
+    let (discovered, declared_stats) =
+        DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(manifest, requested_targets, &output_map, &discovered.log)?;
@@ -1353,6 +1471,7 @@ pub fn run_build_reusable<'a>(
             discovered,
             build_log,
             closure,
+            declared_stats: Some(declared_stats),
             stats: PreparationStats {
                 output_map: output_map_time,
                 dependencies: deps_time,
@@ -1399,6 +1518,7 @@ pub fn run_build_from_state<'a>(
             discovered: state.discovered,
             build_log: state.build_log,
             closure,
+            declared_stats: None,
             stats: state.stats,
         },
         ProgressContext::default(),
@@ -1455,7 +1575,8 @@ fn run_build_impl(
     }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(&manifest, &initial_output_map, &build_log)?;
+    let (discovered, declared_stats) =
+        DiscoveredDeps::load_for_build(&manifest, &initial_output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(
@@ -1499,6 +1620,7 @@ fn run_build_impl(
                 discovered,
                 build_log,
                 closure,
+                declared_stats: Some(declared_stats),
                 stats: PreparationStats {
                     output_map: output_map_time,
                     dependencies: deps_time,
@@ -1550,7 +1672,7 @@ fn run_build_impl(
         }
         let current_build_log_time = phase.elapsed();
         let phase = Instant::now();
-        let current_discovered =
+        let (current_discovered, current_declared_stats) =
             DiscoveredDeps::load_for_build(&expanded, &current_output_map, &current_build_log)?;
         let current_dependencies_time = phase.elapsed();
         let phase = Instant::now();
@@ -1606,6 +1728,7 @@ fn run_build_impl(
                     discovered: current_discovered,
                     build_log: current_build_log,
                     closure: prebuild_closure,
+                    declared_stats: Some(current_declared_stats),
                     stats: PreparationStats {
                         output_map: current_output_map_time,
                         dependencies: current_dependencies_time,
@@ -1740,10 +1863,7 @@ fn dyndep_prebuild_targets(
     let mut dependents = vec![Vec::new(); manifest.edges.len()];
     for &consumer in closure {
         let edge = &manifest.edges[consumer];
-        for input in edge
-            .inputs()
-            .chain(discovered.inputs[consumer].iter().map(String::as_str))
-        {
+        for input in edge.inputs().chain(discovered.inputs(consumer)) {
             if let Some(producer) = outputs.get(input).copied() {
                 if in_closure[producer] {
                     dependents[producer].push(consumer);
@@ -2132,7 +2252,8 @@ fn run_build_internal(
     }
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
+    let (discovered, declared_stats) =
+        DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(manifest, requested_targets, &output_map, &discovered.log)?;
@@ -2152,6 +2273,7 @@ fn run_build_internal(
             discovered,
             build_log,
             closure,
+            declared_stats: Some(declared_stats),
             stats: PreparationStats {
                 output_map: output_map_time,
                 dependencies: deps_time,
@@ -2176,6 +2298,7 @@ struct PreparedBuild<'a> {
     discovered: DiscoveredDeps,
     build_log: BuildLog<'a>,
     closure: Vec<usize>,
+    declared_stats: Option<DeclaredStatCache<'a>>,
     stats: PreparationStats,
 }
 
@@ -2214,6 +2337,7 @@ fn run_build_prepared_reusable<'a>(
         mut discovered,
         mut build_log,
         closure,
+        declared_stats,
         stats: preparation,
     } = prepared;
     let scheduler_setup_start = Instant::now();
@@ -2237,7 +2361,7 @@ fn run_build_prepared_reusable<'a>(
             let mut producers = HashSet::new();
             for input in manifest.edges[edge_id]
                 .inputs()
-                .chain(discovered.inputs[edge_id].iter().map(String::as_str))
+                .chain(discovered.inputs(edge_id))
             {
                 let Some(&producer) = output_map.get(input) else {
                     continue;
@@ -2274,7 +2398,7 @@ fn run_build_prepared_reusable<'a>(
             let mut seen = HashSet::new();
             for input in manifest.edges[edge_id]
                 .inputs()
-                .chain(discovered.inputs[edge_id].iter().map(String::as_str))
+                .chain(discovered.inputs(edge_id))
             {
                 if let Some(&producer) = output_map.get(input) {
                     if in_closure[producer] && seen.insert(producer) {
@@ -2311,6 +2435,7 @@ fn run_build_prepared_reusable<'a>(
         &closure,
         &output_map,
         &discovered,
+        declared_stats.as_ref(),
         options.use_stat_cache,
         true,
     )?;
@@ -3175,8 +3300,8 @@ fn run_build_prepared_reusable<'a>(
                     let _ = fs::remove_file(rspfile);
                 }
             }
-            let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
-            let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
+            let restat = dependency_spec.restat;
+            let generator = dependency_spec.generator;
             let current_output_mtimes = edge
                 .outputs()
                 .map(|output| {
@@ -4232,20 +4357,24 @@ fn dependency_closure(
         next_input: usize,
     }
 
-    fn input_at<'a>(edge: &'a Edge, discovered: &'a [String], index: usize) -> Option<&'a str> {
+    fn input_at<'a>(
+        edge_id: usize,
+        edge: &'a Edge,
+        discovered: &'a DiscoveredDeps,
+        index: usize,
+    ) -> Option<&'a str> {
         let mut index = index;
         for inputs in [
             &edge.explicit_inputs,
             &edge.implicit_inputs,
             &edge.order_only_inputs,
-            discovered,
         ] {
             if index < inputs.len() {
                 return Some(&inputs[index]);
             }
             index -= inputs.len();
         }
-        None
+        discovered.input_at(edge_id, index)
     }
 
     fn visit_iterative(
@@ -4274,7 +4403,7 @@ fn dependency_closure(
         while let Some(frame) = stack.last_mut() {
             let edge_id = frame.edge;
             let edge = &manifest.edges[edge_id];
-            let Some(input) = input_at(edge, &discovered.inputs[edge_id], frame.next_input) else {
+            let Some(input) = input_at(edge_id, edge, discovered, frame.next_input) else {
                 state[edge_id] = 2;
                 result.push(edge_id);
                 stack.pop();
@@ -4678,8 +4807,9 @@ fn evaluate_edge(
             newest_input: 0,
         });
     }
-    let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
-    let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
+    let dependency_spec = &context.discovered.specs[edge_id];
+    let generator = dependency_spec.generator;
+    let restat = dependency_spec.restat;
     let use_restat = restat
         && edge
             .outputs()
@@ -4698,8 +4828,8 @@ fn evaluate_edge(
             reason = format!("input {input} is newer than the oldest output");
         }
     }
-    for input in &context.discovered.inputs[edge_id] {
-        if !output_map.contains_key(input.as_str()) && stat_cache.checked_get(input)?.is_none() {
+    for input in context.discovered.inputs(edge_id) {
+        if !output_map.contains_key(input) && stat_cache.checked_get(input)?.is_none() {
             if !dirty {
                 dirty = true;
                 reason = format!("discovered input '{input}' is missing");
@@ -4708,8 +4838,8 @@ fn evaluate_edge(
         }
         let mtime = virtual_mtime(manifest, input, output_map, &mut HashSet::new(), stat_cache)?;
         newest_input = newest_input.max(mtime);
-        let producer_is_dirty = output_map.get(input.as_str()).is_some_and(|producer| {
-            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input.as_str())
+        let producer_is_dirty = output_map.get(input).is_some_and(|producer| {
+            context.ran[*producer] && !context.restat_cleaned_outputs.contains(input)
         });
         if producer_is_dirty || mtime == u128::MAX {
             dirty = true;
@@ -5217,10 +5347,7 @@ fn critical_path_weights(
     for &edge_id in closure.iter().rev() {
         let edge = &manifest.edges[edge_id];
         let downstream = weights[edge_id];
-        for input in edge
-            .inputs()
-            .chain(discovered.inputs[edge_id].iter().map(String::as_str))
-        {
+        for input in edge.inputs().chain(discovered.inputs(edge_id)) {
             let Some(&producer) = outputs.get(input) else {
                 continue;
             };
@@ -6219,8 +6346,16 @@ mod tests {
             let targets = select_targets(&manifest, &[], &outputs, &discovered.log).unwrap();
             let closure =
                 dependency_closure(&manifest, &targets, &outputs, &discovered, false).unwrap();
-            let cache = StatCache::preload(&manifest, &closure, &outputs, &discovered, true, false)
-                .unwrap();
+            let cache = StatCache::preload(
+                &manifest,
+                &closure,
+                &outputs,
+                &discovered,
+                None,
+                true,
+                false,
+            )
+            .unwrap();
             assert_eq!(
                 initially_dirty_edges(
                     &manifest,
@@ -6252,8 +6387,16 @@ mod tests {
         let targets = select_targets(&manifest, &[], &outputs, &discovered.log).unwrap();
         let closure =
             dependency_closure(&manifest, &targets, &outputs, &discovered, false).unwrap();
-        let cache =
-            StatCache::preload(&manifest, &closure, &outputs, &discovered, true, false).unwrap();
+        let cache = StatCache::preload(
+            &manifest,
+            &closure,
+            &outputs,
+            &discovered,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             initially_dirty_edges(
                 &manifest,
@@ -6691,7 +6834,7 @@ mod tests {
         let discovered = DiscoveredDeps::load(&manifest);
         std::env::set_current_dir(old).unwrap();
 
-        assert_eq!(discovered.inputs[0], ["header.h"]);
+        assert_eq!(discovered.inputs(0).collect::<Vec<_>>(), ["header.h"]);
         assert!(!discovered.missing[0]);
     }
 
@@ -6749,7 +6892,9 @@ mod tests {
         }
         let outputs = output_map(&manifest);
         let discovered = DiscoveredDeps {
-            inputs: vec![Vec::new(); count],
+            inputs: std::iter::repeat_with(DiscoveredInputs::default)
+                .take(count)
+                .collect(),
             missing: vec![false; count],
             errors: vec![None; count],
             log: DepsLog::default(),

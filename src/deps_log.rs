@@ -30,6 +30,10 @@ impl<'a> DepsEntry<'a> {
     pub fn input_count(self) -> usize {
         self.inputs.len()
     }
+
+    pub(crate) fn input_ids(self) -> &'a [u32] {
+        self.inputs
+    }
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +108,10 @@ impl DepsLog {
             nodes: &self.nodes,
             inputs: &entry.inputs,
         })
+    }
+
+    pub(crate) fn node(&self, id: u32) -> Option<&str> {
+        self.nodes.get(id as usize).map(String::as_str)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, DepsEntry<'_>)> {
