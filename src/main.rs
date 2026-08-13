@@ -118,6 +118,9 @@ fn ninja_compat_build_error(error: &str) -> Option<String> {
     if error.starts_with("build stopped: stat(") {
         return Some(format!("{error}."));
     }
+    if error.starts_with("build stopped: cannot make progress due to previous errors") {
+        return Some("build stopped: cannot make progress due to previous errors.".to_owned());
+    }
     if error.starts_with("build stopped: ") && error.contains(" subcommand(s) failed") {
         return Some("build stopped: subcommand failed.".to_owned());
     }
@@ -2209,29 +2212,24 @@ fn emit_compdb(
     expand_rsp: bool,
 ) -> Result<(), String> {
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let newline = if cfg!(windows) { "\r\n" } else { "\n" };
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-    writeln!(stdout, "[").map_err(|error| format!("writing compilation database: {error}"))?;
+    write!(stdout, "[{newline}")
+        .map_err(|error| format!("writing compilation database: {error}"))?;
     let mut first = true;
     for edge in edges {
         let command = compdb_command(manifest, edge, expand_rsp);
         let output = edge.outputs().next().unwrap_or("");
         for file in edge.inputs() {
             if !first {
-                writeln!(stdout, ",")
+                write!(stdout, ",{newline}")
                     .map_err(|error| format!("writing compilation database: {error}"))?;
             }
             first = false;
             write!(
                 stdout,
-                concat!(
-                    "  {{\n",
-                    "    \"directory\": \"{}\",\n",
-                    "    \"command\": \"{}\",\n",
-                    "    \"file\": \"{}\",\n",
-                    "    \"output\": \"{}\"\n",
-                    "  }}"
-                ),
+                "  {{{newline}    \"directory\": \"{}\",{newline}    \"command\": \"{}\",{newline}    \"file\": \"{}\",{newline}    \"output\": \"{}\"{newline}  }}",
                 json_escape(&cwd.to_string_lossy()),
                 json_escape(&command),
                 json_escape(file),
@@ -2241,9 +2239,9 @@ fn emit_compdb(
         }
     }
     if first {
-        writeln!(stdout, "]")
+        write!(stdout, "]{newline}")
     } else {
-        writeln!(stdout, "\n]")
+        write!(stdout, "{newline}]{newline}")
     }
     .and_then(|()| stdout.flush())
     .map_err(|error| format!("writing compilation database: {error}"))
@@ -2264,9 +2262,9 @@ fn compdb_command(manifest: &Manifest, edge: &Edge, expand_rsp: bool) -> String 
     let content = render_binding(manifest, edge, "rspfile_content").replace('\n', " ");
     if index > 0 && command.as_bytes()[index - 1] == b'@' {
         command.replace_range(index - 1..index + rspfile.len(), &content);
-    } else if index >= 3 && &command[index - 3..index] == "-f " {
+    } else if index >= 3 && command.find("-f ") == Some(index - 3) {
         command.replace_range(index - 3..index + rspfile.len(), &content);
-    } else if index >= 14 && &command[index - 14..index] == "--option-file=" {
+    } else if index >= 14 && command.find("--option-file=") == Some(index - 14) {
         command.replace_range(index - 14..index + rspfile.len(), &content);
     }
     command
@@ -2584,6 +2582,8 @@ fn json_escape(value: &str) -> String {
         match character {
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
+            '\u{0008}' => result.push_str("\\b"),
+            '\u{000c}' => result.push_str("\\f"),
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),

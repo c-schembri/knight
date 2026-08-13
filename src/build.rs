@@ -2411,6 +2411,13 @@ fn run_build_prepared<'a>(
     }
 
     if !failures.is_empty() {
+        if !stop_starting {
+            return Err(format!(
+                "build stopped: cannot make progress due to previous errors\n{} subcommand(s) failed\n{}",
+                failures.len(),
+                failures.join("\n")
+            ));
+        }
         return Err(format!(
             "build stopped: {} subcommand(s) failed\n{}",
             failures.len(),

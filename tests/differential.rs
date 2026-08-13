@@ -2232,6 +2232,57 @@ fn commands_and_compdb_options_match_ninja() {
 }
 
 #[test]
+fn compdb_uses_ninjas_exact_json_control_escapes() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "rule cc\n  command = echo back\u{0008}space form\u{000c}feed\nbuild out: cc in\n",
+    )
+    .unwrap();
+    let arguments = ["-t", "compdb"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(actual.stdout.windows(2).any(|bytes| bytes == b"\\b"));
+    assert!(actual.stdout.windows(2).any(|bytes| bytes == b"\\f"));
+}
+
+#[test]
+fn compdb_rsp_expansion_preserves_ninjas_first_marker_semantics() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule cc\n",
+            "  command = echo -f unrelated && cc -f $rspfile\n",
+            "  rspfile = args.rsp\n",
+            "  rspfile_content = expanded content\n",
+            "build out: cc in\n",
+        ),
+    )
+    .unwrap();
+    let arguments = ["-t", "compdb", "-x"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cc -f args.rsp"));
+}
+
+#[test]
 fn nested_include_paths_resolve_from_the_working_directory_like_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
@@ -3707,6 +3758,39 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     )
     .unwrap();
     let arguments = ["-C", "project", "failed"];
+    let expected = run(Path::new(&ninja), temp.path(), &arguments);
+    let actual = run(&alias, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&expected.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .lines()
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&expected.stderr)
+            .lines()
+            .collect::<Vec<_>>()
+    );
+
+    let (fail_seven, fail_nine) = if cfg!(windows) {
+        ("cmd /d /c exit 7", "cmd /d /c exit 9")
+    } else {
+        ("sh -c 'exit 7'", "sh -c 'exit 9'")
+    };
+    fs::write(
+        temp.path().join("project/build.ninja"),
+        format!(
+            "rule f7\n  command = {fail_seven}\nrule f9\n  command = {fail_nine}\nbuild a: f7\nbuild b: f9\nbuild all: phony a b\n"
+        ),
+    )
+    .unwrap();
+    let arguments = ["-C", "project", "-j1", "-k0", "all"];
     let expected = run(Path::new(&ninja), temp.path(), &arguments);
     let actual = run(&alias, temp.path(), &arguments);
     assert_eq!(actual.status.code(), expected.status.code());

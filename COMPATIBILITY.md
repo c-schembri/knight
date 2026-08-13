@@ -116,10 +116,12 @@ This is an evidence ledger, not a claim of full compatibility.
   order-only inputs in the current graph.
   Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
   phony-edge filtering behavior. Compilation databases use Ninja's exact
-  pretty-printed JSON shape, and `compdb-targets` rejects input-only nodes as
-  non-targets instead of silently returning an empty database. Edges used only
-  for validation are excluded, while an output used as both a validation and a
-  regular input remains present. `restat`
+  pretty-printed JSON shape, platform newline bytes, and JSON control-character
+  escapes. Response-file expansion also preserves Ninja's legacy first-marker
+  behavior. `compdb-targets` rejects input-only nodes as non-targets instead of
+  silently returning an empty database. Edges used only for validation are
+  excluded, while an output used as both a validation and a regular input
+  remains present. `restat`
   compacts logs, handles missing and selected outputs, and rewrites metadata
   even under `-n` like Ninja.
   `missingdeps` scans the default-target closure when no targets are supplied,
@@ -186,6 +188,8 @@ This is an evidence ledger, not a claim of full compatibility.
   once, while an executable named `ninja` reproduces Ninja's legacy duplicate
   dyndep explanation, fatal unknown-tool/numeric-option diagnostics, and
   stdout-routed build-stop summaries for drop-in output parity.
+  Multiple failed commands distinguish Ninja's `subcommands failed` and
+  `cannot make progress due to previous errors` summaries.
 
 ## Not yet complete
 
@@ -197,8 +201,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 2 CLI, and 96 differential tests; Linux-under-WSL passes 62 library,
-  2 CLI, and 68 differential tests. Release builds, clippy, a Windows-hosted
+  library, 2 CLI, and 98 differential tests; Linux-under-WSL passes 62 library,
+  2 CLI, and 70 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
