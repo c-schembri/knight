@@ -361,12 +361,12 @@ This is an evidence ledger, not a claim of full compatibility.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
   library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
   6 CLI, and 131 differential tests. Native CI passes on Windows, Ubuntu,
-  macOS, and FreeBSD; the macOS and FreeBSD gates each run 90 library, 6 CLI,
-  and 128 differential tests. Release builds and clippy pass on all four.
+  macOS, FreeBSD, and OpenBSD; the three BSD/macOS gates each run 90 library,
+  6 CLI, and 128 differential tests. Release builds and clippy pass on all
+  five.
   Cross-target CI checks also pass for FreeBSD, NetBSD, illumos, Solaris, and
-  MinGW, but NetBSD, illumos, Solaris, and Ninja's lower-tier OpenBSD,
-  DragonFly BSD, and AIX targets do not yet have native runtime differentials
-  here.
+  MinGW, but NetBSD, illumos, Solaris, MinGW, DragonFly BSD, and AIX do not yet
+  have native runtime differentials here.
   All 478 executable cases at pinned Ninja commit `b51a1e37`, all 20 tool
   entry points, and all 15 top-level option families are mapped on the audited
   Windows and Linux platforms. Ninja's own POSIX `misc/output_test.py` passes
@@ -386,6 +386,8 @@ This is an evidence ledger, not a claim of full compatibility.
   are covered by the native macOS argument matrix. Windows reparse-point stats
   resolve and timestamp their targets like Ninja instead of reading the link's
   own timestamp.
+  OpenBSD's native matrix additionally covers its distinct `getopt` wording,
+  portable nanosecond timestamps, and more than 1,024 simultaneous processes.
   The complete upstream MAKEFLAGS parser corpus also maps byte-for-byte,
   including invalid/unsupported-mode warnings, mode announcement,
   initialization errors, quiet/dry-run policy, and MAKEFLAGS precedence. Native
@@ -396,5 +398,6 @@ This is an evidence ledger, not a claim of full compatibility.
   requested order of magnitude; see `BENCHMARKS.md`.
 
 Case-level closure is tracked in `UPSTREAM_TESTS.md`. The pinned executable and
-named CLI/tool surfaces are closed on Windows and Linux; macOS and other Unix
-runtime validation remain outstanding.
+named CLI/tool surfaces are closed on Windows and Linux, with the full native
+differential matrix also passing on macOS, FreeBSD, and OpenBSD. Other Unix
+runtime validation remains outstanding.
