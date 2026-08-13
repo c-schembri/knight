@@ -169,13 +169,13 @@ pub fn install_interrupt_handler() -> Result<(), String> {
 #[cfg(unix)]
 fn terminate_active_process_groups() -> bool {
     let mut interrupted = false;
-    if let Some(groups) = ACTIVE_PROCESS_GROUPS.get()
-        && let Ok(groups) = groups.try_lock()
-    {
-        for group in groups.iter() {
-            // SAFETY: each id is recorded immediately after spawning a child
-            // whose process group id equals its process id.
-            interrupted |= unsafe { libc::kill(-(*group as i32), libc::SIGTERM) } == 0;
+    if let Some(groups) = ACTIVE_PROCESS_GROUPS.get() {
+        if let Ok(groups) = groups.try_lock() {
+            for group in groups.iter() {
+                // SAFETY: each id is recorded immediately after spawning a child
+                // whose process group id equals its process id.
+                interrupted |= unsafe { libc::kill(-(*group as i32), libc::SIGTERM) } == 0;
+            }
         }
     }
     interrupted
@@ -696,10 +696,10 @@ fn directory_mtimes(directory: &Path) -> DirectoryMtimes {
         Err(_) => return DirectoryMtimes::Unavailable,
     };
     for entry in directory.flatten() {
-        if let Ok(metadata) = entry.metadata()
-            && let Some(mtime) = metadata_modified(&metadata)
-        {
-            entries.insert(directory_entry_key(&entry.file_name()), mtime);
+        if let Ok(metadata) = entry.metadata() {
+            if let Some(mtime) = metadata_modified(&metadata) {
+                entries.insert(directory_entry_key(&entry.file_name()), mtime);
+            }
         }
     }
     DirectoryMtimes::Entries(entries)
@@ -885,15 +885,14 @@ impl<'a> BuildLog<'a> {
             let _ = fs::remove_file(&log.path);
             return Ok(log);
         }
-        if !contents.is_empty()
-            && !contents.ends_with('\n')
-            && let Some(last_newline) = contents.rfind('\n')
-        {
-            contents.truncate(last_newline + 1);
-            let _ = OpenOptions::new()
-                .write(true)
-                .open(&log.path)
-                .and_then(|file| file.set_len(contents.len() as u64));
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            if let Some(last_newline) = contents.rfind('\n') {
+                contents.truncate(last_newline + 1);
+                let _ = OpenOptions::new()
+                    .write(true)
+                    .open(&log.path)
+                    .and_then(|file| file.set_len(contents.len() as u64));
+            }
         }
         let mut total_entries = 0usize;
         let mut dead_outputs = HashSet::new();
@@ -1059,10 +1058,10 @@ fn declared_dirty_edges<'a>(
         }
 
         for input in edge.explicit_inputs.iter().chain(&edge.implicit_inputs) {
-            if let Some(producer) = outputs.get(input.as_str()).copied()
-                && visit(producer, manifest, outputs, build_log, state, result)
-            {
-                dirty = true;
+            if let Some(producer) = outputs.get(input.as_str()).copied() {
+                if visit(producer, manifest, outputs, build_log, state, result) {
+                    dirty = true;
+                }
             }
             let Some(mtime) = path_mtime(input, manifest, outputs, &mut HashSet::new()) else {
                 dirty = true;
@@ -1475,18 +1474,18 @@ fn dyndep_prebuild_targets(
             .inputs()
             .chain(discovered.inputs[consumer].iter().map(String::as_str))
         {
-            if let Some(producer) = outputs.get(input).copied()
-                && in_closure[producer]
-            {
-                dependents[producer].push(consumer);
+            if let Some(producer) = outputs.get(input).copied() {
+                if in_closure[producer] {
+                    dependents[producer].push(consumer);
+                }
             }
         }
         for validation in &edge.validations {
-            if let Some(validation_edge) = outputs.get(validation.as_str()).copied()
-                && in_closure[validation_edge]
-            {
-                // Selecting the consumer would also select its validation.
-                dependents[validation_edge].push(consumer);
+            if let Some(validation_edge) = outputs.get(validation.as_str()).copied() {
+                if in_closure[validation_edge] {
+                    // Selecting the consumer would also select its validation.
+                    dependents[validation_edge].push(consumer);
+                }
             }
         }
     }
@@ -1520,15 +1519,17 @@ fn dyndep_prebuild_targets(
     let mut selected = targets.iter().cloned().collect::<HashSet<_>>();
     for &edge_id in closure {
         let edge = &manifest.edges[edge_id];
-        if !unsafe_edge[edge_id]
+        let safe_to_prebuild = !unsafe_edge[edge_id]
             && edge.rule != "phony"
             && !edge
                 .inputs()
-                .any(|input| !outputs.contains_key(input) && !Path::new(input).exists())
-            && let Some(output) = edge.outputs().next()
-            && selected.insert(output.to_owned())
-        {
-            targets.push(output.to_owned());
+                .any(|input| !outputs.contains_key(input) && !Path::new(input).exists());
+        if safe_to_prebuild {
+            if let Some(output) = edge.outputs().next() {
+                if selected.insert(output.to_owned()) {
+                    targets.push(output.to_owned());
+                }
+            }
         }
     }
     targets
@@ -1989,20 +1990,19 @@ fn run_build_prepared<'a>(
                 .inputs()
                 .chain(discovered.inputs[edge_id].iter().map(String::as_str))
             {
-                if let Some(&producer) = output_map.get(input)
-                    && in_closure[producer]
-                    && seen.insert(producer)
-                {
-                    if producer == edge_id
-                        && tolerates_phony_self_reference(
-                            &manifest.edges[edge_id],
-                            options.phony_cycle_error,
-                        )
-                    {
-                        continue;
+                if let Some(&producer) = output_map.get(input) {
+                    if in_closure[producer] && seen.insert(producer) {
+                        if producer == edge_id
+                            && tolerates_phony_self_reference(
+                                &manifest.edges[edge_id],
+                                options.phony_cycle_error,
+                            )
+                        {
+                            continue;
+                        }
+                        pending[edge_id] += 1;
+                        dependents.add(producer, edge_id);
                     }
-                    pending[edge_id] += 1;
-                    dependents.add(producer, edge_id);
                 }
             }
         }
@@ -2230,13 +2230,15 @@ fn run_build_prepared<'a>(
                 let edge = &manifest.edges[edge_id];
                 if edge.rule != "phony"
                     && !evaluate_unescaped_binding(manifest, edge, "dyndep").is_empty()
-                    && let Some(output) = edge
+                {
+                    if let Some(output) = edge
                         .outputs()
                         .find(|output| stat_cache.get(output).is_none())
-                {
-                    // Ninja currently reports this once during dyndep loading
-                    // and again during the normal dirty-edge scan.
-                    eprintln!("ninja explain: output {output} doesn't exist");
+                    {
+                        // Ninja currently reports this once during dyndep loading
+                        // and again during the normal dirty-edge scan.
+                        eprintln!("ninja explain: output {output} doesn't exist");
+                    }
                 }
             }
         }
@@ -2326,24 +2328,24 @@ fn run_build_prepared<'a>(
         let mut launch_capacity = run_capacity(running, options);
         let mut ready_examined = 0usize;
         while ready_examined < ready_count {
-            if !newly_ready.is_empty()
-                && let Some(dirty) = initially_dirty.as_deref()
-            {
-                reserve_new_pool_edges(
-                    manifest,
-                    &mut newly_ready,
-                    &mut pool_reserved,
-                    &mut pool_usage,
-                    dirty,
-                );
-                admit_pool_edges(
-                    manifest,
-                    &mut ready,
-                    &mut pool_waiting,
-                    &mut pool_reserved,
-                    &mut pool_usage,
-                    dirty,
-                );
+            if !newly_ready.is_empty() {
+                if let Some(dirty) = initially_dirty.as_deref() {
+                    reserve_new_pool_edges(
+                        manifest,
+                        &mut newly_ready,
+                        &mut pool_reserved,
+                        &mut pool_usage,
+                        dirty,
+                    );
+                    admit_pool_edges(
+                        manifest,
+                        &mut ready,
+                        &mut pool_waiting,
+                        &mut pool_reserved,
+                        &mut pool_usage,
+                        dirty,
+                    );
+                }
             }
             let Some((_, Reverse(edge_id))) = ready.pop() else {
                 break;
@@ -2492,28 +2494,28 @@ fn run_build_prepared<'a>(
                         .count();
                 initially_dirty = Some(dirty);
             }
-            if let Some((pool, _)) = limited_pool(manifest, edge)
-                && !pool_reserved[edge_id]
-            {
-                pool_waiting
-                    .entry(pool)
-                    .or_default()
-                    .push((critical_path[edge_id], Reverse(edge_id)));
-                admit_pool_edges(
-                    manifest,
-                    &mut ready,
-                    &mut pool_waiting,
-                    &mut pool_reserved,
-                    &mut pool_usage,
-                    initially_dirty
-                        .as_deref()
-                        .expect("dirty plan initialized before pool admission"),
-                );
-                if !options.dry_run && pool_reserved[edge_id] {
-                    ready_count += 1;
+            if let Some((pool, _)) = limited_pool(manifest, edge) {
+                if !pool_reserved[edge_id] {
+                    pool_waiting
+                        .entry(pool)
+                        .or_default()
+                        .push((critical_path[edge_id], Reverse(edge_id)));
+                    admit_pool_edges(
+                        manifest,
+                        &mut ready,
+                        &mut pool_waiting,
+                        &mut pool_reserved,
+                        &mut pool_usage,
+                        initially_dirty
+                            .as_deref()
+                            .expect("dirty plan initialized before pool admission"),
+                    );
+                    if !options.dry_run && pool_reserved[edge_id] {
+                        ready_count += 1;
+                    }
+                    made_progress = true;
+                    continue;
                 }
-                made_progress = true;
-                continue;
             }
             if options.dry_run {
                 commands_started += 1;
@@ -2560,12 +2562,11 @@ fn run_build_prepared<'a>(
                         }
                     }
                     .map(|token| JobSlot::Explicit { _token: token });
-                    if token.is_none()
-                        && !job_token_requested
-                        && let Some(helper) = &jobserver_helper
-                    {
-                        helper.request_token();
-                        job_token_requested = true;
+                    if token.is_none() && !job_token_requested {
+                        if let Some(helper) = &jobserver_helper {
+                            helper.request_token();
+                            job_token_requested = true;
+                        }
                     }
                     token
                 };
@@ -2760,10 +2761,10 @@ fn run_build_prepared<'a>(
         };
         running -= 1;
         let edge = &manifest.edges[completion.edge];
-        if let Some(slot) = job_slots.remove(&completion.edge)
-            && matches!(slot, JobSlot::Implicit)
-        {
-            implicit_job_slot = true;
+        if let Some(slot) = job_slots.remove(&completion.edge) {
+            if matches!(slot, JobSlot::Implicit) {
+                implicit_job_slot = true;
+            }
         }
         let pool = edge_pool(manifest, edge);
         let was_console = pool.as_deref() == Some("console");
@@ -2865,10 +2866,10 @@ fn run_build_prepared<'a>(
         if succeeded {
             printer.write_command_output(&output.stdout, raw_command_output)?;
             printer.write_command_output(&output.stderr, raw_command_output)?;
-            if !options.keep_rsp
-                && let Some(rspfile) = &completion.rspfile
-            {
-                let _ = fs::remove_file(rspfile);
+            if !options.keep_rsp {
+                if let Some(rspfile) = &completion.rspfile {
+                    let _ = fs::remove_file(rspfile);
+                }
             }
             let restat = truthy(&evaluate_binding(manifest, edge, "restat"));
             let generator = truthy(&evaluate_binding(manifest, edge, "generator"));
@@ -2961,10 +2962,10 @@ fn run_build_prepared<'a>(
             printer.print_on_new_line(format!("{}\n", completion.command).as_bytes())?;
             printer.write_command_output(&output.stdout, raw_command_output)?;
             printer.write_command_output(&output.stderr, raw_command_output)?;
-            if let Err(error) = &dependency_result
-                && output.status.success()
-            {
-                printer.print_on_new_line(format!("{error}\n").as_bytes())?;
+            if let Err(error) = &dependency_result {
+                if output.status.success() {
+                    printer.print_on_new_line(format!("{error}\n").as_bytes())?;
+                }
             }
             let failure = if output.status.success() {
                 dependency_result.unwrap_err()
@@ -3776,12 +3777,12 @@ fn select_targets(
                     if outputs.contains_key(path.as_str()) {
                         return Ok(path);
                     }
-                    if let Some(builddir) = manifest.variables.get("builddir")
-                        && !builddir.is_empty()
-                    {
-                        let candidate = canonicalize_path(&format!("{builddir}/{path}"));
-                        if outputs.contains_key(candidate.as_str()) {
-                            return Ok(candidate);
+                    if let Some(builddir) = manifest.variables.get("builddir") {
+                        if !builddir.is_empty() {
+                            let candidate = canonicalize_path(&format!("{builddir}/{path}"));
+                            if outputs.contains_key(candidate.as_str()) {
+                                return Ok(candidate);
+                            }
                         }
                     }
                 }
@@ -3858,15 +3859,15 @@ pub fn resolve_target_path(
         })
     };
     let mut is_known = known(&path);
-    if use_builddir
-        && !is_known
-        && let Some(builddir) = manifest.variables.get("builddir")
-        && !builddir.is_empty()
-    {
-        let candidate = canonicalize_path(&format!("{builddir}/{path}"));
-        if known(&candidate) {
-            path = candidate;
-            is_known = true;
+    if use_builddir && !is_known {
+        if let Some(builddir) = manifest.variables.get("builddir") {
+            if !builddir.is_empty() {
+                let candidate = canonicalize_path(&format!("{builddir}/{path}"));
+                if known(&candidate) {
+                    path = candidate;
+                    is_known = true;
+                }
+            }
         }
     }
     if !is_known {
@@ -4400,9 +4401,11 @@ fn evaluate_edge(
         dirty = true;
         reason = "command line changed".to_owned();
     }
-    if !dirty && let Some(output) = context.build_log.recorded_mtime_dirty(edge, newest_input) {
-        dirty = true;
-        reason = format!("recorded mtime of '{output}' is older than an input");
+    if !dirty {
+        if let Some(output) = context.build_log.recorded_mtime_dirty(edge, newest_input) {
+            dirty = true;
+            reason = format!("recorded mtime of '{output}' is older than an input");
+        }
     }
     if !dirty && context.discovered.missing[edge_id] && !generator {
         dirty = true;
@@ -4844,10 +4847,10 @@ fn release_pool_edge(
         return;
     }
     reserved[edge_id] = false;
-    if let Some((pool, _)) = limited_pool(manifest, &manifest.edges[edge_id])
-        && let Some(count) = usage.get_mut(&pool)
-    {
-        *count = count.saturating_sub(1);
+    if let Some((pool, _)) = limited_pool(manifest, &manifest.edges[edge_id]) {
+        if let Some(count) = usage.get_mut(&pool) {
+            *count = count.saturating_sub(1);
+        }
     }
     // Ninja admits already-delayed pool work before finishing this edge can
     // make newer dependents ready. Preserve that temporal reservation order.
@@ -6780,7 +6783,7 @@ mod tests {
         let mut exactly_max_absolute = current.to_string_lossy().into_owned();
         exactly_max_absolute.push_str(r"\a\");
         while exactly_max_absolute.len() < 260 {
-            if exactly_max_absolute.len() > 1 && exactly_max_absolute.len().is_multiple_of(10) {
+            if exactly_max_absolute.len() > 1 && exactly_max_absolute.len() % 10 == 0 {
                 exactly_max_absolute.push('\\');
             } else {
                 exactly_max_absolute.push('a');

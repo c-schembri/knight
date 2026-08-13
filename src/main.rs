@@ -171,11 +171,11 @@ fn main() -> ExitCode {
                 }
                 return ExitCode::from(last_build_exit_code().unwrap_or(130));
             }
-            if program_name() == "ninja"
-                && let Some(message) = ninja_compat_build_error(&error)
-            {
-                println!("ninja: {message}");
-                return ExitCode::from(last_build_exit_code().unwrap_or(1));
+            if program_name() == "ninja" {
+                if let Some(message) = ninja_compat_build_error(&error) {
+                    println!("ninja: {message}");
+                    return ExitCode::from(last_build_exit_code().unwrap_or(1));
+                }
             }
             let error = if error.starts_with("build stopped: ") {
                 error.lines().next().unwrap_or(error.as_str())
@@ -824,8 +824,10 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
                 && "--status".starts_with(argument.as_str())
                 && argument.len() > 2;
             expanded.push(argument);
-            if takes_argument && let Some(value) = arguments.next() {
-                expanded.push(value);
+            if takes_argument {
+                if let Some(value) = arguments.next() {
+                    expanded.push(value);
+                }
             }
             continue;
         }
@@ -836,8 +838,10 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
                 "-C" | "-f" | "-j" | "-k" | "-l" | "-d" | "-t" | "-w"
             );
             expanded.push(argument);
-            if takes_argument && let Some(value) = arguments.next() {
-                expanded.push(value);
+            if takes_argument {
+                if let Some(value) = arguments.next() {
+                    expanded.push(value);
+                }
             }
             if tool {
                 expanded.extend(arguments);
@@ -855,18 +859,18 @@ fn expand_short_option_clusters(args: Vec<String>) -> Vec<String> {
                     expanded.push(cluster[offset..].to_owned());
                 }
                 if option == 't' {
-                    if characters.peek().is_none()
-                        && let Some(name) = arguments.next()
-                    {
-                        expanded.push(name);
+                    if characters.peek().is_none() {
+                        if let Some(name) = arguments.next() {
+                            expanded.push(name);
+                        }
                     }
                     expanded.extend(arguments);
                     return expanded;
                 }
-                if characters.peek().is_none()
-                    && let Some(value) = arguments.next()
-                {
-                    expanded.push(value);
+                if characters.peek().is_none() {
+                    if let Some(value) = arguments.next() {
+                        expanded.push(value);
+                    }
                 }
                 break;
             }
@@ -1452,51 +1456,53 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
         } else {
             args[index].clone()
         };
-        if parse_options && let Some((_, value)) = args[index].split_once('=') {
-            let option = argument
-                .split_once('=')
-                .map_or(argument.as_str(), |(name, _)| name);
-            if option == "--help" {
-                #[cfg(windows)]
-                {
-                    argument = option.to_owned();
-                }
-                #[cfg(not(windows))]
-                {
-                    #[cfg(any(
-                        target_os = "dragonfly",
-                        target_os = "freebsd",
-                        target_os = "macos"
-                    ))]
-                    eprintln!(
-                        "{}: option `--help' doesn't allow an argument",
-                        program_name()
-                    );
-                    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
-                    eprintln!(
-                        "{}: option doesn't take an argument -- help",
-                        program_name()
-                    );
-                    #[cfg(not(any(
-                        target_os = "dragonfly",
-                        target_os = "freebsd",
-                        target_os = "macos",
-                        target_os = "netbsd",
-                        target_os = "openbsd"
-                    )))]
-                    eprintln!("restat: option '--help' doesn't allow an argument");
-                    return tool_restat_usage();
-                }
-            } else if option == "--builddir" && value.is_empty() {
-                #[cfg(windows)]
-                {
-                    eprintln!("restat: argument required for option `--builddir'");
-                    return tool_restat_usage();
+        if parse_options {
+            if let Some((_, value)) = args[index].split_once('=') {
+                let option = argument
+                    .split_once('=')
+                    .map_or(argument.as_str(), |(name, _)| name);
+                if option == "--help" {
+                    #[cfg(windows)]
+                    {
+                        argument = option.to_owned();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        #[cfg(any(
+                            target_os = "dragonfly",
+                            target_os = "freebsd",
+                            target_os = "macos"
+                        ))]
+                        eprintln!(
+                            "{}: option `--help' doesn't allow an argument",
+                            program_name()
+                        );
+                        #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
+                        eprintln!(
+                            "{}: option doesn't take an argument -- help",
+                            program_name()
+                        );
+                        #[cfg(not(any(
+                            target_os = "dragonfly",
+                            target_os = "freebsd",
+                            target_os = "macos",
+                            target_os = "netbsd",
+                            target_os = "openbsd"
+                        )))]
+                        eprintln!("restat: option '--help' doesn't allow an argument");
+                        return tool_restat_usage();
+                    }
+                } else if option == "--builddir" && value.is_empty() {
+                    #[cfg(windows)]
+                    {
+                        eprintln!("restat: argument required for option `--builddir'");
+                        return tool_restat_usage();
+                    }
                 }
             }
         }
-        if parse_options && let Some(value) = argument.strip_prefix("--builddir=") {
-            builddir = Some(value.to_owned());
+        if parse_options && argument.starts_with("--builddir=") {
+            builddir = argument.strip_prefix("--builddir=").map(str::to_owned);
         } else if parse_options && argument == "--builddir" {
             index += 1;
             let Some(value) = args.get(index) else {
@@ -2275,54 +2281,56 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
                 argument.remove(0);
             }
         }
-        if parse_options && let Some((_, value)) = args[index].split_once('=') {
-            let option = argument
-                .split_once('=')
-                .map_or(argument.as_str(), |(name, _)| name);
-            let no_argument = matches!(
-                option,
-                "--help" | "--print0" | "--no-shell-escape" | "--dependency-order"
-            );
-            if no_argument {
-                #[cfg(windows)]
-                {
-                    argument = option.to_owned();
-                }
-                #[cfg(not(windows))]
-                {
-                    #[cfg(any(
-                        target_os = "dragonfly",
-                        target_os = "freebsd",
-                        target_os = "macos"
-                    ))]
-                    eprintln!(
-                        "{}: option `{option}' doesn't allow an argument",
-                        program_name()
-                    );
-                    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
-                    eprintln!(
-                        "{}: option doesn't take an argument -- {}",
-                        program_name(),
-                        option.trim_start_matches('-')
-                    );
-                    #[cfg(not(any(
-                        target_os = "dragonfly",
-                        target_os = "freebsd",
-                        target_os = "macos",
-                        target_os = "netbsd",
-                        target_os = "openbsd"
-                    )))]
-                    eprintln!(
-                        "{}: option '{option}' doesn't allow an argument",
-                        if grouped { "multi-inputs" } else { "inputs" }
-                    );
-                    return tool_inputs_usage(grouped);
-                }
-            } else if grouped && option == "--delimiter" && value.is_empty() {
-                #[cfg(windows)]
-                {
-                    eprintln!("multi-inputs: argument required for option `--delimiter'");
-                    return tool_inputs_usage(grouped);
+        if parse_options {
+            if let Some((_, value)) = args[index].split_once('=') {
+                let option = argument
+                    .split_once('=')
+                    .map_or(argument.as_str(), |(name, _)| name);
+                let no_argument = matches!(
+                    option,
+                    "--help" | "--print0" | "--no-shell-escape" | "--dependency-order"
+                );
+                if no_argument {
+                    #[cfg(windows)]
+                    {
+                        argument = option.to_owned();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        #[cfg(any(
+                            target_os = "dragonfly",
+                            target_os = "freebsd",
+                            target_os = "macos"
+                        ))]
+                        eprintln!(
+                            "{}: option `{option}' doesn't allow an argument",
+                            program_name()
+                        );
+                        #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
+                        eprintln!(
+                            "{}: option doesn't take an argument -- {}",
+                            program_name(),
+                            option.trim_start_matches('-')
+                        );
+                        #[cfg(not(any(
+                            target_os = "dragonfly",
+                            target_os = "freebsd",
+                            target_os = "macos",
+                            target_os = "netbsd",
+                            target_os = "openbsd"
+                        )))]
+                        eprintln!(
+                            "{}: option '{option}' doesn't allow an argument",
+                            if grouped { "multi-inputs" } else { "inputs" }
+                        );
+                        return tool_inputs_usage(grouped);
+                    }
+                } else if grouped && option == "--delimiter" && value.is_empty() {
+                    #[cfg(windows)]
+                    {
+                        eprintln!("multi-inputs: argument required for option `--delimiter'");
+                        return tool_inputs_usage(grouped);
+                    }
                 }
             }
         }
@@ -3031,12 +3039,13 @@ fn tool_rules(manifest: &Manifest, args: &[String]) -> Result<(), String> {
     names.dedup();
     for name in names {
         print!("{name}");
-        if descriptions
-            && let Some(description) = rules
+        if descriptions {
+            if let Some(description) = rules
                 .get(name)
                 .and_then(|rule| rule.bindings.get("description"))
-        {
-            print!(": {}", canonical_eval_string(description));
+            {
+                print!(": {}", canonical_eval_string(description));
+            }
         }
         println!();
     }
@@ -3104,12 +3113,13 @@ fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), Strin
         let mut discovered = HashSet::new();
         if render_binding(manifest, edge, "deps").is_empty() {
             let depfile = render_unescaped_binding(manifest, edge, "depfile");
-            if !depfile.is_empty()
-                && let Ok(contents) = fs::read_to_string(depfile)
-                && let Ok(parsed) = parse_depfile(&contents)
-            {
-                for input in parsed.inputs {
-                    discovered.insert(canonicalize_path(&input));
+            if !depfile.is_empty() {
+                if let Ok(contents) = fs::read_to_string(depfile) {
+                    if let Ok(parsed) = parse_depfile(&contents) {
+                        for input in parsed.inputs {
+                            discovered.insert(canonicalize_path(&input));
+                        }
+                    }
                 }
             }
         } else {

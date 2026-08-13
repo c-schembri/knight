@@ -2,6 +2,7 @@
 name = "knight-build"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A fast, diagnostic-first drop-in replacement for Ninja"
 license = "Apache-2.0"
 repository = "https://github.com/c-schembri/knight"

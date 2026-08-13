@@ -7824,10 +7824,10 @@ fn upstream_build_multi_output_dependency_log_corpus_matches_ninja() {
             .split('\n')
             .map(|line| {
                 let mut line = line.to_owned();
-                if let Some(marker) = line.find("deps mtime ")
-                    && let Some(end) = line[marker..].find(" (")
-                {
-                    line.replace_range(marker + "deps mtime ".len()..marker + end, "<mtime>");
+                if let Some(marker) = line.find("deps mtime ") {
+                    if let Some(end) = line[marker..].find(" (") {
+                        line.replace_range(marker + "deps mtime ".len()..marker + end, "<mtime>");
+                    }
                 }
                 line
             })

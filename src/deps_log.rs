@@ -247,7 +247,7 @@ impl DepsLog {
     }
 
     fn parse_deps_record(&mut self, record: &[u8]) -> Result<(), ()> {
-        if record.len() < 12 || !record.len().is_multiple_of(4) {
+        if record.len() < 12 || record.len() % 4 != 0 {
             return Err(());
         }
         let output_id = read_u32(record, 0)? as usize;

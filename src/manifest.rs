@@ -547,18 +547,19 @@ fn finalize_parent(
                 let rule_scope = manifest
                     .lookup_rule_scope(edge.scope, &edge.rule)
                     .unwrap_or(edge.scope);
-                if manifest
+                let rule_is_cyclic = manifest
                     .cyclic_rules
                     .get(&rule_scope)
-                    .is_some_and(|rules| rules.contains(edge.rule.as_str()))
-                    && let Some(cycle) = binding_cycle(manifest, edge)
-                {
-                    return Err(Diagnostic::new(
-                        edge.source.as_path(),
-                        edge.line,
-                        1,
-                        format!("cycle in rule variables: {}", cycle.join(" -> ")),
-                    ));
+                    .is_some_and(|rules| rules.contains(edge.rule.as_str()));
+                if rule_is_cyclic {
+                    if let Some(cycle) = binding_cycle(manifest, edge) {
+                        return Err(Diagnostic::new(
+                            edge.source.as_path(),
+                            edge.line,
+                            1,
+                            format!("cycle in rule variables: {}", cycle.join(" -> ")),
+                        ));
+                    }
                 }
             }
             if manifest.has_pool_binding {
@@ -1193,15 +1194,17 @@ fn io_error_message(cause: &str) -> &str {
 }
 
 fn validate(manifest: &Manifest) -> Result<(), Diagnostic> {
-    if let Some(required) = manifest.variables.get("ninja_required_version")
-        && required_version_incompatible(required, SUPPORTED_SYNTAX_VERSION)
-    {
-        return Err(Diagnostic::new(
-            &manifest.root,
-            1,
-            1,
-            format!("manifest requires Ninja {required}; Knight supports syntax through 1.14.0"),
-        ));
+    if let Some(required) = manifest.variables.get("ninja_required_version") {
+        if required_version_incompatible(required, SUPPORTED_SYNTAX_VERSION) {
+            return Err(Diagnostic::new(
+                &manifest.root,
+                1,
+                1,
+                format!(
+                    "manifest requires Ninja {required}; Knight supports syntax through 1.14.0"
+                ),
+            ));
+        }
     }
     let mut outputs = HashMap::<&str, &Edge>::new();
     for edge in &manifest.edges {
