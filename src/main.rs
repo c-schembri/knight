@@ -1757,7 +1757,12 @@ fn tool_commands_usage() -> Result<(), String> {
 }
 
 fn print_invalid_tool_option(tool: &str, option: char) {
-    #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     let _ = tool;
     #[cfg(windows)]
     eprintln!("{tool}: invalid option -- `-{option}'");
@@ -1785,7 +1790,8 @@ fn print_unrecognized_tool_option(tool: &str, argument: &str) {
         target_os = "dragonfly",
         target_os = "freebsd",
         target_os = "macos",
-        target_os = "netbsd"
+        target_os = "netbsd",
+        target_os = "openbsd"
     ))]
     let _ = tool;
     #[cfg(windows)]
@@ -1821,7 +1827,8 @@ fn print_invalid_long_tool_option(tool: &str, option: char) {
         target_os = "dragonfly",
         target_os = "freebsd",
         target_os = "macos",
-        target_os = "netbsd"
+        target_os = "netbsd",
+        target_os = "openbsd"
     ))]
     let _ = tool;
     #[cfg(any(
@@ -2506,6 +2513,8 @@ fn print_required_tool_argument(tool: &str, option: &str, long: bool) {
         target_os = "openbsd"
     ))]
     let _ = tool;
+    #[cfg(target_os = "openbsd")]
+    let _ = long;
     #[cfg(windows)]
     if long {
         eprintln!("{tool}: argument required for option `{option}'");
