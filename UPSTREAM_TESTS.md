@@ -69,7 +69,8 @@ scope is therefore 478 cases, and all 478 are now explicitly mapped or pass
 unchanged. No executable suite in this pinned upstream inventory remains
 Partial.
 
-This closes the pinned test-corpus ledger, not every possible command-line or
-platform behavior. The next parity work audits tool-option and platform
-surfaces that the upstream corpus does not enumerate. New performance work does
-not substitute for that audit.
+This closes the pinned test-corpus ledger. Separate explicit inventories in
+`tests/differential.rs` map all 20 public/hidden tool entry points and all 15
+top-level option families on Windows and Linux. macOS and other Unix runtime
+validation remain outside the locally demonstrated surface. New performance
+work does not substitute for that platform validation.

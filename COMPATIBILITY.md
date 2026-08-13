@@ -216,6 +216,12 @@ This is an evidence ledger, not a claim of full compatibility.
   the selected parser. The bundled Windows `getopt` operand permutation quirk
   after multi-character clusters is reproduced on Windows, and
   `POSIXLY_CORRECT` disables operand permutation at both levels like upstream.
+  An explicit 20-entry inventory now traces every public and hidden Ninja tool,
+  including `list` and `urtle`, to behavioral evidence. A separate 15-entry
+  inventory covers every top-level option family. The remaining argument
+  matrix exercises operand handling, ignored operands, help/error exits, and
+  platform-only tools byte-for-byte; the POSIX `browse` evidence starts both
+  embedded HTTP servers and compares a live query page.
   `inputs` uses a single collector
   across all requested targets, matching Ninja's shared-input deduplication,
   and sorts rendered shell-escaped paths rather than their raw spellings.
@@ -352,20 +358,17 @@ This is an evidence ledger, not a claim of full compatibility.
 
 ## Not yet complete
 
-- Exact semantics for every tool option.
-- Behavior outside the pinned upstream executable test corpus, especially exact
-  semantics for every tool-option combination and platform-specific edge cases.
-  All 478 executable cases at pinned Ninja commit `b51a1e37` are now explicitly
-  mapped or pass unchanged, including all 53 manifest-parser, 55 graph, and 121
-  build cases. Ninja's own POSIX `misc/output_test.py` passes all 24 tests
-  unchanged, including smart-terminal progress, invocation identity,
-  `compdb-targets`, input ordering, absent-output scheduling, dyndep diagnostics,
-  child exit status 130, and signal-status cases.
 - Broader cross-platform runtime validation. The current Windows gates pass 95
-  library, 7 CLI, and 152 differential tests; Linux-under-WSL passes 90 library,
-  6 CLI, and 127 differential tests. Release builds, clippy, a Windows-hosted
+  library, 7 CLI, and 155 differential tests; Linux-under-WSL passes 90 library,
+  6 CLI, and 131 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
+  All 478 executable cases at pinned Ninja commit `b51a1e37`, all 20 tool
+  entry points, and all 15 top-level option families are mapped on the audited
+  Windows and Linux platforms. Ninja's own POSIX `misc/output_test.py` passes
+  all 24 tests unchanged, including smart-terminal progress, invocation
+  identity, `compdb-targets`, input ordering, absent-output scheduling, dyndep
+  diagnostics, child exit status 130, and signal-status cases.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
   restat-builddir (1/1) Python integration suites also pass unchanged under
   WSL. All five executable cases in Ninja's jobserver suite pass unchanged,
@@ -381,6 +384,6 @@ This is an evidence ledger, not a claim of full compatibility.
   no-op sweep, but trails two 1,000-edge medians and is nowhere near the
   requested order of magnitude; see `BENCHMARKS.md`.
 
-Case-level closure is tracked in `UPSTREAM_TESTS.md`. That pinned executable
-ledger is closed; the remaining parity audit covers behavior that is not
-enumerated by those upstream tests.
+Case-level closure is tracked in `UPSTREAM_TESTS.md`. The pinned executable and
+named CLI/tool surfaces are closed on Windows and Linux; macOS and other Unix
+runtime validation remain outstanding.

@@ -4952,6 +4952,93 @@ fn browse_help_matches_ninjas_embedded_tool() {
     assert_eq!(actual.stderr, expected.stderr);
 }
 
+#[cfg(unix)]
+#[test]
+fn browse_server_serves_query_pages_like_ninja() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let alias = temp.path().join("ninja");
+    install_ninja_alias(knight, &alias);
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule cc\n  command = cc $in -o $out\n",
+            "build out: cc source\n",
+            "default out\n",
+        ),
+    )
+    .unwrap();
+
+    let fetch = |executable: &Path| {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = Command::new(executable)
+            .current_dir(temp.path())
+            .args([
+                "-t",
+                "browse",
+                "--no-browser",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "out",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("browse server did not start: {error}");
+                }
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /?out HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let separator = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        response[separator + 4..].to_vec()
+    };
+
+    let expected = fetch(Path::new(&ninja));
+    let actual = fetch(&alias);
+    assert_eq!(actual, expected);
+    let page = String::from_utf8(actual).unwrap();
+    assert!(page.contains("<h1><tt>out</tt></h1>"));
+    assert!(page.contains("rule <tt>cc</tt>"));
+    assert!(page.contains("?source"));
+}
+
 #[test]
 fn tool_option_permutation_and_deps_target_errors_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
@@ -5051,6 +5138,255 @@ fn tool_option_permutation_and_deps_target_errors_match_ninja() {
             "{arguments:?}"
         );
     }
+}
+
+#[test]
+fn remaining_tool_argument_surface_matches_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cases = vec![
+        vec!["-t", "query", "out", "source"],
+        vec!["-t", "query", "missing"],
+        vec!["-t", "targets"],
+        vec!["-t", "targets", "depth"],
+        vec!["-t", "targets", "depth", "0", "ignored"],
+        vec!["-t", "targets", "rule", "cc", "ignored"],
+        vec!["-t", "targets", "all", "ignored"],
+        vec!["-t", "rules", "operand"],
+        vec!["-t", "rules", "--", "-d"],
+        vec!["-t", "commands"],
+        vec!["-t", "commands", "-s"],
+        vec!["-t", "inputs"],
+        vec!["-t", "multi-inputs"],
+        vec!["-t", "deps"],
+        vec!["-t", "missingdeps"],
+        vec!["-t", "recompact", "ignored"],
+        vec!["-t", "restat"],
+        vec!["-t", "cleandead", "ignored"],
+        vec!["-t", "urtle", "ignored"],
+        vec!["-t", "clean", "-g"],
+        vec!["-t", "clean", "-r"],
+    ];
+    #[cfg(windows)]
+    cases.extend([
+        vec!["-t", "wincodepage"],
+        vec!["-t", "wincodepage", "ignored"],
+    ]);
+
+    for arguments in cases {
+        let mut outputs = Vec::new();
+        for (implementation, executable) in [("ninja", ninja), ("knight", knight)] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                concat!(
+                    "rule cc\n",
+                    "  command = echo compile $in -o $out\n",
+                    "  description = compile $out\n",
+                    "build out: cc source\n",
+                    "build other: cc unique\n",
+                    "build app: phony out\n",
+                    "default app\n",
+                ),
+            )
+            .unwrap();
+            fs::write(temp.path().join("source"), "source\n").unwrap();
+            fs::write(temp.path().join("unique"), "unique\n").unwrap();
+            fs::write(temp.path().join("out"), "output\n").unwrap();
+            fs::write(temp.path().join("other"), "other output\n").unwrap();
+            let alias = temp
+                .path()
+                .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+            if implementation == "knight" {
+                install_ninja_alias(knight, &alias);
+            }
+            let executable = if implementation == "knight" {
+                alias.as_path()
+            } else {
+                executable
+            };
+            outputs.push(run(executable, temp.path(), &arguments));
+        }
+        assert_eq!(
+            outputs[1].status.code(),
+            outputs[0].status.code(),
+            "arguments={arguments:?}"
+        );
+        assert_eq!(
+            outputs[1].stdout, outputs[0].stdout,
+            "arguments={arguments:?}"
+        );
+        assert_eq!(
+            outputs[1].stderr, outputs[0].stderr,
+            "arguments={arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn ninja_tool_surface_inventory_is_complete() {
+    const TOOLS: [(&str, &str, &str); 20] = [
+        (
+            "list",
+            "none",
+            "invocation_as_ninja_uses_ninja_diagnostic_identity",
+        ),
+        (
+            "browse",
+            "-p/--port, -a/--hostname, --no-browser, initial target",
+            "browse_help_matches_ninjas_embedded_tool; browse_server_serves_query_pages_like_ninja",
+        ),
+        (
+            "msvc",
+            "-e, -o, -p, -h, --",
+            "deprecated_msvc_helper_options_match_ninja_getopt; deprecated_msvc_helper_filters_output_and_writes_depfile",
+        ),
+        (
+            "clean",
+            "-g, -r, -h, targets/rules",
+            "upstream_clean_all_target_rule_and_auxiliary_corpus_matches_ninja; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "commands",
+            "-s, -h, targets",
+            "commands_and_compdb_options_match_ninja; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "inputs",
+            "-0/--print0, -E/--no-shell-escape, -d/--dependency-order, -h/--help",
+            "inputs_tool_deduplicates_shared_inputs_across_targets; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "multi-inputs",
+            "-0/--print0, -d/--delimiter, -h/--help",
+            "commands_and_compdb_options_match_ninja; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "deps",
+            "optional targets",
+            "deps_tool_without_targets_uses_dependency_log_node_order_like_ninja; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "missingdeps",
+            "optional targets",
+            "upstream_missing_dependency_scanner_corpus_matches_ninja_alias; missingdeps_without_targets_scans_only_default_closures_like_ninja",
+        ),
+        (
+            "graph",
+            "optional targets",
+            "graph_tool_uses_ninja_graphviz_shape_and_implicit_defaults",
+        ),
+        (
+            "query",
+            "one or more paths",
+            "remaining_tool_argument_surface_matches_ninja; graph_loads_only_reachable_dyndeps_and_warns_without_failing",
+        ),
+        (
+            "targets",
+            "rule [name], depth [n], all",
+            "tool_target_modes_and_rule_descriptions_match_ninja; remaining_tool_argument_surface_matches_ninja",
+        ),
+        (
+            "compdb",
+            "-x, -h, optional rules",
+            "commands_and_compdb_options_match_ninja; compdb_rsp_expansion_preserves_ninjas_first_marker_semantics",
+        ),
+        (
+            "compdb-targets",
+            "-x, -h, targets",
+            "commands_and_compdb_options_match_ninja; compdb_keeps_outputs_used_as_both_validation_and_regular_inputs",
+        ),
+        (
+            "recompact",
+            "ignored operands",
+            "recompact_discards_incompatible_metadata_without_recreating_it; remaining_tool_argument_surface_matches_ninja",
+        ),
+        (
+            "restat",
+            "--builddir, -h, optional outputs",
+            "restat_compaction_missing_outputs_and_dry_run_match_ninja; tool_option_permutation_and_deps_target_errors_match_ninja",
+        ),
+        (
+            "rules",
+            "-d, -h",
+            "tool_target_modes_and_rule_descriptions_match_ninja; remaining_tool_argument_surface_matches_ninja",
+        ),
+        (
+            "cleandead",
+            "ignored operands",
+            "upstream_cleandead_removal_and_repeat_cases_match_ninja; remaining_tool_argument_surface_matches_ninja",
+        ),
+        (
+            "urtle",
+            "ignored operands",
+            "remaining_tool_argument_surface_matches_ninja",
+        ),
+        (
+            "wincodepage",
+            "no operands",
+            "remaining_tool_argument_surface_matches_ninja",
+        ),
+    ];
+    let names = TOOLS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(names.len(), TOOLS.len());
+    assert!(
+        TOOLS
+            .iter()
+            .all(|(_, arguments, evidence)| !arguments.is_empty() && !evidence.is_empty())
+    );
+}
+
+#[test]
+fn ninja_top_level_option_surface_inventory_is_complete() {
+    const OPTIONS: [(&str, &str); 15] = [
+        ("-C", "invocation_as_ninja_uses_ninja_diagnostic_identity"),
+        ("-d", "invocation_as_ninja_uses_ninja_diagnostic_identity"),
+        (
+            "-f",
+            "nested_include_paths_resolve_from_the_working_directory_like_ninja",
+        ),
+        ("-j", "top_level_short_option_clusters_match_ninja"),
+        ("-k", "top_level_short_option_clusters_match_ninja"),
+        ("-l", "top_level_short_option_clusters_match_ninja"),
+        ("-n", "dry_run_starts_the_entire_ready_frontier_like_ninja"),
+        ("-t", "ninja_tool_surface_inventory_is_complete"),
+        (
+            "-v/--verbose",
+            "top_level_short_option_clusters_match_ninja",
+        ),
+        ("-w", "invocation_as_ninja_uses_ninja_diagnostic_identity"),
+        (
+            "-h/--help",
+            "top_level_help_uses_ninja_exit_status_and_stream",
+        ),
+        (
+            "--quiet",
+            "attached_long_option_values_follow_platform_getopt_semantics",
+        ),
+        (
+            "--status",
+            "explicit_status_format_matches_ninja_and_counts_only_dirty_edges",
+        ),
+        (
+            "--version",
+            "invocation_as_ninja_uses_ninja_diagnostic_identity",
+        ),
+        ("--", "posixly_correct_stops_option_permutation_like_ninja"),
+    ];
+    let names = OPTIONS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(names.len(), OPTIONS.len());
+    assert!(OPTIONS.iter().all(|(_, evidence)| !evidence.is_empty()));
 }
 
 #[test]
