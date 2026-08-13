@@ -16,6 +16,7 @@ use rapidhash::fast::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use rapidhash::{HashMapExt, HashSetExt};
 use std::collections::BTreeSet;
 use std::env;
+use std::error::Error as _;
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write as _};
@@ -222,6 +223,156 @@ fn format_manifest_diagnostic(error: Diagnostic) -> String {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NinjaJobserverMode {
+    None,
+    Pipe,
+    Fifo(String),
+    Semaphore(String),
+}
+
+fn parse_decimal_prefix(value: &str) -> Option<(i64, &str)> {
+    let bytes = value.as_bytes();
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let digits = end;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end == digits {
+        return None;
+    }
+    let number = value[..end].parse().ok()?;
+    Some((number, &value[end..]))
+}
+
+fn parse_jobserver_fd_pair(value: &str) -> Option<(i64, i64)> {
+    let (read, rest) = parse_decimal_prefix(value.trim_start())?;
+    let rest = rest.strip_prefix(',')?;
+    let (write, _) = parse_decimal_prefix(rest.trim_start())?;
+    Some((read, write))
+}
+
+fn parse_ninja_makeflags(value: &str) -> Result<NinjaJobserverMode, String> {
+    let mut arguments = value
+        .split([' ', '\t'])
+        .filter(|argument| !argument.is_empty());
+    let Some(first) = arguments.next() else {
+        return Ok(NinjaJobserverMode::None);
+    };
+    if !first.starts_with('-') && first.contains('n') {
+        return Ok(NinjaJobserverMode::None);
+    }
+
+    let mut mode = NinjaJobserverMode::None;
+    for argument in std::iter::once(first).chain(arguments) {
+        if let Some(value) = argument.strip_prefix("--jobserver-auth=") {
+            mode = if let Some((read, write)) = parse_jobserver_fd_pair(value) {
+                if read < 0 || write < 0 {
+                    NinjaJobserverMode::None
+                } else {
+                    NinjaJobserverMode::Pipe
+                }
+            } else if let Some(path) = value.strip_prefix("fifo:") {
+                NinjaJobserverMode::Fifo(path.to_owned())
+            } else {
+                NinjaJobserverMode::Semaphore(value.to_owned())
+            };
+        } else if let Some(value) = argument.strip_prefix("--jobserver-fds=") {
+            let Some(_) = parse_jobserver_fd_pair(value) else {
+                return Err(format!("Invalid file descriptor pair [{value}]"));
+            };
+            mode = NinjaJobserverMode::Pipe;
+        }
+    }
+    Ok(mode)
+}
+
+fn parse_native_ninja_makeflags(value: &str) -> Result<NinjaJobserverMode, String> {
+    let mode = parse_ninja_makeflags(value)?;
+    match mode {
+        NinjaJobserverMode::Pipe => Err("Pipe-based protocol is not supported!".to_owned()),
+        NinjaJobserverMode::Fifo(_) if cfg!(windows) => {
+            Err("FIFO mode is not supported on Windows!".to_owned())
+        }
+        NinjaJobserverMode::Semaphore(_) if cfg!(unix) => {
+            Err("Semaphore mode is not supported on Posix!".to_owned())
+        }
+        _ => Ok(mode),
+    }
+}
+
+fn configure_ninja_jobserver(cli: &mut Cli) {
+    let Some(makeflags) = env::var_os("MAKEFLAGS") else {
+        return;
+    };
+    let makeflags = makeflags.to_string_lossy();
+    let mode = match parse_native_ninja_makeflags(&makeflags) {
+        Ok(NinjaJobserverMode::None) => return,
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("ninja: warning: Ignoring jobserver: {error} [{makeflags}]");
+            return;
+        }
+    };
+
+    if !cli.options.quiet {
+        println!("ninja: Jobserver mode detected: {makeflags}");
+    }
+    let cargo_makeflags = env::var_os("CARGO_MAKEFLAGS");
+    let mflags = env::var_os("MFLAGS");
+    // SAFETY: jobserver setup runs before Knight starts worker or subprocess
+    // threads. Temporarily hiding the Rust-specific variables makes the crate
+    // inspect MAKEFLAGS with Ninja's precedence.
+    unsafe {
+        env::remove_var("CARGO_MAKEFLAGS");
+        env::remove_var("MFLAGS");
+    }
+    // SAFETY: this still runs before manifest or log files are opened, so
+    // inherited Unix descriptors cannot alias later resources.
+    let inherited = unsafe { jobserver::Client::from_env_ext(true) };
+    unsafe {
+        if let Some(value) = cargo_makeflags {
+            env::set_var("CARGO_MAKEFLAGS", value);
+        }
+        if let Some(value) = mflags {
+            env::set_var("MFLAGS", value);
+        }
+    }
+    match inherited.client {
+        Ok(client) => cli.options.jobserver = Some(client),
+        Err(error) => {
+            let detail = ninja_jobserver_open_error(&mode, &error);
+            eprintln!("ninja: error: Could not initialize jobserver: {detail}");
+        }
+    }
+}
+
+fn ninja_jobserver_open_error(
+    mode: &NinjaJobserverMode,
+    error: &jobserver::FromEnvError,
+) -> String {
+    let cause = error
+        .source()
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| error.to_string());
+    let cause = cause
+        .rsplit_once(" (os error ")
+        .and_then(|(message, code)| code.strip_suffix(')').map(|_| message))
+        .unwrap_or(&cause);
+    match mode {
+        NinjaJobserverMode::Fifo(_) => format!("Error opening fifo for reading: {cause}"),
+        NinjaJobserverMode::Semaphore(_) => {
+            let mut detail = format!("Error opening semaphore: {cause}");
+            if cfg!(windows) {
+                detail.push_str("\r\r\n");
+            }
+            detail
+        }
+        NinjaJobserverMode::None | NinjaJobserverMode::Pipe => error.to_string(),
+    }
+}
+
 fn run() -> Result<(), String> {
     install_interrupt_handler()?;
     let mut cli = parse_cli(env::args().skip(1).collect())?;
@@ -229,24 +380,30 @@ fn run() -> Result<(), String> {
         cli.options.dry_run = true;
     }
     if cli.options.use_jobserver && !cli.options.dry_run {
-        // SAFETY: this runs before manifest or build-log files are opened, so
-        // inherited Unix jobserver descriptors cannot alias later resources.
-        let inherited = unsafe { jobserver::Client::from_env_ext(true) };
-        match inherited.client {
-            Ok(client) => cli.options.jobserver = Some(client),
-            Err(error)
-                if !matches!(
-                    error.kind(),
-                    jobserver::FromEnvErrorKind::NoEnvVar
-                        | jobserver::FromEnvErrorKind::NoJobserver
-                ) =>
-            {
-                eprintln!(
-                    "{}: warning: ignoring invalid jobserver: {error}",
-                    program_name()
-                );
+        if program_name() == "ninja" {
+            configure_ninja_jobserver(&mut cli);
+        } else {
+            // SAFETY: this runs before manifest or build-log files are opened,
+            // so inherited Unix descriptors cannot alias later resources.
+            let inherited = unsafe { jobserver::Client::from_env_ext(true) };
+            match inherited.client {
+                Ok(client) => cli.options.jobserver = Some(client),
+                Err(error)
+                    if !matches!(
+                        error.kind(),
+                        jobserver::FromEnvErrorKind::NoEnvVar
+                            | jobserver::FromEnvErrorKind::NoJobserver
+                    ) =>
+                {
+                    if !cli.options.quiet {
+                        eprintln!(
+                            "{}: warning: ignoring invalid jobserver: {error}",
+                            program_name()
+                        );
+                    }
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
         }
     }
     if let Some(directory) = &cli.directory {
@@ -2970,6 +3127,88 @@ mod tests {
             super::escape_msvc_depfile_path(r"sub\some sdk\foo.h"),
             r"sub\some\ sdk\foo.h"
         );
+    }
+
+    #[test]
+    fn upstream_jobserver_makeflags_parser_corpus() {
+        use super::NinjaJobserverMode::{Fifo, None, Pipe, Semaphore};
+
+        for value in ["", "  \t", "kns --jobserver-auth=fifo:foo"] {
+            assert_eq!(
+                super::parse_ninja_makeflags(value).unwrap(),
+                None,
+                "{value}"
+            );
+        }
+        for value in [
+            "--jobserver-auth=fifo:foo",
+            " -j --jobserver-auth=fifo:foo",
+            " -j10 --jobserver-auth=fifo:foo",
+            "-one-flag --jobserver-auth=fifo:foo",
+        ] {
+            assert_eq!(
+                super::parse_ninja_makeflags(value).unwrap(),
+                Fifo("foo".to_owned()),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            super::parse_ninja_makeflags("--jobserver-auth=semaphore_name").unwrap(),
+            Semaphore("semaphore_name".to_owned())
+        );
+        assert_eq!(
+            super::parse_ninja_makeflags("--jobserver-auth=10,42").unwrap(),
+            Pipe
+        );
+        assert_eq!(
+            super::parse_ninja_makeflags("--jobserver-auth=-1,42").unwrap(),
+            None
+        );
+        assert_eq!(
+            super::parse_ninja_makeflags("--jobserver-auth=10,-42").unwrap(),
+            None
+        );
+        assert_eq!(
+            super::parse_ninja_makeflags(
+                "--jobserver-auth=10,42 --jobserver-fds=12,44 --jobserver-auth=fifo:/tmp/fifo"
+            )
+            .unwrap(),
+            Fifo("/tmp/fifo".to_owned())
+        );
+        assert_eq!(
+            super::parse_ninja_makeflags("--jobserver-fds=10,").unwrap_err(),
+            "Invalid file descriptor pair [10,]"
+        );
+    }
+
+    #[test]
+    fn upstream_native_jobserver_mode_corpus() {
+        assert_eq!(
+            super::parse_native_ninja_makeflags("--jobserver-auth=3,4").unwrap_err(),
+            "Pipe-based protocol is not supported!"
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                super::parse_native_ninja_makeflags("--jobserver-auth=semaphore_name").unwrap(),
+                super::NinjaJobserverMode::Semaphore("semaphore_name".to_owned())
+            );
+            assert_eq!(
+                super::parse_native_ninja_makeflags("--jobserver-auth=fifo:foo").unwrap_err(),
+                "FIFO mode is not supported on Windows!"
+            );
+        }
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                super::parse_native_ninja_makeflags("--jobserver-auth=semaphore_name").unwrap_err(),
+                "Semaphore mode is not supported on Posix!"
+            );
+            assert_eq!(
+                super::parse_native_ninja_makeflags("--jobserver-auth=fifo:foo").unwrap(),
+                super::NinjaJobserverMode::Fifo("foo".to_owned())
+            );
+        }
     }
 
     #[test]

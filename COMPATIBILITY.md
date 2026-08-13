@@ -312,8 +312,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 76
-  library, 4 CLI, and 119 differential tests; Linux-under-WSL passes 71 library,
-  3 CLI, and 89 differential tests. Release builds, clippy, a Windows-hosted
+  library, 6 CLI, and 120 differential tests; Linux-under-WSL passes 71 library,
+  5 CLI, and 90 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
@@ -322,7 +322,11 @@ This is an evidence ledger, not a claim of full compatibility.
   MAKEFLAGS forwarding, and no-jobserver scheduling pass; the only mismatch is
   that Knight supports the inherited POSIX pipe protocol rather than printing
   Ninja's "not supported" warning. A native Rust regression verifies that the
-  pipe protocol enforces its token limit.
+  pipe protocol enforces its token limit. When installed as `ninja`, Knight
+  instead maps the complete upstream MAKEFLAGS parser corpus and reproduces
+  Ninja's invalid/unsupported-mode warnings, mode announcement, initialization
+  errors, quiet/dry-run policy, and MAKEFLAGS precedence byte-for-byte. Native
+  `knight` retains the additional pipe-protocol support.
 - Performance superiority across every representative workload. Knight leads
   the 10,000-edge median and all three P95 measurements in the latest warm
   no-op sweep, but trails two 1,000-edge medians and is nowhere near the

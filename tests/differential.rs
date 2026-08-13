@@ -4988,6 +4988,85 @@ fn invocation_as_ninja_uses_ninja_diagnostic_identity() {
     assert_eq!(actual.stderr, expected.stderr);
 }
 
+#[test]
+fn invocation_as_ninja_matches_jobserver_makeflags_diagnostics() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    let alias = temp
+        .path()
+        .join(if cfg!(windows) { "ninja.exe" } else { "ninja" });
+    fs::copy(knight, &alias).unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        "build all: phony\ndefault all\n",
+    )
+    .unwrap();
+
+    let unsupported_platform = if cfg!(windows) {
+        "--jobserver-auth=fifo:missing"
+    } else {
+        "--jobserver-auth=missing-semaphore"
+    };
+    let supported_missing = if cfg!(windows) {
+        "--jobserver-auth=missing-semaphore"
+    } else {
+        "--jobserver-auth=fifo:/definitely/missing/knight-jobserver"
+    };
+    for (makeflags, arguments) in [
+        ("--jobserver-fds=10,", &[][..]),
+        ("--jobserver-auth=10,42", &[][..]),
+        (unsupported_platform, &[][..]),
+        (supported_missing, &[][..]),
+        ("kns --jobserver-auth=10,42", &[][..]),
+        ("--jobserver-auth=10,42", &["--quiet"][..]),
+        ("--jobserver-auth=10,42", &["-n"][..]),
+    ] {
+        let invoke = |executable: &Path| {
+            Command::new(executable)
+                .current_dir(temp.path())
+                .args(arguments)
+                .env("MAKEFLAGS", makeflags)
+                .env_remove("CARGO_MAKEFLAGS")
+                .env_remove("MFLAGS")
+                .output()
+                .unwrap()
+        };
+        let expected = invoke(Path::new(&ninja));
+        let actual = invoke(&alias);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{makeflags} {arguments:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{makeflags} {arguments:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{makeflags} {arguments:?}");
+    }
+
+    #[cfg(windows)]
+    {
+        let client = jobserver::Client::new(1).unwrap();
+        let invoke = |executable: &Path| {
+            let mut command = Command::new(executable);
+            command.current_dir(temp.path());
+            client.configure_make(&mut command);
+            command
+                .env_remove("CARGO_MAKEFLAGS")
+                .env_remove("MFLAGS")
+                .output()
+                .unwrap()
+        };
+        let expected = invoke(Path::new(&ninja));
+        let actual = invoke(&alias);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn explain_reports_the_dirty_dependency_that_triggers_each_edge() {

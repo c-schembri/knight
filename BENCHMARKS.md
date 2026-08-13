@@ -342,3 +342,18 @@ averages 13.3 ms for 2,000 equivalent sweeps, or 6.65 us per sweep. Knight is
 about 37% faster on this scoped path. The harnesses reflect each implementation's
 real API shape: Ninja copies each mutable input string, while Knight accepts a
 borrowed byte slice and returns a copy-on-write result.
+
+## Jobserver diagnostics
+
+`scripts/benchmark-jobserver.ps1` validates exact stdout and stderr for the
+Ninja-alias unsupported-pipe path, then times 1,000 warm, interleaved no-work
+processes with `MAKEFLAGS=--jobserver-auth=10,42`.
+
+| Tool | Median | Minimum | P95 |
+| :--- | ---: | ---: | ---: |
+| Ninja | 3.498 ms | 3.254 ms | 70.317 ms |
+| Knight | 3.772 ms | 3.480 ms | 5.634 ms |
+
+Knight trails the median by 7.8% on this startup-dominated path while reducing
+P95 by 92.0%. The parser itself is allocation-free for pipe modes, but the
+end-to-end median remains an explicit optimization target rather than a win.
