@@ -872,7 +872,12 @@ impl<'a> BuildLog<'a> {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(log),
             #[cfg(unix)]
-            Err(error) if error.kind() == io::ErrorKind::IsADirectory => String::new(),
+            Err(error)
+                if error.kind() == io::ErrorKind::IsADirectory
+                    || error.raw_os_error() == Some(libc::EISDIR) =>
+            {
+                String::new()
+            }
             Err(error) => return Err(error),
         };
         let version = build_log_version(&contents);
@@ -2888,13 +2893,17 @@ fn run_build_prepared<'a>(
                 .outputs()
                 .map(|output| build_log.recorded_mtime(output))
                 .collect::<Vec<_>>();
+            let ninja_dragonfly_multi_output_restat = cfg!(target_os = "dragonfly")
+                && program_name() == "ninja"
+                && edge.outputs().nth(1).is_some();
             let restat_cleaned = restat
+                && !ninja_dragonfly_multi_output_restat
                 && completion
                     .prior_output_mtimes
                     .iter()
                     .zip(&current_output_mtimes)
                     .any(|(before, after)| before == after);
-            if restat {
+            if restat && !ninja_dragonfly_multi_output_restat {
                 for ((output, before), after) in edge
                     .outputs()
                     .zip(&completion.prior_output_mtimes)

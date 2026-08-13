@@ -359,7 +359,17 @@ fn multi_output_restat_only_cleans_dependents_of_unchanged_outputs() {
         eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
         return;
     };
-    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let knight_binary = Path::new(env!("CARGO_BIN_EXE_knight"));
+    #[cfg(target_os = "dragonfly")]
+    let alias_dir = tempdir().unwrap();
+    #[cfg(target_os = "dragonfly")]
+    let knight_alias = alias_dir.path().join("ninja");
+    #[cfg(target_os = "dragonfly")]
+    install_ninja_alias(knight_binary, &knight_alias);
+    #[cfg(target_os = "dragonfly")]
+    let knight = knight_alias.as_path();
+    #[cfg(not(target_os = "dragonfly"))]
+    let knight = knight_binary;
     let ninja = Path::new(&ninja);
     let manifest = concat!(
         "rule generate\n",
