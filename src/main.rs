@@ -1,6 +1,7 @@
 #[cfg(windows)]
 use knight_build::build::filter_msvc_output;
 use knight_build::build::{render_binding, render_unescaped_binding, shell_escape_path};
+use knight_build::depfile::parse_depfile;
 use knight_build::deps_log::{DepsLog, deps_log_path};
 #[cfg(windows)]
 use knight_build::ensure_process_tree_cleanup;
@@ -789,9 +790,32 @@ fn build_log_path(manifest: &Manifest) -> PathBuf {
         )
 }
 
+fn read_optional_build_log(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.kind() == io::ErrorKind::IsADirectory => Ok(Some(String::new())),
+        Err(error) => Err(format!("loading build log {}: {error}", path.display())),
+    }
+}
+
+fn load_deps_log(builddir: Option<&str>) -> Result<DepsLog, String> {
+    let path = deps_log_path(builddir);
+    let log = DepsLog::load(path.clone())
+        .map_err(|error| format!("loading deps log {}: {error}", path.display()))?;
+    if log.was_invalidated() {
+        eprintln!(
+            "{}: warning: bad deps log signature or version; starting over",
+            program_name()
+        );
+    }
+    Ok(log)
+}
+
 fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
     let path = build_log_path(manifest);
-    if let Ok(contents) = fs::read_to_string(&path) {
+    if let Some(contents) = read_optional_build_log(&path)? {
         if !contents.is_empty() && !contents.starts_with("# ninja log v7\n") {
             eprintln!(
                 "{}: warning: build log version is too old; starting over",
@@ -825,12 +849,8 @@ fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
     if !deps_path.exists() {
         return Ok(());
     }
-    let mut deps = DepsLog::load(deps_path);
+    let mut deps = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     if !deps.path_exists() {
-        eprintln!(
-            "{}: warning: bad deps log signature or version; starting over",
-            program_name()
-        );
         return Err("failed recompaction: No such file or directory".to_owned());
     }
     deps.recompact()
@@ -838,9 +858,7 @@ fn tool_recompact(manifest: &Manifest) -> Result<(), String> {
 }
 
 fn tool_deps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
-    let log = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
+    let log = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let selected = if targets.is_empty() {
         let live = manifest
             .edges
@@ -920,7 +938,7 @@ fn tool_restat(args: &[String], _options: &BuildOptions) -> Result<(), String> {
         || PathBuf::from(".ninja_log"),
         |builddir| Path::new(&builddir).join(".ninja_log"),
     );
-    let Ok(contents) = fs::read_to_string(&path) else {
+    let Some(contents) = read_optional_build_log(&path)? else {
         return Ok(());
     };
     let selected = targets.iter().map(String::as_str).collect::<HashSet<_>>();
@@ -1116,12 +1134,9 @@ fn tool_commands(manifest: &Manifest, args: &[String]) -> Result<(), String> {
     };
     let selected = selected_edges(manifest, &targets)?;
     let selected = if single {
-        let deps = DepsLog::load(deps_log_path(
-            manifest.variables.get("builddir").map(String::as_str),
-        ));
         let wanted = targets
             .iter()
-            .map(|target| resolve_target_path(manifest, target, Some(&deps), false))
+            .map(|target| resolve_target_path(manifest, target, None, false))
             .collect::<Result<HashSet<_>, _>>()?;
         selected
             .into_iter()
@@ -1415,9 +1430,7 @@ fn tool_query(manifest: &Manifest, args: &[String]) -> Result<(), String> {
         return Err("expected a target to query".to_owned());
     }
     let mut manifest = manifest.clone();
-    let deps = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
+    let deps = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let mut loaded_dyndeps = HashSet::new();
     for target in args {
         let target = resolve_target_path(&manifest, target, Some(&deps), true)?;
@@ -1573,12 +1586,9 @@ fn tool_inputs(manifest: &Manifest, args: &[String], grouped: bool) -> Result<()
         targets = default_targets(manifest)?;
     }
     let outputs = output_index(manifest);
-    let deps = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
     let targets = targets
         .into_iter()
-        .map(|target| resolve_target_path(manifest, &target, Some(&deps), false))
+        .map(|target| resolve_target_path(manifest, &target, None, false))
         .collect::<Result<Vec<_>, _>>()?;
     if !grouped {
         let mut seen_paths = HashSet::new();
@@ -1714,9 +1724,6 @@ fn collect_inputs<'a>(
 }
 
 fn tool_graph(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
-    let deps = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
     let targets = if targets.is_empty() {
         default_targets(manifest)?
     } else {
@@ -1724,7 +1731,7 @@ fn tool_graph(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
     };
     let targets = targets
         .into_iter()
-        .map(|target| resolve_target_path(manifest, &target, Some(&deps), false))
+        .map(|target| resolve_target_path(manifest, &target, None, false))
         .collect::<Result<Vec<_>, _>>()?;
     let mut manifest = manifest.clone();
     load_graph_dyndeps(&mut manifest, &targets);
@@ -1882,11 +1889,8 @@ fn tool_compdb_targets(manifest: &Manifest, targets: &[String]) -> Result<(), St
         return Err(format!("{TOOL_EXIT_PREFIX}1"));
     }
     let outputs = output_index(manifest);
-    let deps = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
     for target in &targets {
-        let resolved = resolve_target_path(manifest, target, Some(&deps), false)
+        let resolved = resolve_target_path(manifest, target, None, false)
             .map_err(|error| format!("{FATAL_PREFIX}{error}"))?;
         if !outputs.contains_key(resolved.as_str()) {
             return Err(format!(
@@ -2064,10 +2068,10 @@ fn tool_cleandead(manifest: &Manifest, options: &BuildOptions) -> Result<(), Str
     let live = manifest
         .edges
         .iter()
-        .flat_map(|edge| edge.outputs())
+        .flat_map(|edge| edge.outputs().chain(edge.inputs()))
         .collect::<HashSet<_>>();
     let path = build_log_path(manifest);
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Some(contents) = read_optional_build_log(&path)? else {
         if !options.quiet {
             println!("Cleaning... 0 files.");
         }
@@ -2197,29 +2201,44 @@ fn canonical_eval_string(value: &str) -> String {
 }
 
 fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), String> {
-    let selected = selected_edges(manifest, targets)?;
+    let targets = if targets.is_empty() {
+        default_targets(manifest)?
+    } else {
+        targets.to_vec()
+    };
+    let selected = selected_edges(manifest, &targets)?;
     let outputs = output_index(manifest);
-    let log = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
+    let log = load_deps_log(manifest.variables.get("builddir").map(String::as_str))?;
     let mut missing_nodes = HashSet::new();
-    let mut generated_inputs = HashSet::new();
+    let mut generated_inputs = HashSet::<String>::new();
     let mut generator_rules = HashSet::new();
     let mut missing_rule_paths = HashSet::new();
 
     for edge_id in &selected {
         let edge = &manifest.edges[*edge_id];
         let mut discovered = HashSet::new();
-        for output in edge.outputs() {
-            if let Some(entry) = log.get(output) {
-                discovered.extend(entry.inputs.iter().map(String::as_str));
+        if render_binding(manifest, edge, "deps").is_empty() {
+            let depfile = render_unescaped_binding(manifest, edge, "depfile");
+            if !depfile.is_empty()
+                && let Ok(contents) = fs::read_to_string(depfile)
+                && let Ok(parsed) = parse_depfile(&contents)
+            {
+                for input in parsed.inputs {
+                    discovered.insert(canonicalize_path(&input));
+                }
+            }
+        } else {
+            for output in edge.outputs() {
+                if let Some(entry) = log.get(output) {
+                    discovered.extend(entry.inputs.iter().cloned());
+                }
             }
         }
         if discovered.contains("build.ninja") {
             continue;
         }
-        for input in discovered {
-            let Some(producer) = outputs.get(input).copied() else {
+        for input in &discovered {
+            let Some(producer) = outputs.get(input.as_str()).copied() else {
                 continue;
             };
             if dependency_path_exists(producer, *edge_id, manifest, &outputs, &mut HashSet::new()) {
@@ -2232,7 +2251,7 @@ fn tool_missingdeps(manifest: &Manifest, targets: &[String]) -> Result<(), Strin
                 manifest.edges[producer].rule
             );
             missing_nodes.insert(*edge_id);
-            generated_inputs.insert(input);
+            generated_inputs.insert(input.clone());
             generator_rules.insert(manifest.edges[producer].rule.as_str());
             missing_rule_paths.insert((*edge_id, manifest.edges[producer].rule.as_str()));
         }
@@ -2282,9 +2301,6 @@ fn selected_edges(manifest: &Manifest, targets: &[String]) -> Result<Vec<usize>,
         return Ok((0..manifest.edges.len()).collect());
     }
     let outputs = output_index(manifest);
-    let deps = DepsLog::load(deps_log_path(
-        manifest.variables.get("builddir").map(String::as_str),
-    ));
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     fn visit(
@@ -2305,7 +2321,7 @@ fn selected_edges(manifest: &Manifest, targets: &[String]) -> Result<Vec<usize>,
         result.push(id);
     }
     for target in targets {
-        let target = resolve_target_path(manifest, target, Some(&deps), false)?;
+        let target = resolve_target_path(manifest, target, None, false)?;
         if let Some(id) = outputs.get(target.as_str()) {
             visit(*id, manifest, &outputs, &mut seen, &mut result);
         }

@@ -16,6 +16,7 @@ pub struct DepsEntry {
 #[derive(Debug, Default)]
 pub struct DepsLog {
     path: PathBuf,
+    invalidated: bool,
     nodes: Vec<String>,
     ids: HashMap<String, u32>,
     entries: HashMap<String, DepsEntry>,
@@ -29,13 +30,17 @@ enum ParseError {
 }
 
 impl DepsLog {
-    pub fn load(path: PathBuf) -> Self {
+    pub fn load(path: PathBuf) -> io::Result<Self> {
         let mut log = Self {
             path,
             ..Self::default()
         };
-        let Ok(data) = fs::read(&log.path) else {
-            return log;
+        let data = match fs::read(&log.path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(log),
+            #[cfg(unix)]
+            Err(error) if error.kind() == io::ErrorKind::IsADirectory => Vec::new(),
+            Err(error) => return Err(error),
         };
         match log.parse(&data) {
             Ok(()) => {
@@ -50,6 +55,7 @@ impl DepsLog {
                     .and_then(|file| file.set_len(valid_length as u64));
             }
             Err(ParseError::Invalid) => {
+                log.invalidated = true;
                 log.nodes.clear();
                 log.ids.clear();
                 log.entries.clear();
@@ -57,7 +63,11 @@ impl DepsLog {
                 let _ = fs::remove_file(&log.path);
             }
         }
-        log
+        Ok(log)
+    }
+
+    pub fn was_invalidated(&self) -> bool {
+        self.invalidated
     }
 
     pub fn get(&self, output: &str) -> Option<&DepsEntry> {
@@ -158,7 +168,7 @@ impl DepsLog {
             file.write_all(&VERSION.to_le_bytes())?;
         }
         fs::rename(&temporary, &self.path)?;
-        *self = Self::load(self.path.clone());
+        *self = Self::load(self.path.clone())?;
         Ok(())
     }
 
@@ -309,13 +319,13 @@ mod tests {
     fn round_trips_and_recompacts() {
         let temp = tempdir().unwrap();
         let path = temp.path().join(".ninja_deps");
-        let mut log = DepsLog::load(path.clone());
+        let mut log = DepsLog::load(path.clone()).unwrap();
         log.record("out.o", 42, &["a.h".to_owned(), "b.h".to_owned()])
             .unwrap();
         log.record("out.o", 43, &["a.h".to_owned()]).unwrap();
         let before = fs::metadata(&path).unwrap().len();
 
-        let mut loaded = DepsLog::load(path.clone());
+        let mut loaded = DepsLog::load(path.clone()).unwrap();
         assert_eq!(
             loaded.get("out.o"),
             Some(&DepsEntry {
@@ -325,14 +335,14 @@ mod tests {
         );
         loaded.recompact().unwrap();
         assert!(fs::metadata(&path).unwrap().len() < before);
-        assert_eq!(DepsLog::load(path).get("out.o").unwrap().mtime, 43);
+        assert_eq!(DepsLog::load(path).unwrap().get("out.o").unwrap().mtime, 43);
     }
 
     #[test]
     fn preserves_output_node_order_through_recompaction() {
         let temp = tempdir().unwrap();
         let path = temp.path().join(".ninja_deps");
-        let mut log = DepsLog::load(path.clone());
+        let mut log = DepsLog::load(path.clone()).unwrap();
         log.record("z.o", 1, &["z.h".to_owned()]).unwrap();
         log.record("a.o", 2, &["a.h".to_owned()]).unwrap();
         assert_eq!(
@@ -350,12 +360,12 @@ mod tests {
     fn recompacts_redundant_records_automatically() {
         let temp = tempdir().unwrap();
         let path = temp.path().join(".ninja_deps");
-        let mut log = DepsLog::load(path.clone());
+        let mut log = DepsLog::load(path.clone()).unwrap();
         for mtime in 0..=1_000 {
             log.record("out.o", mtime, &["input.h".to_owned()]).unwrap();
         }
         let before = fs::metadata(&path).unwrap().len();
-        let loaded = DepsLog::load(path.clone());
+        let loaded = DepsLog::load(path.clone()).unwrap();
         assert_eq!(loaded.get("out.o").unwrap().mtime, 1_000);
         assert!(fs::metadata(path).unwrap().len() < before);
     }
@@ -365,17 +375,17 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join(".ninja_deps");
         fs::write(&path, b"not a deps log").unwrap();
-        let mut log = DepsLog::load(path.clone());
+        let mut log = DepsLog::load(path.clone()).unwrap();
         assert!(!path.exists());
         log.record("out.o", 9, &["input.h".to_owned()]).unwrap();
-        assert_eq!(DepsLog::load(path).get("out.o").unwrap().mtime, 9);
+        assert_eq!(DepsLog::load(path).unwrap().get("out.o").unwrap().mtime, 9);
     }
 
     #[test]
     fn recovers_a_truncated_tail_before_appending() {
         let temp = tempdir().unwrap();
         let path = temp.path().join(".ninja_deps");
-        let mut log = DepsLog::load(path.clone());
+        let mut log = DepsLog::load(path.clone()).unwrap();
         log.record("out.o", 1, &["first.h".to_owned()]).unwrap();
         log.record("out2.o", 2, &["second.h".to_owned()]).unwrap();
         let length = fs::metadata(&path).unwrap().len();
@@ -386,12 +396,12 @@ mod tests {
             .set_len(length - 2)
             .unwrap();
 
-        let mut recovered = DepsLog::load(path.clone());
+        let mut recovered = DepsLog::load(path.clone()).unwrap();
         assert_eq!(recovered.get("out.o").unwrap().mtime, 1);
         assert!(recovered.get("out2.o").is_none());
         recovered
             .record("out2.o", 3, &["second.h".to_owned()])
             .unwrap();
-        assert_eq!(DepsLog::load(path).get("out2.o").unwrap().mtime, 3);
+        assert_eq!(DepsLog::load(path).unwrap().get("out2.o").unwrap().mtime, 3);
     }
 }

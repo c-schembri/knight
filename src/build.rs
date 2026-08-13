@@ -494,14 +494,14 @@ struct DiscoveredDeps {
 impl DiscoveredDeps {
     #[cfg(test)]
     fn load(manifest: &Manifest) -> Self {
-        Self::load_filtered(manifest, &vec![true; manifest.edges.len()])
+        Self::load_filtered(manifest, &vec![true; manifest.edges.len()]).unwrap()
     }
 
     fn load_for_build<'a>(
         manifest: &'a Manifest,
         outputs: &HashMap<&'a str, usize>,
         build_log: &BuildLog<'a>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         if !manifest.has_dependency_bindings() {
             return Self::load_filtered(manifest, &[]);
         }
@@ -513,19 +513,27 @@ impl DiscoveredDeps {
         Self::load_filtered(manifest, &load)
     }
 
-    fn load_filtered(manifest: &Manifest, load: &[bool]) -> Self {
+    fn load_filtered(manifest: &Manifest, load: &[bool]) -> Result<Self, String> {
         let mut inputs = vec![Vec::new(); manifest.edges.len()];
         let mut missing = vec![false; manifest.edges.len()];
         let mut errors = vec![None; manifest.edges.len()];
         let builddir = manifest.variables.get("builddir").map(String::as_str);
-        let log = DepsLog::load(deps_log_path(builddir));
+        let path = deps_log_path(builddir);
+        let log = DepsLog::load(path.clone())
+            .map_err(|error| format!("loading deps log {}: {error}", path.display()))?;
+        if log.was_invalidated() {
+            eprintln!(
+                "{}: warning: bad deps log signature or version; starting over",
+                program_name()
+            );
+        }
         if !manifest.has_dependency_bindings() {
-            return Self {
+            return Ok(Self {
                 inputs,
                 missing,
                 errors,
                 log,
-            };
+            });
         }
         for (edge_id, edge) in manifest.edges.iter().enumerate() {
             let deps = evaluate_binding(manifest, edge, "deps");
@@ -599,12 +607,12 @@ impl DiscoveredDeps {
                 missing[edge_id] = true;
             }
         }
-        Self {
+        Ok(Self {
             inputs,
             missing,
             errors,
             log,
-        }
+        })
     }
 
     fn record(&mut self, edge_id: usize, edge: &Edge, inputs: Vec<String>) -> io::Result<()> {
@@ -619,17 +627,21 @@ impl DiscoveredDeps {
 }
 
 impl<'a> BuildLog<'a> {
-    fn load(path: PathBuf, outputs: &HashMap<&'a str, usize>) -> Self {
+    fn load(path: PathBuf, outputs: &HashMap<&'a str, usize>) -> io::Result<Self> {
         let mut log = Self {
             path,
             entries: HashMap::new(),
         };
-        let Ok(mut contents) = fs::read_to_string(&log.path) else {
-            return log;
+        let mut contents = match fs::read_to_string(&log.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(log),
+            #[cfg(unix)]
+            Err(error) if error.kind() == io::ErrorKind::IsADirectory => String::new(),
+            Err(error) => return Err(error),
         };
         if !contents.is_empty() && !contents.starts_with("# ninja log v7\n") {
             let _ = fs::remove_file(&log.path);
-            return log;
+            return Ok(log);
         }
         if !contents.is_empty()
             && !contents.ends_with('\n')
@@ -681,7 +693,7 @@ impl<'a> BuildLog<'a> {
         if total_entries > 100 && total_entries > unique_outputs * 3 {
             let _ = recompact_build_log(&log.path, &contents, outputs);
         }
-        log
+        Ok(log)
     }
 
     fn command_changed(&self, edge: &Edge, command: &str, generator: bool) -> bool {
@@ -931,10 +943,17 @@ pub fn run_build(
     let initial_output_map = output_map(manifest);
     let output_map_time = phase.elapsed();
     let phase = Instant::now();
-    let build_log = BuildLog::load(build_log_path(manifest), &initial_output_map);
+    let initial_build_log_path = build_log_path(manifest);
+    let build_log =
+        BuildLog::load(initial_build_log_path.clone(), &initial_output_map).map_err(|error| {
+            format!(
+                "loading build log {}: {error}",
+                initial_build_log_path.display()
+            )
+        })?;
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(manifest, &initial_output_map, &build_log);
+    let discovered = DiscoveredDeps::load_for_build(manifest, &initial_output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(
@@ -1000,11 +1019,18 @@ pub fn run_build(
         let current_output_map = output_map(&expanded);
         let current_output_map_time = phase.elapsed();
         let phase = Instant::now();
-        let current_build_log = BuildLog::load(build_log_path(&expanded), &current_output_map);
+        let current_build_log_path = build_log_path(&expanded);
+        let current_build_log = BuildLog::load(current_build_log_path.clone(), &current_output_map)
+            .map_err(|error| {
+                format!(
+                    "loading build log {}: {error}",
+                    current_build_log_path.display()
+                )
+            })?;
         let current_build_log_time = phase.elapsed();
         let phase = Instant::now();
         let current_discovered =
-            DiscoveredDeps::load_for_build(&expanded, &current_output_map, &current_build_log);
+            DiscoveredDeps::load_for_build(&expanded, &current_output_map, &current_build_log)?;
         let current_dependencies_time = phase.elapsed();
         let phase = Instant::now();
         let current_targets = select_targets(
@@ -1336,10 +1362,12 @@ fn run_build_internal(
     let output_map = output_map(manifest);
     let output_map_time = phase.elapsed();
     let phase = Instant::now();
-    let build_log = BuildLog::load(build_log_path(manifest), &output_map);
+    let build_log_file = build_log_path(manifest);
+    let build_log = BuildLog::load(build_log_file.clone(), &output_map)
+        .map_err(|error| format!("loading build log {}: {error}", build_log_file.display()))?;
     let build_log_time = phase.elapsed();
     let phase = Instant::now();
-    let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log);
+    let discovered = DiscoveredDeps::load_for_build(manifest, &output_map, &build_log)?;
     let deps_time = phase.elapsed();
     let phase = Instant::now();
     let targets = select_targets(manifest, requested_targets, &output_map, &discovered.log)?;
@@ -4572,7 +4600,7 @@ mod tests {
         fs::write("out1", "one").unwrap();
         fs::write("out2", "two").unwrap();
         let output_mtime = modified_ns(Path::new("out1")).unwrap() as u64;
-        let mut log = DepsLog::load(PathBuf::from(".ninja_deps"));
+        let mut log = DepsLog::load(PathBuf::from(".ninja_deps")).unwrap();
         log.record(
             "out1",
             output_mtime.saturating_add(1),
@@ -4681,7 +4709,7 @@ mod tests {
         fs::write(&path, contents).unwrap();
         let manifest = parse_manifest("build out: phony\n", "build.ninja").unwrap();
         let outputs = output_map(&manifest);
-        let log = BuildLog::load(path.clone(), &outputs);
+        let log = BuildLog::load(path.clone(), &outputs).unwrap();
         assert_eq!(log.entries["out"].mtime, 42);
         let compacted = fs::read_to_string(path).unwrap();
         assert_eq!(compacted.lines().count(), 2);
@@ -4695,7 +4723,12 @@ mod tests {
         fs::write(&path, "# ninja log v6\n0\t0\t0\tout\t1\n").unwrap();
         let manifest = parse_manifest("build out: phony\n", "build.ninja").unwrap();
         let outputs = output_map(&manifest);
-        assert!(BuildLog::load(path.clone(), &outputs).entries.is_empty());
+        assert!(
+            BuildLog::load(path.clone(), &outputs)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         assert!(!path.exists());
     }
 
@@ -4706,7 +4739,7 @@ mod tests {
         fs::write(&path, "# ninja log v7\n0\t1\t2\tout\t1\n3\t4\t5\ttruncated").unwrap();
         let manifest = parse_manifest("build out: phony\n", "build.ninja").unwrap();
         let outputs = output_map(&manifest);
-        let log = BuildLog::load(path.clone(), &outputs);
+        let log = BuildLog::load(path.clone(), &outputs).unwrap();
         assert_eq!(log.entries["out"].mtime, 2);
         assert_eq!(
             fs::read_to_string(path).unwrap(),

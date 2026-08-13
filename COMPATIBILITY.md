@@ -52,8 +52,11 @@ This is an evidence ledger, not a claim of full compatibility.
   are rolled back to the last valid boundary, and partial build-log lines are
   removed before appending. Recompact-only recovery discards incompatible logs
   without silently recreating them and follows Ninja's distinct build/deps-log
-  exit behavior. Dependency-tool output and dependency-log recompaction
-  preserve Ninja's persisted node-ID ordering.
+  exit behavior. Unreadable metadata logs fail before commands can run, while
+  invalid dependency-log signatures retain Ninja's warning-and-recovery path.
+  Tools open logs only in Ninja's corresponding execution phase. Dependency-
+  tool output and dependency-log recompaction preserve Ninja's persisted
+  node-ID ordering.
 - Dyndep v1 implicit inputs, implicit outputs, and `restat`, including dyndep
   files generated during the same build and multi-level discovery where one
   loaded dyndep reveals another. Preparation iterates to a fixed point while
@@ -101,6 +104,8 @@ This is an evidence ledger, not a claim of full compatibility.
   individual removal failures, and counts auxiliary depfiles and response
   files. Target cleaning traverses prerequisites, while rule cleaning retains
   Ninja's distinct behavior for paths produced by the built-in `phony` rule.
+  `cleandead` preserves former outputs that remain explicit, implicit, or
+  order-only inputs in the current graph.
   Plain `compdb` and target-scoped `compdb-targets` preserve Ninja's distinct
   phony-edge filtering behavior. Compilation databases use Ninja's exact
   pretty-printed JSON shape, and `compdb-targets` rejects input-only nodes as
@@ -109,6 +114,9 @@ This is an evidence ledger, not a claim of full compatibility.
   regular input remains present. `restat`
   compacts logs, handles missing and selected outputs, and rewrites metadata
   even under `-n` like Ninja.
+  `missingdeps` scans the default-target closure when no targets are supplied,
+  reads both `.ninja_deps` entries and plain depfiles, and ignores unrelated
+  branches.
 - A deterministic generated-DAG differential corpus combines multi-output and
   phony edges with explicit, implicit, order-only, and validation inputs, plus
   bounded and unlimited pools. It compares 33 dry-run/traversal/tool modes and
@@ -173,8 +181,8 @@ This is an evidence ledger, not a claim of full compatibility.
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
 - Broader cross-platform runtime validation. The current Windows gates pass 63
-  library, 1 CLI, and 86 differential tests; Linux-under-WSL passes 62 library,
-  1 CLI, and 56 differential tests. Release builds, clippy, a Windows-hosted
+  library, 1 CLI, and 91 differential tests; Linux-under-WSL passes 62 library,
+  1 CLI, and 61 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and

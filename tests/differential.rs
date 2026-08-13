@@ -1930,6 +1930,99 @@ fn missingdeps_matches_ninja_output_and_exit_status() {
     }
 }
 
+#[test]
+fn missingdeps_without_targets_scans_only_default_closures_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let mut expected_default = None;
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            concat!(
+                "rule generate\n",
+                "  command = @PYTHON@ -c \"from pathlib import Path; Path('$out').write_text('generated')\"\n",
+                "rule compile\n",
+                "  command = @PYTHON@ -c \"from pathlib import Path; Path('$out').write_text('object'); Path('${out}.d').write_text('${out}$: $header\\n')\"\n",
+                "  depfile = ${out}.d\n  deps = gcc\n",
+                "build generated.h: generate\n",
+                "build default.o: compile default.c\n  header = source.h\n",
+                "build unrelated.o: compile unrelated.c\n  header = generated.h\n",
+                "default default.o\n",
+            )
+            .replace("@PYTHON@", python),
+        )
+        .unwrap();
+        fs::write(temp.path().join("default.c"), "source\n").unwrap();
+        fs::write(temp.path().join("unrelated.c"), "source\n").unwrap();
+        fs::write(temp.path().join("source.h"), "header\n").unwrap();
+
+        for targets in [&["generated.h"][..], &["default.o", "unrelated.o"][..]] {
+            let built = run(executable, temp.path(), targets);
+            assert!(
+                built.status.success(),
+                "{} stdout={} stderr={}",
+                executable.display(),
+                String::from_utf8_lossy(&built.stdout),
+                String::from_utf8_lossy(&built.stderr)
+            );
+        }
+
+        let default_scan = run(executable, temp.path(), &["-t", "missingdeps"]);
+        assert!(default_scan.status.success(), "{}", executable.display());
+        assert!(!String::from_utf8_lossy(&default_scan.stdout).contains("Missing dep:"));
+        let result = String::from_utf8_lossy(&default_scan.stdout).replace('\r', "");
+        if let Some(expected) = &expected_default {
+            assert_eq!(&result, expected);
+        } else {
+            expected_default = Some(result);
+        }
+
+        let unrelated = run(
+            executable,
+            temp.path(),
+            &["-t", "missingdeps", "unrelated.o"],
+        );
+        assert_eq!(unrelated.status.code(), Some(3), "{}", executable.display());
+        assert!(String::from_utf8_lossy(&unrelated.stdout).contains("Missing dep:"));
+    }
+}
+
+#[test]
+fn missingdeps_scans_plain_depfiles_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let ninja = Path::new(&ninja);
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("build.ninja"),
+        concat!(
+            "rule generate\n  command = echo generated\n",
+            "build generated.h: generate\n",
+            "build out: generate source\n  depfile = out.d\n",
+        ),
+    )
+    .unwrap();
+    fs::write(temp.path().join("out.d"), "out: generated.h\n").unwrap();
+
+    let arguments = ["-t", "missingdeps", "out"];
+    let expected = run(ninja, temp.path(), &arguments);
+    let actual = run(knight, temp.path(), &arguments);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout).replace('\r', ""),
+        String::from_utf8_lossy(&expected.stdout).replace('\r', "")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
 #[cfg(windows)]
 #[test]
 fn commands_and_compdb_options_match_ninja() {
@@ -3873,6 +3966,210 @@ fn clean_phony_rule_removes_phony_paths_like_ninja() {
         }
         assert!(!temp.path().join("alias").exists());
         assert!(temp.path().join("input").exists());
+    }
+}
+
+#[test]
+fn cleandead_preserves_outputs_that_are_still_inputs_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "rule generate\n  command = echo generated\nbuild current: generate source | former\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(".ninja_log"),
+            "# ninja log v7\n0\t1\t0\tformer\t0\n0\t1\t0\tcurrent\t0\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("former"), "still live\n").unwrap();
+        fs::write(temp.path().join("current"), "current\n").unwrap();
+
+        let cleaned = run(executable, temp.path(), &["-t", "cleandead"]);
+        assert!(cleaned.status.success(), "{}", executable.display());
+        assert_eq!(
+            String::from_utf8_lossy(&cleaned.stdout).replace('\r', ""),
+            "Cleaning... 0 files.\n"
+        );
+        assert!(temp.path().join("former").exists());
+        assert!(temp.path().join("current").exists());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn build_log_read_errors_fail_metadata_tools_like_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("build.ninja"), "build out: phony\n").unwrap();
+        fs::create_dir(temp.path().join(".ninja_log")).unwrap();
+        let output = run(executable, temp.path(), &["-n"]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "build {}",
+            executable.display()
+        );
+        assert!(output.stdout.is_empty(), "build {}", executable.display());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("loading build log .ninja_log"),
+            "build {}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for tool in ["cleandead", "restat", "recompact"] {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join("build.ninja"), "build out: phony\n").unwrap();
+            fs::create_dir(temp.path().join(".ninja_log")).unwrap();
+            let output = run(executable, temp.path(), &["-t", tool]);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{tool} {}",
+                executable.display()
+            );
+            assert!(output.stdout.is_empty(), "{tool} {}", executable.display());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("loading build log .ninja_log"),
+                "{tool} {}: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn build_log_directories_follow_ninjas_posix_behavior() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for arguments in [
+        &["-n"][..],
+        &["-t", "cleandead"][..],
+        &["-t", "restat"][..],
+        &["-t", "recompact"][..],
+    ] {
+        let mut expected = None;
+        for executable in [Path::new(&ninja), knight] {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join("build.ninja"), "build out: phony\n").unwrap();
+            fs::create_dir(temp.path().join(".ninja_log")).unwrap();
+            let output = run(executable, temp.path(), arguments);
+            let result = (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout)
+                    .replace('\r', "")
+                    .replace("ninja:", "tool:")
+                    .replace("knight:", "tool:"),
+                output.stderr.is_empty(),
+            );
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected, "{arguments:?}");
+            } else {
+                expected = Some(result);
+            }
+        }
+    }
+}
+
+#[test]
+fn deps_log_errors_and_tool_loading_phases_match_ninja() {
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    for executable in [Path::new(&ninja), knight] {
+        #[cfg(windows)]
+        for arguments in [
+            &["-n"][..],
+            &["-t", "query", "out"][..],
+            &["-t", "deps"][..],
+            &["-t", "missingdeps", "out"][..],
+            &["-t", "recompact"][..],
+        ] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                "build out: phony input\ndefault out\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join(".ninja_deps")).unwrap();
+            let output = run(executable, temp.path(), arguments);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{arguments:?} {}",
+                executable.display()
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{arguments:?} {}",
+                executable.display()
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("loading deps log .ninja_deps"),
+                "{arguments:?} {}: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        for arguments in [
+            &["-t", "commands", "out"][..],
+            &["-t", "inputs", "out"][..],
+            &["-t", "graph", "out"][..],
+            &["-t", "compdb-targets", "out"][..],
+        ] {
+            let temp = tempdir().unwrap();
+            fs::write(
+                temp.path().join("build.ninja"),
+                "build out: phony input\ndefault out\n",
+            )
+            .unwrap();
+            fs::create_dir(temp.path().join(".ninja_deps")).unwrap();
+            let output = run(executable, temp.path(), arguments);
+            assert!(
+                output.status.success(),
+                "{arguments:?} {}: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("build.ninja"),
+            "build out: phony\ndefault out\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join(".ninja_deps"), "invalid\n").unwrap();
+        let output = run(executable, temp.path(), &["-n"]);
+        assert!(output.status.success(), "{}", executable.display());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("warning: bad deps log signature or version; starting over"),
+            "{}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!temp.path().join(".ninja_deps").exists());
     }
 }
 
