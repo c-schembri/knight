@@ -4989,6 +4989,58 @@ fn smart_terminal_status_and_output_framing_match_ninja() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn smart_terminal_status_elision_matches_ninja() {
+    fn shell_word(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    fn run_in_pty(executable: &Path, directory: &Path, arguments: &[&str], width: usize) -> Output {
+        let command = std::iter::once(executable.to_string_lossy().into_owned())
+            .chain(arguments.iter().map(|argument| (*argument).to_owned()))
+            .map(|argument| shell_word(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Command::new("script")
+            .current_dir(directory)
+            .args([
+                "-qfec",
+                &format!("stty cols {width}; {command}"),
+                "/dev/null",
+            ])
+            .env("TERM", "xterm")
+            .output()
+            .unwrap()
+    }
+
+    let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {
+        eprintln!("skipped: set KNIGHT_NINJA to run differential tests");
+        return;
+    };
+    let knight = Path::new(env!("CARGO_BIN_EXE_knight"));
+    let temp = tempdir().unwrap();
+    for (name, description) in [
+        ("plain", "012345678901234567890123456789"),
+        ("ansi", "012345\x1b[0;35m678901234567890123456789\x1b[0m"),
+    ] {
+        fs::write(
+            temp.path().join("build.ninja"),
+            format!(
+                "rule run\n  command = echo 012345678901234567890123456789\n  description = {description}\nbuild out: run\ndefault out\n"
+            ),
+        )
+        .unwrap();
+        for arguments in [&["-n", "-j1"][..], &["-n", "-j1", "-v"][..]] {
+            let expected = run_in_pty(Path::new(&ninja), temp.path(), arguments, 20);
+            let actual = run_in_pty(knight, temp.path(), arguments, 20);
+            assert!(expected.status.success() && actual.status.success());
+            assert_eq!(actual.stdout, expected.stdout, "{name} {arguments:?}");
+            assert_eq!(actual.stderr, expected.stderr, "{name} {arguments:?}");
+        }
+    }
+}
+
 #[test]
 fn top_level_short_option_clusters_match_ninja() {
     let Some(ninja) = std::env::var_os("KNIGHT_NINJA") else {

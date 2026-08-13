@@ -318,3 +318,14 @@ Instrumentation on the 30,000-edge case attributes about
 19.3 ms to manifest parsing, 9.7 ms to filesystem stat, 7.5 ms to scheduler-
 graph construction, and 47.4 ms to edge evaluation. This path is approaching,
 but has not reached, the project-wide 10x requirement.
+
+## Terminal status elision
+
+The Criterion `elide_middle/upstream_sweep` benchmark applies every nonzero
+width to Ninja's three upstream plain and ANSI-colored inputs. Knight completes
+the 82-call sweep in 4.178 us (95% estimate 4.166-4.194 us). Ninja's upstream
+`elide_middle_perftest`, compiled with Clang `-O3` on the same Windows host,
+averages 13.3 ms for 2,000 equivalent sweeps, or 6.65 us per sweep. Knight is
+about 37% faster on this scoped path. The harnesses reflect each implementation's
+real API shape: Ninja copies each mutable input string, while Knight accepts a
+borrowed byte slice and returns a copy-on-write result.

@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use knight_build::build::filter_msvc_output;
+use knight_build::build::{elide_middle, filter_msvc_output};
 use knight_build::dyndep::parse_dyndep;
 use knight_build::parse_manifest;
 use std::collections::BTreeSet;
@@ -97,10 +97,28 @@ fn msvc_filter_benchmark(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn elide_middle_benchmark(criterion: &mut Criterion) {
+    let inputs = [
+        "01234567890123456789",
+        "012345\x1b[0;35m67890123456789",
+        "abcd\x1b[1;31mefg\x1b[0mhlkmnopqrstuvwxyz",
+    ];
+    criterion.bench_function("elide_middle/upstream_sweep", |bench| {
+        bench.iter(|| {
+            for input in inputs {
+                for width in (1..=input.len()).rev() {
+                    std::hint::black_box(elide_middle(input.as_bytes(), width));
+                }
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     parse_benchmark,
     dyndep_parse_benchmark,
-    msvc_filter_benchmark
+    msvc_filter_benchmark,
+    elide_middle_benchmark
 );
 criterion_main!(benches);

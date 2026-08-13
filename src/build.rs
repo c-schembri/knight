@@ -4892,6 +4892,146 @@ fn append_build_text(buffer: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
+fn ansi_color_sequence(input: &[u8], mut from: usize) -> Option<(usize, usize)> {
+    while from < input.len() {
+        let start = input[from..].iter().position(|byte| *byte == b'\x1b')? + from;
+        if start + 4 > input.len() {
+            return None;
+        }
+        if input[start + 1] != b'[' {
+            from = start + 1;
+            continue;
+        }
+
+        let mut end = start + 2;
+        while end < input.len() && (input[end].is_ascii_digit() || input[end] == b';') {
+            end += 1;
+        }
+        if end == input.len() {
+            return None;
+        }
+        if input[end] == b'm' {
+            return Some((start, end + 1));
+        }
+        from = start + 3;
+    }
+    None
+}
+
+struct VisibleInputBytes<'a> {
+    input: &'a [u8],
+    input_index: usize,
+    visible_position: usize,
+    sequence: Option<(usize, usize)>,
+}
+
+impl<'a> VisibleInputBytes<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self {
+            input,
+            input_index: 0,
+            visible_position: 0,
+            sequence: ansi_color_sequence(input, 0),
+        }
+    }
+
+    fn has_byte(&self) -> bool {
+        self.input_index < self.input.len()
+    }
+
+    fn is_visible(&self) -> bool {
+        !self
+            .sequence
+            .is_some_and(|(start, end)| (start..end).contains(&self.input_index))
+    }
+
+    fn next(&mut self) {
+        self.visible_position += usize::from(self.is_visible());
+        self.input_index += 1;
+        if self
+            .sequence
+            .is_some_and(|(_, end)| self.input_index == end)
+        {
+            self.sequence = ansi_color_sequence(self.input, self.input_index);
+        }
+    }
+}
+
+pub fn elide_middle(input: &[u8], max_width: usize) -> Cow<'_, [u8]> {
+    if input.len() <= max_width {
+        return Cow::Borrowed(input);
+    }
+    if !input.contains(&b'\x1b') {
+        if max_width <= 3 {
+            return Cow::Owned(vec![b'.'; max_width]);
+        }
+        let remaining = max_width - 3;
+        let left = remaining / 2;
+        let right = remaining - left;
+        let mut result = Vec::with_capacity(max_width);
+        result.extend_from_slice(&input[..left]);
+        result.extend_from_slice(b"...");
+        result.extend_from_slice(&input[input.len() - right..]);
+        return Cow::Owned(result);
+    }
+
+    let mut visible_width = input.len();
+    let mut sequence = ansi_color_sequence(input, 0);
+    while let Some((start, end)) = sequence {
+        visible_width -= end - start;
+        sequence = ansi_color_sequence(input, end);
+    }
+    if visible_width <= max_width {
+        return Cow::Borrowed(input);
+    }
+
+    let ellipsis_width = max_width.min(3);
+    let left_width = (max_width - ellipsis_width) / 2;
+    let right_width = max_width - ellipsis_width - left_width;
+    let gap_end = visible_width - right_width;
+    let mut bytes = VisibleInputBytes::new(input);
+    while bytes.has_byte() && bytes.visible_position != left_width {
+        bytes.next();
+    }
+
+    let mut result = Vec::with_capacity(input.len());
+    result.extend_from_slice(&input[..bytes.input_index]);
+    result.extend_from_slice(&b"..."[..ellipsis_width]);
+    while bytes.has_byte() && bytes.visible_position != gap_end {
+        if !bytes.is_visible() {
+            result.push(input[bytes.input_index]);
+        }
+        bytes.next();
+    }
+    result.extend_from_slice(&input[bytes.input_index..]);
+    Cow::Owned(result)
+}
+
+#[cfg(windows)]
+fn terminal_width() -> Option<usize> {
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
+    };
+
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    (unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 && info.dwSize.X > 0)
+        .then_some(info.dwSize.X as usize)
+}
+
+#[cfg(unix)]
+fn terminal_width() -> Option<usize> {
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    (unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0
+        && size.ws_col > 0)
+        .then_some(size.ws_col as usize)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminal_width() -> Option<usize> {
+    None
+}
+
 impl BuildOutput {
     fn new(fancy_status: bool, buffer_redirected_output: bool) -> Self {
         let is_terminal = io::stdout().is_terminal();
@@ -4951,7 +5091,11 @@ impl BuildOutput {
                 .write_all(b"\r")
                 .map_err(|error| format!("writing build status: {error}"))?;
         }
-        write_build_text(&mut stdout, line.as_bytes())
+        let elided = (self.smart_terminal && !full)
+            .then(terminal_width)
+            .flatten()
+            .map(|width| elide_middle(line.as_bytes(), width));
+        write_build_text(&mut stdout, elided.as_deref().unwrap_or(line.as_bytes()))
             .map_err(|error| format!("writing build status: {error}"))?;
         if self.smart_terminal && !full {
             stdout
@@ -5197,6 +5341,138 @@ mod tests {
             rendered,
             "[% 2/4 1 1 2  25% 0.5 ? 2.000 00:02 6.000 00:06  25%] compile"
         );
+
+        let rendered = StatusFormatter::new(1)
+            .format(
+                "[%%/e%e]",
+                false,
+                StatusSnapshot {
+                    started: 0,
+                    finished: 0,
+                    running: 0,
+                    total: 0,
+                    description: "",
+                    elapsed: Duration::ZERO,
+                },
+            )
+            .unwrap();
+        assert_eq!(rendered, "[%/e0.000]");
+        let rendered = StatusFormatter::new(1)
+            .format(
+                "[%%/e%w]",
+                false,
+                StatusSnapshot {
+                    started: 0,
+                    finished: 0,
+                    running: 0,
+                    total: 0,
+                    description: "",
+                    elapsed: Duration::ZERO,
+                },
+            )
+            .unwrap();
+        assert_eq!(rendered, "[%/e00:00]");
+        let rendered = StatusFormatter::new(1)
+            .format(
+                "[%%/s%s/t%t/r%r/u%u/f%f]",
+                false,
+                StatusSnapshot {
+                    started: 0,
+                    finished: 0,
+                    running: 0,
+                    total: 0,
+                    description: "",
+                    elapsed: Duration::ZERO,
+                },
+            )
+            .unwrap();
+        assert_eq!(rendered, "[%/s0/t0/r0/u0/f0]");
+    }
+
+    #[test]
+    fn upstream_elide_middle_corpus() {
+        fn elide(input: &str, width: usize) -> Vec<u8> {
+            elide_middle(input.as_bytes(), width).into_owned()
+        }
+
+        let short = "Nothing to elide in this short string.";
+        assert_eq!(elide(short, 80), short.as_bytes());
+        assert_eq!(elide(short, 38), short.as_bytes());
+        assert_eq!(elide(short, 0), b"");
+        assert_eq!(elide(short, 1), b".");
+        assert_eq!(elide(short, 2), b"..");
+        assert_eq!(elide(short, 3), b"...");
+
+        let digits = "01234567890123456789";
+        for (width, expected) in [
+            (4, "...9"),
+            (5, "0...9"),
+            (9, "012...789"),
+            (10, "012...6789"),
+            (11, "0123...6789"),
+            (19, "01234567...23456789"),
+            (20, digits),
+        ] {
+            assert_eq!(elide(digits, width), expected.as_bytes());
+        }
+
+        let magenta = "\x1b[0;35m";
+        let nothing = "\x1b[m";
+        let red = "\x1b[1;31m";
+        let reset = "\x1b[0m";
+        let colored = format!("012345{magenta}67890123456789");
+        assert_eq!(
+            elide(&colored, 10),
+            format!("012...{magenta}6789").as_bytes()
+        );
+        assert_eq!(
+            elide(&colored, 19),
+            format!("012345{magenta}67...23456789").as_bytes()
+        );
+        assert_eq!(
+            elide(&format!("Nothing {nothing} string."), 18),
+            format!("Nothing {nothing} string.").as_bytes()
+        );
+        assert_eq!(
+            elide(&format!("0{nothing}1234567890123456789"), 10),
+            format!("0{nothing}12...6789").as_bytes()
+        );
+
+        let colored = format!("abcd{red}efg{reset}hlkmnopqrstuvwxyz");
+        for (width, expected) in [
+            (0, format!("{red}{reset}")),
+            (1, format!(".{red}{reset}")),
+            (2, format!("..{red}{reset}")),
+            (3, format!("...{red}{reset}")),
+            (4, format!("...{red}{reset}z")),
+            (5, format!("a...{red}{reset}z")),
+            (6, format!("a...{red}{reset}yz")),
+            (7, format!("ab...{red}{reset}yz")),
+            (8, format!("ab...{red}{reset}xyz")),
+            (9, format!("abc...{red}{reset}xyz")),
+            (10, format!("abc...{red}{reset}wxyz")),
+            (11, format!("abcd...{red}{reset}wxyz")),
+            (12, format!("abcd...{red}{reset}vwxyz")),
+            (15, format!("abcd{red}ef...{reset}uvwxyz")),
+            (16, format!("abcd{red}ef...{reset}tuvwxyz")),
+            (17, format!("abcd{red}efg...{reset}tuvwxyz")),
+            (18, format!("abcd{red}efg...{reset}stuvwxyz")),
+            (19, format!("abcd{red}efg{reset}h...stuvwxyz")),
+        ] {
+            assert_eq!(elide(&colored, width), expected.as_bytes(), "width={width}");
+        }
+
+        let colored = format!("abcdef{red}A{reset}BC");
+        for (width, expected) in [
+            (4, format!("...{red}{reset}C")),
+            (5, format!("a...{red}{reset}C")),
+            (6, format!("a...{red}{reset}BC")),
+            (7, format!("ab...{red}{reset}BC")),
+            (8, format!("ab...{red}A{reset}BC")),
+            (9, colored.clone()),
+        ] {
+            assert_eq!(elide(&colored, width), expected.as_bytes(), "width={width}");
+        }
     }
 
     #[test]
@@ -5307,6 +5583,16 @@ mod tests {
 
     #[test]
     fn eagerly_expanded_bindings_remain_literal_in_rule_expansion() {
+        let manifest = parse_manifest(
+            "rule cat\n  command = cat $in > $out\nbuild out: cat in1 in2\n",
+            "build.ninja",
+        )
+        .unwrap();
+        assert_eq!(
+            render_binding(&manifest, &manifest.edges[0], "command"),
+            "cat in1 in2 > out"
+        );
+
         let manifest = parse_manifest(
             "bar = X\nfoo = $$bar\nrule echo\n  command = echo $foo\nbuild out: echo\n",
             "build.ninja",

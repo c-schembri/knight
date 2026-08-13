@@ -128,7 +128,10 @@ This is an evidence ledger, not a claim of full compatibility.
   load limiting,
   `MAKEFLAGS=n`, `-j`, `-k`, `-l`, `-n`, `-v`, `--quiet`, `--status`, `-C`,
   and `-f`. Both classic `NINJA_STATUS` placeholders and Ninja 1.14
-  `--status` variables are supported. Getopt-style short-option clusters and
+  `--status` variables are supported. Both upstream `StatusTest` cases are
+  mapped directly, including escaped percent signs and zero elapsed time.
+  The upstream basic `State` command-expansion case is mapped directly as
+  well. Getopt-style short-option clusters and
   attached option values are accepted, non-positive `-k` is unlimited, and
   saturated and whitespace-prefixed `-j`/`-k` values follow `strtol`, while
   `-l` follows the platform C library's complete `strtod` grammar. Attached
@@ -261,6 +264,10 @@ This is an evidence ledger, not a claim of full compatibility.
   carriage-return start/finish refreshes, clear-to-end-of-line sequences, and
   final newline framing. Quiet, verbose, custom-status, dry-run, and unterminated
   command output modes have byte-for-byte PTY differential coverage.
+  Non-verbose status lines query the live terminal width and use Ninja's
+  ANSI-aware middle elision without wrapping. All three upstream
+  `ElideMiddle` cases are mapped directly, and 20-column plain, colored,
+  non-verbose, and verbose output matches Ninja in a real Linux PTY.
   MSVC dependency filtering recognizes bare CR, LF, and CRLF boundaries,
   retains prefix-only lines, and emits Ninja's deliberately LF-only filtered
   output on Windows without changing ordinary command-output text mode.
@@ -291,9 +298,9 @@ This is an evidence ledger, not a claim of full compatibility.
   input ordering, absent-output scheduling, dyndep diagnostics, child exit
   status 130, and signal-status cases. Wider upstream unit-test coverage is
   still being ported into differential tests.
-- Broader cross-platform runtime validation. The current Windows gates pass 67
-  library, 2 CLI, and 116 differential tests; Linux-under-WSL passes 66 library,
-  2 CLI, and 88 differential tests. Release builds, clippy, a Windows-hosted
+- Broader cross-platform runtime validation. The current Windows gates pass 71
+  library, 3 CLI, and 116 differential tests; Linux-under-WSL passes 70 library,
+  3 CLI, and 89 differential tests. Release builds, clippy, a Windows-hosted
   Linux target check, and a CMake no-op rebuild also pass locally; macOS and
   other Unix variants are not yet exercised in CI here.
   Ninja's upstream builddir-target (5/5), compdb-validation (5/5), and
